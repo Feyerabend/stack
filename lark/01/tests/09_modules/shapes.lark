@@ -1,0 +1,22 @@
+(* Module: Shapes — imported by 09_modules/main.lark
+   Covers: module declaration, export *)
+
+module Shapes
+
+export type Shape =
+  | Circle of Float
+  | Rect   of Float, Float
+
+let pi : Float = 3.14159
+
+export fn area(s : Shape) : Float =
+  match s with
+  | Circle(r)  => pi * r * r
+  | Rect(w, h) => w * h
+  end
+
+export fn perimeter(s : Shape) : Float =
+  match s with
+  | Circle(r)  => 2.0 * pi * r
+  | Rect(w, h) => 2.0 * (w + h)
+  end
