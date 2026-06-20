@@ -1,5 +1,5 @@
 
-## Lark--Lambda Affine Resource Kernel
+## Lark - Lambda Affine Resource Kernel
 
 Lark is a small, serious, purely functional language. It is built in this
 repository phase by phase, with each phase as a sealed snapshot you can run
@@ -38,16 +38,16 @@ Each numbered folder is self-contained and runnable.
 
 ### Phase summary
 
-| Folder | Phase | What | Book ch. | Status |
-|--------|-------|------|----------|--------|
-| `01/`  | 0  | Language design: EBNF grammar, acceptance tests, lexer | 3 | ✓ |
-| `02/`  | 2  | Frontend: hand-written LL(1) parser, AST dataclasses   | 4 | ✓ |
-| `03/`  | 3  | Type checker: Algorithm W + affine tracking + traits   | 5 | ✓ |
-| `04/`  | 4  | CEK interpreter: iterative, pattern matching, IO       | 6 | ✓ |
-| `05/`  | 5a | Compiler: TAC IR, RV32I backend, Pico 2W runtime       | 7, 9 | ✓ |
-| `06/`  | 6  | Hardening: differential tests, property tests, formal spec | 8, 11 | ✓ |
-| `07/`  | 7  | C CEK native runtime, REPL, nine standalone samples    | 10 | ✓ |
-| `formal/` | 5b | Type soundness proof in MLTT (lcore kernel)          | 11 | ✓ |
+| Folder    | Phase | What                                                       | Book ch. |
+|-----------|-------|------------------------------------------------------------|----------|
+| `01/`     | 0     | Language design: EBNF grammar, acceptance tests, lexer     | 3        |
+| `02/`     | 2     | Frontend: hand-written LL(1) parser, AST dataclasses       | 4        |
+| `03/`     | 3     | Type checker: Algorithm W + affine tracking + traits       | 5        |
+| `04/`     | 4     | CEK interpreter: iterative, pattern matching, IO           | 6        |
+| `05/`     | 5a    | Compiler: TAC IR, RV32I backend, Pico 2W runtime           | 7, 9     |
+| `06/`     | 6     | Hardening: differential tests, property tests, formal spec | 8, 11    |
+| `07/`     | 7     | C CEK native runtime, REPL, nine standalone samples        | 10       |
+| `formal/` | 5b    | Type soundness proof in MLTT (lcore kernel)                | 11       |
 
 Phase numbers skip from 0 to 2 because Phase 1 was originally planned as a
 formal specification before any code, then reordered: see
@@ -67,8 +67,8 @@ formal specification before any code, then reordered: see
 Every phase has a `Makefile`. From any numbered folder:
 
 ```sh
-make test          ## run acceptance tests + error tests
-make run FILE=tests/01_hello.lark   ## run one program (CEK backend)
+make test                           # run acceptance tests + error tests
+make run FILE=tests/01_hello.lark   # run one program (CEK backend)
 ```
 
 Phase 5+ add compiler targets:
