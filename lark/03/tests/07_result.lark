@@ -1,0 +1,36 @@
+(* Test 07 — Result type and error handling
+   Covers: parametric Result type, Ok and Err constructors,
+           pattern matching on Result, chaining operations
+   Expected output:
+     5
+     0
+     error: division by zero *)
+
+module Results
+
+type Result a b =
+  | Ok  of a
+  | Err of b
+
+fn safe_divide(x : Int, y : Int) : Result(Int, String) =
+  if y == 0 then Err("division by zero")
+  else Ok(x / y)
+
+fn unwrap_or(r : Result(Int, String), default : Int) : Int =
+  match r with
+  | Ok(n)  => n
+  | Err(_) => default
+  end
+
+fn show_result(r : Result(Int, String)) : String =
+  match r with
+  | Ok(n)  => show(n)
+  | Err(s) => "error: " + s
+  end
+
+fn main(io : IO) : IO =
+  let a   = safe_divide(10, 2) in
+  let b   = safe_divide(10, 0) in
+  let io  = print(io, show(unwrap_or(a, 0))) in
+  let io  = print(io, show(unwrap_or(b, 0))) in
+  print(io, show_result(safe_divide(1, 0)))

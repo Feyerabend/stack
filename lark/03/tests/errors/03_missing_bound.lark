@@ -1,0 +1,8 @@
+(* Error test 03 — Missing trait bound
+   Expected: type error — no Show instance for a,
+   cannot call show(x) without a Show a bound. *)
+
+module MissingBound
+
+fn print_any(io : IO, x : a) : IO =
+  print(io, show(x))

@@ -1,0 +1,46 @@
+(* Test 06 — Recursive list operations and higher-order functions
+   Covers: parametric type, recursive ADT, map, fold, lambda,
+           function passed as argument
+   Expected output:
+     15
+     5
+     2 4 6 8 10 *)
+
+module Lists
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Int) = {}
+
+fn fold(f : Int -> Int -> Int, acc : Int, xs : List(Int)) : Int =
+  match xs with
+  | Nil           => acc
+  | Cons(x, rest) => fold(f, f(acc, x), rest)
+  end
+
+fn map(f : Int -> Int, xs : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => Cons(f(x), map(f, rest))
+  end
+
+fn length(xs : List(Int)) : Int =
+  fold(fn(acc, _) => acc + 1, 0, xs)
+
+fn join(sep : String, xs : List(Int)) : String =
+  match xs with
+  | Nil                   => ""
+  | Cons(x, Nil)          => show(x)
+  | Cons(x, rest)         => show(x) + sep + join(sep, rest)
+  end
+
+fn main(io : IO) : IO =
+  let xs      = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil))))) in
+  let total   = fold(fn(acc, x) => acc + x, 0, xs) in
+  let count   = length(xs) in
+  let doubled = map(fn(x) => x * 2, xs) in
+  let io      = print(io, show(total)) in
+  let io      = print(io, show(count)) in
+  print(io, join(" ", doubled))
