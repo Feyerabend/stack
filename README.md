@@ -4,7 +4,7 @@
 
 ### The central question
 
-The book is not built around *how do I build a compiler?* but around a different question: *what kind of thinking does a programming language embody, and how does that thinking propagate from hardware up through syntax to the type system?* Language design could be treated as partly a philosophical problem rather than a solved engineering one--asking what a type system should be able to express, when a constraint counts as a safety property versus a limitation, and what ownership actually owns. These questions lack algorithmic answers but have precise ones, reachable through the propagative reasoning that compilers reward.
+The book is not built around *how do I build a compiler?* but around a different question: __what kind of thinking does a programming language embody, and how does that thinking propagate from hardware up through syntax to the type system?__ Language design could be treated as partly a philosophical problem rather than a solved engineering one--asking what a type system should be able to express, when a constraint counts as a safety property versus a limitation, and what ownership actually owns. These questions lack algorithmic answers but have precise ones, reachable through the propagative reasoning that compilers reward.
 
 ### Why the existing books don't fill the gap
 
