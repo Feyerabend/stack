@@ -26,7 +26,7 @@ Four commitments distinguish it:
 
 ### The language: Lark
 
-**Lark** — *Lambda Affine Resource Kernel* — is a small, purely functional language with Hindley-Milner type inference, affine ownership, and RISC-V as its compilation target. Its connection to Rust is explicit but bounded (Lark is not Rust), and it sits in a lineage of languages that treat ownership as a type-theoretic property rather than a runtime mechanism, including Clean and Cogent. Its closest research precedent is **Alms** (Tov and Pucella, 2011), OCaml extended with affine types; Lark is roughly Alms made compilable, using traits instead of a module system for structured polymorphism.
+**Lark** — *Lambda Affine Resource Kernel* — is a small, purely functional language with Hindley-Milner type inference, affine ownership, and RISC-V as its compilation target. Its connection to Rust is explicit but bounded (Lark is not Rust), and it sits in a lineage of languages that treat ownership as a type-theoretic property rather than a runtime mechanism, including Clean and Cogent. Its closest research precedent is [**Alms**](https://users.cs.northwestern.edu/~jesse/pubs/alms/) (Tov and Pucella, 2011), OCaml extended with affine types; Lark is roughly Alms made compilable, using traits instead of a module system for structured polymorphism.
 
 ### The LLM question
 
