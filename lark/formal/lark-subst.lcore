@@ -1,0 +1,218 @@
+-- lark-subst.lcore
+--
+-- Phase 5b: Semantic substitution for Lark's STLC.
+-- Checked by lcore (proof/code/core/).
+--
+-- Run:  cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-subst.lcore | grep -v "^--" | grep -v "^$" | ./lcore
+--
+-- CORRESPONDENCE TABLE
+-- ====================
+-- Every definition maps to a concrete piece of Lark's runtime or type system.
+--
+--   Lark source / runtime            lcore proof             location
+--   -------------------------------- ----------------------- ------------------
+--   CEK ENV  (name → value)          SemCtx Γ                cek.py Env
+--   env.lookup x                     sem_lookup v env         cek.py Var case
+--   canonical value (literal / fn)   dummy_expr t g           —
+--   subst x↦val in body              sub_ground e env         tac_vm.py eval
+--   is_value e                       IsVal e                  cek.py is_whnf
+--   e →β e'                          Step e e'               (reduction)
+--
+-- WHAT IS PROVED HERE:
+--   1. SemCtx and sem_lookup — semantic environments + variable lookup. COMPLETE.
+--      The SemCtx motive trick (motive unfolds definitionally via indrec Ctx)
+--      is the key insight that avoids index refinement for the here/there cases.
+--
+--   2. dummy_expr — canonical term of any type. COMPLETE.
+--
+--   3. SemCtx_d, sem_lookup_d, weaken_semctx_d — open semantic environments
+--      parametrised by the output context d. When d = empty these coincide
+--      definitionally with SemCtx and sem_lookup. COMPLETE.
+--
+--   4. sub_open — generalised substitution into any output context d. COMPLETE.
+--      Motive: M g t _ = Π(d : Ctx). SemCtx_d d g → Expr d t
+--      ELam case: uses the kernel-level weaken primitive to lift env entries,
+--      then places the lambda param as EVar (here d a1) in the result body.
+--      This fully resolves the ELam gap from the previous sub_ground.
+--
+--   5. sub_ground — semantic substitution, now defined as sub_open at d=empty.
+--      COMPLETE and CORRECT for ALL cases including ELam. COMPLETE.
+--
+--   6. IsVal — closed-value predicate. COMPLETE.
+--
+-- KERNEL PRIMITIVE (C-level):
+--   weaken : Π(a : Ty). Π(g : Ctx). Π(t : Ty). Expr g t → Expr (ext a g) t
+--   Implemented in eval.c (weaken_expr_val) by structural recursion on the
+--   VL_INDCON tree, shifting de Bruijn indices with a cutoff parameter.
+--   This avoids the ext-commutativity definitional issue that blocked the
+--   previous indrec-based approach.
+
+-- -- SemCtx : semantic environments --------------------------------------------
+-- SemCtx g  is a snoc list pairing each Γ-variable with a closed expression.
+--
+--   SemCtx empty       =  Unit
+--   SemCtx (ext t g)   =  Σ(_ : Expr empty t). SemCtx g
+--
+-- Lark CEK analogue: the ENV component of a CEK state.
+-- The indrec Ctx computation rule makes SemCtx unfold definitionally,
+-- which is what enables sem_lookup to avoid needing Id proofs.
+
+:let SemCtx = (\g. indrec Ctx (\g1. Type : Ctx → Type_1) (Unit : Type) (\t. \g1. \ih. Σ(_ : Expr empty t). ih : Π(t : Ty). Π(g1 : Ctx). Type → Type) g : Ctx → Type)
+
+-- -- sem_lookup : variable lookup in SemCtx ------------------------------------
+-- sem_lookup g t v env  retrieves the expression for variable v from env.
+-- Mirrors infer.py / cek.py Var case: look up x in the environment.
+--
+-- KEY TRICK: motive  M g t _ = SemCtx g → Expr empty t
+--   SemCtx unfolds: SemCtx (ext t1 g1) = Σ(_ : Expr empty t1). SemCtx g1
+--   here case:  fst env : Expr empty t1  (no index equation needed!)
+--   there case: ih (snd env) via IH     (recurse on tail)
+-- This is the insight that avoids the index-refinement limitation of indrec.
+
+:let sem_lookup = (\g. \t. \v. indrec Var (\g1. \t1. \_. SemCtx g1 → Expr empty t1 : Π(g1 : Ctx). Π(t1 : Ty). Var g1 t1 → Type) (\g1. \t1. \env. fst env : Π(g1 : Ctx). Π(t1 : Ty). SemCtx (ext t1 g1) → Expr empty t1) (\g1. \t1. \s. \v1. \ih. \env. ih (snd env) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Var g1 t1 → (SemCtx g1 → Expr empty t1) → SemCtx (ext s g1) → Expr empty t1) v : Π(g : Ctx). Π(t : Ty). Var g t → SemCtx g → Expr empty t)
+
+-- -- dummy_expr : canonical term for any type -----------------------------------
+-- dummy_expr t g  produces a canonical expression of type t in context g.
+-- Defined by indrec Ty with motive  \t. Π(g : Ctx). Expr g t.
+-- No longer needed as an ELam placeholder (sub_open handles it correctly),
+-- but retained for testing and as a utility.
+
+:let dummy_expr = (\t. \g. indrec Ty (\t1. Π(g1 : Ctx). Expr g1 t1 : Ty → Type) (\g1. ELitInt g1 : Π(g1 : Ctx). Expr g1 TInt) (\g1. ELitFlt g1 : Π(g1 : Ctx). Expr g1 TFloat) (\g1. ELitBool g1 true : Π(g1 : Ctx). Expr g1 TBool) (\g1. ELitStr g1 : Π(g1 : Ctx). Expr g1 TStr) (\g1. EUnit g1 : Π(g1 : Ctx). Expr g1 TUnit) (\a. \ih_a. \b. \ih_b. \g1. ELam g1 a b (ih_b (ext a g1)) : Π(a : Ty). (Π(g1 : Ctx). Expr g1 a) → Π(b : Ty). (Π(g1 : Ctx). Expr g1 b) → Π(g1 : Ctx). Expr g1 (TFn a b)) t g : Π(t : Ty). Π(g : Ctx). Expr g t)
+
+-- -- SemCtx_d : open semantic environments -------------------------------------
+-- SemCtx_d d g  maps each Γ-variable to an Expr d t  (open in context d).
+-- SemCtx_d empty g = SemCtx g  definitionally.
+-- Used by sub_open to substitute into expressions that remain open in d.
+
+:let SemCtx_d = (\d. \g. indrec Ctx (\g1. Type : Ctx → Type_1) (Unit : Type) (\t. \g1. \ih. Σ(_ : Expr d t). ih : Π(t : Ty). Π(g1 : Ctx). Type → Type) g : Ctx → Ctx → Type)
+
+-- -- sem_lookup_d : variable lookup in SemCtx_d --------------------------------
+-- sem_lookup_d d g t v env_d  looks up variable v in an open environment.
+-- Structurally identical to sem_lookup; parametrised by output context d.
+
+:let sem_lookup_d = (\d. \g. \t. \v. indrec Var (\g1. \t1. \_. SemCtx_d d g1 → Expr d t1 : Π(g1 : Ctx). Π(t1 : Ty). Var g1 t1 → Type) (\g1. \t1. \env. fst env : Π(g1 : Ctx). Π(t1 : Ty). SemCtx_d d (ext t1 g1) → Expr d t1) (\g1. \t1. \s. \v1. \ih. \env. ih (snd env) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Var g1 t1 → (SemCtx_d d g1 → Expr d t1) → SemCtx_d d (ext s g1) → Expr d t1) v : Π(d : Ctx). Π(g : Ctx). Π(t : Ty). Var g t → SemCtx_d d g → Expr d t)
+
+-- -- weaken_semctx_d : lift all SemCtx_d entries by inserting a new binding ----
+-- weaken_semctx_d a d g env_d  applies  weaken a d t  to each Expr d t entry,
+-- producing  SemCtx_d (ext a d) g.
+-- Uses the kernel-level weaken primitive: weaken a d t : Expr d t → Expr (ext a d) t.
+
+:let weaken_semctx_d = (\a. \d. \g. indrec Ctx (\g1. SemCtx_d d g1 → SemCtx_d (ext a d) g1 : Ctx → Type) (\e. star : SemCtx_d d empty → SemCtx_d (ext a d) empty) (\t. \g1. \ih. \e. (weaken a d t (fst e), ih (snd e)) : Π(t : Ty). Π(g1 : Ctx). (SemCtx_d d g1 → SemCtx_d (ext a d) g1) → SemCtx_d d (ext t g1) → SemCtx_d (ext a d) (ext t g1)) g : Π(a : Ty). Π(d : Ctx). Π(g : Ctx). SemCtx_d d g → SemCtx_d (ext a d) g)
+
+-- -- sub_open : generalised substitution into any output context ----------------
+-- sub_open g t e d env_d : Expr d t
+-- Substitutes env_d (mapping Γ → Expr d) into e : Expr g t, producing Expr d t.
+-- Motive: M g t _ = Π(d : Ctx). SemCtx_d d g → Expr d t
+--
+-- ELam case (THE KEY FIX):
+--   The body bd : Expr (ext a g) b  needs  SemCtx_d (ext a d) (ext a g).
+--   We extend the environment with the lambda param as
+--     EVar (ext a d) a (here d a) : Expr (ext a d) a
+--   and weaken the existing env with weaken_semctx_d:
+--     weaken_semctx_d a d g env_d : SemCtx_d (ext a d) g
+--   Result: ELam d a b (ih_bd (ext a d) (EVar..., weakened_env))
+--
+-- All cases verified by lcore NbE.
+
+:let sub_open = (\g. \t. \e. \d. \env_d. indrec Expr (\g1. \t1. \_. Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 t1 : Π(g1 : Ctx). Π(t1 : Ty). Expr g1 t1 → Type) (\g1. \d1. \e1. ELitInt d1 : Π(g1 : Ctx). Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TInt) (\g1. \d1. \e1. ELitFlt d1 : Π(g1 : Ctx). Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TFloat) (\g1. \b. \d1. \e1. ELitBool d1 b : Π(g1 : Ctx). Π(b : Bool). Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TBool) (\g1. \d1. \e1. ELitStr d1 : Π(g1 : Ctx). Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TStr) (\g1. \d1. \e1. EUnit d1 : Π(g1 : Ctx). Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TUnit) (\g1. \t1. \v1. \d1. \e1. sem_lookup_d d1 g1 t1 v1 e1 : Π(g1 : Ctx). Π(t1 : Ty). Var g1 t1 → Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 t1) (\g1. \a1. \b1. \bd. \ih_bd. \d1. \e1. ELam d1 a1 b1 (ih_bd (ext a1 d1) (EVar (ext a1 d1) a1 (here d1 a1), weaken_semctx_d a1 d1 g1 e1)) : Π(g1 : Ctx). Π(a1 : Ty). Π(b1 : Ty). Expr (ext a1 g1) b1 → (Π(d1 : Ctx). SemCtx_d d1 (ext a1 g1) → Expr d1 b1) → Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 (TFn a1 b1)) (\g1. \a1. \b1. \f. \ih_f. \x. \ih_x. \d1. \e1. EApp d1 a1 b1 (ih_f d1 e1) (ih_x d1 e1) : Π(g1 : Ctx). Π(a1 : Ty). Π(b1 : Ty). Expr g1 (TFn a1 b1) → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 (TFn a1 b1)) → Expr g1 a1 → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 a1) → Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 b1) (\g1. \a1. \b1. \val. \ih_v. \bd. \ih_bd. \d1. \e1. ih_bd d1 (ih_v d1 e1, e1) : Π(g1 : Ctx). Π(a1 : Ty). Π(b1 : Ty). Expr g1 a1 → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 a1) → Expr (ext a1 g1) b1 → (Π(d1 : Ctx). SemCtx_d d1 (ext a1 g1) → Expr d1 b1) → Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 b1) (\g1. \t1. \c. \ih_c. \th. \ih_th. \el. \ih_el. \d1. \e1. EIf d1 t1 (ih_c d1 e1) (ih_th d1 e1) (ih_el d1 e1) : Π(g1 : Ctx). Π(t1 : Ty). Expr g1 TBool → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 TBool) → Expr g1 t1 → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 t1) → Expr g1 t1 → (Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 t1) → Π(d1 : Ctx). SemCtx_d d1 g1 → Expr d1 t1) e d env_d : Π(g : Ctx). Π(t : Ty). Expr g t → Π(d : Ctx). SemCtx_d d g → Expr d t)
+
+-- -- sub_ground : semantic substitution ----------------------------------------
+-- sub_ground g t e env  substitutes env : SemCtx g into e : Expr g t,
+-- producing a closed  Expr empty t.
+-- Now defined as  sub_open g t e empty env  (d = empty specialisation).
+-- SemCtx g = SemCtx_d empty g  definitionally, so no coercion is needed.
+-- CORRECT for ALL constructors including ELam. COMPLETE.
+
+:let sub_ground = (\g. \t. \e. \env. sub_open g t e empty env : Π(g : Ctx). Π(t : Ty). Expr g t → SemCtx g → Expr empty t)
+
+-- -- IsVal : closed-value predicate --------------------------------------------
+-- IsVal t e  holds when e : Expr empty t  is already a value.
+-- Mirrors cek.py is_whnf / is_value checks.
+--
+-- Values: literal integers, floats, booleans, strings, unit, and lambdas.
+-- Variables can never be values (Var empty t is uninhabited).
+-- EApp, ELet, EIf, EVar are never values — they need to step.
+
+data IsVal : Π(t : Ty). Expr empty t → Type where ValInt : IsVal TInt (ELitInt empty) ; ValFlt : IsVal TFloat (ELitFlt empty) ; ValBool : Π(b : Bool). IsVal TBool (ELitBool empty b) ; ValStr : IsVal TStr (ELitStr empty) ; ValUnit : IsVal TUnit (EUnit empty) ; ValLam : Π(a : Ty). Π(b : Ty). Π(body : Expr (ext a empty) b). IsVal (TFn a b) (ELam empty a b body)
+
+-- -- Smoke tests ----------------------------------------------------------------
+
+-- SemCtx normalises as expected
+:i SemCtx
+
+-- sem_lookup: retrieve first variable from a two-binding environment
+-- Γ = ext TInt (ext TBool empty),  env = (ELitInt empty, ELitBool empty true, star)
+:let env_ib = ((ELitInt empty, (ELitBool empty true, star)) : SemCtx (ext TInt (ext TBool empty)))
+:let v_int  = (here (ext TBool empty) TInt : Var (ext TInt (ext TBool empty)) TInt)
+:let v_bool = (there (ext TBool empty) TBool TInt (here empty TBool) : Var (ext TInt (ext TBool empty)) TBool)
+(sem_lookup (ext TInt (ext TBool empty)) TInt  v_int  env_ib)
+(sem_lookup (ext TInt (ext TBool empty)) TBool v_bool env_ib)
+
+-- dummy_expr produces canonical terms
+(dummy_expr TBool empty)
+(dummy_expr (TFn TInt TBool) empty)
+
+-- sub_ground: substitute ELitInt for the single variable in simple terms
+-- Γ = ext TInt empty,  env = (ELitInt empty, star)
+:let env_i = ((ELitInt empty, star) : SemCtx (ext TInt empty))
+
+-- x  [x := 42]  =  42
+(sub_ground (ext TInt empty) TInt (EVar (ext TInt empty) TInt (here empty TInt)) env_i)
+
+-- true  [x := 42]  =  true   (literal doesn't mention x)
+(sub_ground (ext TInt empty) TBool (ELitBool (ext TInt empty) true) env_i)
+
+-- if true then x else x  [x := 42]  =  if true then 42 else 42
+(sub_ground (ext TInt empty) TInt (EIf (ext TInt empty) TInt (ELitBool (ext TInt empty) true) (EVar (ext TInt empty) TInt (here empty TInt)) (EVar (ext TInt empty) TInt (here empty TInt))) env_i)
+
+-- let y : Bool = true in y  [x := 42]  =  true
+-- (ELet reduces the inner let; y gets true, then y = true is looked up)
+(sub_ground (ext TInt empty) TBool (ELet (ext TInt empty) TBool TBool (ELitBool (ext TInt empty) true) (EVar (ext TBool (ext TInt empty)) TBool (here (ext TInt empty) TBool))) env_i)
+
+-- sub_ground: EApp case
+-- Γ = ext (TFn TBool TBool) (ext TBool empty)
+-- env maps: innermost → identity fn, outer → true
+-- Expr: (f : TFn TBool TBool) applied to (b : TBool)
+-- Expected: EApp empty TBool TBool <identity> (ELitBool empty true)
+:let env_fb = ((ELam empty TBool TBool (EVar (ext TBool empty) TBool (here empty TBool)), (ELitBool empty true, star)) : SemCtx (ext (TFn TBool TBool) (ext TBool empty)))
+:let v_f = (here (ext TBool empty) (TFn TBool TBool) : Var (ext (TFn TBool TBool) (ext TBool empty)) (TFn TBool TBool))
+:let v_b = (there (ext TBool empty) TBool (TFn TBool TBool) (here empty TBool) : Var (ext (TFn TBool TBool) (ext TBool empty)) TBool)
+:let eapp_fv = (EApp (ext (TFn TBool TBool) (ext TBool empty)) TBool TBool (EVar (ext (TFn TBool TBool) (ext TBool empty)) (TFn TBool TBool) v_f) (EVar (ext (TFn TBool TBool) (ext TBool empty)) TBool v_b) : Expr (ext (TFn TBool TBool) (ext TBool empty)) TBool)
+(sub_ground (ext (TFn TBool TBool) (ext TBool empty)) TBool eapp_fv env_fb)
+
+-- sub_ground: ELam case — NOW CORRECT (no longer returns dummy_expr)
+-- Γ = ext TInt empty,  Expr: λ(b : Bool). true  (constant fn ignoring x)
+-- Expected: ELam empty TBool TBool (ELitBool (ext TBool empty) true)
+:let elam_const = (ELam (ext TInt empty) TBool TBool (ELitBool (ext TBool (ext TInt empty)) true) : Expr (ext TInt empty) (TFn TBool TBool))
+(sub_ground (ext TInt empty) (TFn TBool TBool) elam_const env_i)
+
+-- sub_ground: ELam case with variable use — THE KEY FIX
+-- Γ = ext TInt empty,  Expr: λ(b : Bool). b  (identity lambda, ignores x)
+-- Expected: ELam empty TBool TBool (EVar (ext TBool empty) TBool (here empty TBool))
+--   (lambda param stays as a variable in the weakened context)
+:let elam_id = (ELam (ext TInt empty) TBool TBool (EVar (ext TBool (ext TInt empty)) TBool (here (ext TInt empty) TBool)) : Expr (ext TInt empty) (TFn TBool TBool))
+(sub_ground (ext TInt empty) (TFn TBool TBool) elam_id env_i)
+
+-- weaken smoke tests (kernel primitive)
+-- weaken TBool empty TInt (ELitInt empty) = ELitInt (ext TBool empty)
+:let wk1 = (weaken TBool empty TInt (ELitInt empty) : Expr (ext TBool empty) TInt)
+:i wk1
+-- weaken TInt (ext TBool empty) TBool (EVar ...) shifts the variable
+:let wk2 = (weaken TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool)) : Expr (ext TInt (ext TBool empty)) TBool)
+:i wk2
+
+-- IsVal witnesses — all 6 constructors
+:let vval_int  = (ValInt : IsVal TInt (ELitInt empty))
+:let vval_flt  = (ValFlt : IsVal TFloat (ELitFlt empty))
+:let vval_bool_t = (ValBool true : IsVal TBool (ELitBool empty true))
+:let vval_bool_f = (ValBool false : IsVal TBool (ELitBool empty false))
+:let vval_str  = (ValStr : IsVal TStr (ELitStr empty))
+:let vval_unit = (ValUnit : IsVal TUnit (EUnit empty))
+:let vval_lam  = (ValLam TBool TBool (EVar (ext TBool empty) TBool (here empty TBool)) : IsVal (TFn TBool TBool) (ELam empty TBool TBool (EVar (ext TBool empty) TBool (here empty TBool))))
+:i vval_int
+:i vval_flt
+:i vval_bool_t
+:i vval_bool_f
+:i vval_str
+:i vval_unit
+:i vval_lam
