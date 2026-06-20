@@ -20,7 +20,7 @@ The foreword surveys four well-regarded texts and explains what each leaves unad
 Four commitments distinguish it:
 
 1. *Hardware is not abstracted away.* Real instruction sets appear as working systems with measurable costs--the 6502 as a historical "clarity instrument" whose constraints make hidden costs visible, and RISC-V as the modern target. By the end, programs run as native machine code on a Raspberry Pi Pico 2W.
-2. *Theory is earned, not assumed.* Type-theory content (Hindley-Milner inference, affine types, trait bounds) is introduced only when the implementation needs it, after the reader has seen what the implementation does without it. The author frames this as the correct epistemological ordering.
+2. *Theory is earned, not assumed.* Type-theory content (Hindley-Milner inference, affine types, trait bounds) is introduced only when the implementation needs it, after the reader has seen what the implementation does without it. We frame this as the correct epistemological ordering.
 3. *One language, start to finish.* Every chapter advances a single language rather than offering scattered illustrative fragments, so the reader finishes with something that works.
 4. *The safety argument is structural.* Following Rust's central insight, memory safety and ownership are enforced by the type system rather than a garbage collector. Affine types enter in Chapter 5 and shape every later decision through the code generator (Chapter 9) and the formal treatment (Chapter 11).
 
