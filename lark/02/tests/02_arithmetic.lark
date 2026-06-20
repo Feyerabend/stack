@@ -1,0 +1,25 @@
+(* Test 02 — Arithmetic and let bindings
+   Covers: top-level let, local let-in, function definition,
+           basic arithmetic, show built-in
+   Expected output:
+     42
+     36
+     7 *)
+
+module Arithmetic
+
+let x : Int = 6
+let y : Int = 7
+
+fn square(n : Int) : Int = n * n
+
+fn max(a : Int, b : Int) : Int =
+  if a > b then a else b
+
+fn main(io : IO) : IO =
+  let product = x * y in
+  let sq      = square(6) in
+  let largest = max(3, 7) in
+  let io      = print(io, show(product)) in
+  let io      = print(io, show(sq)) in
+  print(io, show(largest))
