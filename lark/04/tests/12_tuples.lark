@@ -1,0 +1,36 @@
+(* Test 12 — Tuples as first-class values
+   Covers: tuple construction, tuple return type, pattern matching
+           on tuples, wildcard in tuple pattern, swap via match
+   Expected output:
+     2
+     7
+     7
+     2 *)
+
+module Tuples
+
+fn fst(p : (Int, Int)) : Int =
+  match p with
+  | (x, _) => x
+  end
+
+fn snd(p : (Int, Int)) : Int =
+  match p with
+  | (_, y) => y
+  end
+
+fn swap(p : (Int, Int)) : (Int, Int) =
+  match p with
+  | (x, y) => (y, x)
+  end
+
+fn min_max(a : Int, b : Int) : (Int, Int) =
+  if a < b then (a, b) else (b, a)
+
+fn main(io : IO) : IO =
+  let p  = min_max(7, 2) in
+  let q  = swap(p) in
+  let io = print(io, show(fst(p))) in
+  let io = print(io, show(snd(p))) in
+  let io = print(io, show(fst(q))) in
+  print(io, show(snd(q)))
