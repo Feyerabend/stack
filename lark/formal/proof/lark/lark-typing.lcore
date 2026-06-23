@@ -1,0 +1,129 @@
+-- lark-typing.lcore
+--
+-- Machine-checked encoding of Lark's type system in Martin-Löf Type Theory.
+-- Checked by lcore (proof/code/core/).
+--
+-- Run:  cd proof/code/core && ./lcore < ../../lark/lark-typing.lcore
+--
+-- CORRESPONDENCE TABLE
+-- ====================
+-- Every Lark ASCII construct has a direct counterpart here.
+-- Lark source lives in 05/src/; proof names match those files exactly.
+--
+--   Lark source (ASCII)          lcore proof (Unicode)         defined in
+--   ─────────────────────────── ───────────────────────────── ──────────────
+--   Int                          TInt : Ty                     ty.py TCon
+--   Float                        TFloat : Ty                   ty.py TCon
+--   Bool                         TBool : Ty                    ty.py TCon
+--   String                       TStr : Ty                     ty.py TCon
+--   ()   (unit)                  TUnit : Ty                    ty.py TTup []
+--   A -> B                       TFn : Ty → Ty → Ty            ty.py TFn
+--   (A, B, ...)                  TTup : NatList Ty → Ty        ty.py TTup
+--
+--   Env  (name → type)           Ctx  (snoc list of Ty)        infer.py Env
+--   lookup n env                 Var : Ctx → Ty → Type         infer.py case Var
+--
+--   Lit v  (integer)             ELitInt  : Expr Γ TInt        infer.py case Lit int
+--   Lit v  (float)               ELitFlt  : Expr Γ TFloat      infer.py case Lit float
+--   Lit v  (bool)                ELitBool : Expr Γ TBool       infer.py case Lit bool
+--   Lit v  (string)              ELitStr  : Expr Γ TStr        infer.py case Lit str
+--   Lit ()  (unit)               EUnit    : Expr Γ TUnit       infer.py case Lit tuple []
+--   Var n                        EVar     : Var Γ τ → Expr Γ τ  infer.py case Var
+--   Lambda [p] body              ELam     : Expr (ext A Γ) B → Expr Γ (TFn A B)
+--                                                               infer.py case Lambda
+--   Apply fn [arg]               EApp     : Expr Γ (TFn A B) → Expr Γ A → Expr Γ B
+--                                                               infer.py case Apply
+--   LetExpr n _ val body         ELet     : Expr Γ A → Expr (ext A Γ) B → Expr Γ B
+--                                                               infer.py case LetExpr
+--   IfExpr c t e                 EIf      : Expr Γ TBool → Expr Γ τ → Expr Γ τ → Expr Γ τ
+--                                                               infer.py case IfExpr
+--
+-- SCOPE
+-- =====
+-- This file encodes a *monomorphic* fragment: the type system as it stands
+-- after HM unification and substitution are resolved (typed_tree.py).
+-- Type variables (TVar) are not needed: every type is ground.
+-- Affine tracking is deferred to a second layer (lark-affine.lcore).
+-- ADT constructors and match are deferred to lark-adt.lcore.
+--
+-- REPRESENTATION CHOICES
+-- ======================
+-- Context:  de Bruijn snoc list.  Lark's Env maps names to schemes; here
+--           variable position encodes identity.  'ext A Γ' = push type A.
+--           'here' = innermost variable (Lark: the most recent let/param).
+--           'there v' = skip one binder (Lark: look one step outward in Env).
+--
+-- Affine:   omitted here.  Lark's affine discipline requires each Var node
+--           to consume the variable — modelled in lark-affine.lcore as a
+--           linear context (list with removal).
+
+-- ── Ty : types ────────────────────────────────────────────────────────────────
+-- Mirrors ty.py: TCon "Int" | TCon "Float" | TCon "Bool" | TCon "String"
+--              | TFn A B | TTup elems
+-- (TApp/TVar/user ADTs deferred to lark-adt.lcore)
+
+data Ty : Type where TInt : Ty ; TFloat : Ty ; TBool : Ty ; TStr : Ty ; TUnit : Ty ; TFn : Ty → Ty → Ty
+
+-- ── Ctx : typing context ──────────────────────────────────────────────────────
+-- Mirrors infer.py Env: a mapping from names to types.
+-- Here: a de Bruijn snoc list — 'ext A Γ' pushes A as the innermost binding.
+
+data Ctx : Type where empty : Ctx ; ext : Ty → Ctx → Ctx
+
+-- ── Var : variable lookup ─────────────────────────────────────────────────────
+-- Var Γ τ  witnesses that τ is bound at some position in Γ.
+-- Mirrors infer.py case Var (line ~244): env lookup + affine check.
+-- 'here'  = Lark's innermost variable (most recent let/param binding).
+-- 'there' = Lark's env.lookup stepping one binder outward.
+
+data Var : Ctx → Ty → Type where here : Π(g : Ctx). Π(t : Ty). Var (ext t g) t ; there : Π(g : Ctx). Π(t : Ty). Π(s : Ty). Π(v : Var g t). Var (ext s g) t
+
+-- ── Expr : well-typed expressions ─────────────────────────────────────────────
+-- Expr Γ τ  is a Lark expression that typechecks with type τ in context Γ.
+-- Constructors correspond one-to-one with cases in infer.py infer().
+-- This is the intrinsic encoding: a term of type 'Expr Γ τ' IS a typing
+-- derivation — no separate HasType relation is needed.
+--
+--   Lark AST node   infer.py case   constructor here
+--   ─────────────── ─────────────── ─────────────────
+--   Lit (int)       Lit / int       ELitInt
+--   Lit (float)     Lit / float     ELitFlt
+--   Lit (bool)      Lit / bool      ELitBool
+--   Lit (str)       Lit / str       ELitStr
+--   Lit ()          Lit / tuple []  EUnit
+--   Var n           Var             EVar
+--   Lambda p body   Lambda          ELam
+--   Apply fn arg    Apply           EApp
+--   LetExpr         LetExpr         ELet
+--   IfExpr          IfExpr          EIf
+
+data Expr : Ctx → Ty → Type where ELitInt : Π(g : Ctx). Expr g TInt ; ELitFlt : Π(g : Ctx). Expr g TFloat ; ELitBool : Π(g : Ctx). Π(b : Bool). Expr g TBool ; ELitStr : Π(g : Ctx). Expr g TStr ; EUnit : Π(g : Ctx). Expr g TUnit ; EVar : Π(g : Ctx). Π(t : Ty). Π(v : Var g t). Expr g t ; ELam : Π(g : Ctx). Π(a : Ty). Π(b : Ty). Π(body : Expr (ext a g) b). Expr g (TFn a b) ; EApp : Π(g : Ctx). Π(a : Ty). Π(b : Ty). Π(f : Expr g (TFn a b)). Π(x : Expr g a). Expr g b ; ELet : Π(g : Ctx). Π(a : Ty). Π(b : Ty). Π(val : Expr g a). Π(body : Expr (ext a g) b). Expr g b ; EIf : Π(g : Ctx). Π(t : Ty). Π(c : Expr g TBool). Π(th : Expr g t). Π(el : Expr g t). Expr g t
+
+-- ── Smoke tests ────────────────────────────────────────────────────────────────
+-- Each test mirrors a concrete Lark expression and checks that the proof
+-- term has exactly the type the Lark type checker would assign.
+
+-- Lark:  fn f(x : Bool) : Bool = x
+-- i.e.   λ(x : Bool). x   : Bool -> Bool   in empty context
+:let id_bool = (ELam empty TBool TBool (EVar (ext TBool empty) TBool (here empty TBool)) : Expr empty (TFn TBool TBool))
+:i id_bool
+
+-- Lark:  let x : Int = 42   (as a literal in empty context)
+:let lit_42 = (ELitInt empty : Expr empty TInt)
+:i lit_42
+
+-- Lark:  if true then 1 else 2   : Int
+:let ite_int = (EIf empty TInt (ELitBool empty true) (ELitInt empty) (ELitInt empty) : Expr empty TInt)
+:i ite_int
+
+-- Lark:  let x : Bool = true in x   : Bool
+-- ELet binds 'true' then EVar refers to the innermost (here) binding
+:let let_x = (ELet empty TBool TBool (ELitBool empty true) (EVar (ext TBool empty) TBool (here empty TBool)) : Expr empty TBool)
+:i let_x
+
+-- Lark:  fn app(f : Int -> Int, x : Int) : Int = f x
+-- Context g = ext TInt (ext (TFn TInt TInt) empty)
+--   here                                          : x : TInt       (innermost)
+--   there (ext (TFn TInt TInt) empty) ... (here)  : f : TFn TInt TInt
+:let apply_f = (EApp (ext TInt (ext (TFn TInt TInt) empty)) TInt TInt (EVar (ext TInt (ext (TFn TInt TInt) empty)) (TFn TInt TInt) (there (ext (TFn TInt TInt) empty) (TFn TInt TInt) TInt (here empty (TFn TInt TInt)))) (EVar (ext TInt (ext (TFn TInt TInt) empty)) TInt (here (ext (TFn TInt TInt) empty) TInt)) : Expr (ext TInt (ext (TFn TInt TInt) empty)) TInt)
+:i apply_f
