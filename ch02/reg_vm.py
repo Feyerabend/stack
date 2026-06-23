@@ -1,5 +1,5 @@
 """
-Register VM - companion code for Chapter 2.
+Register VM — companion code for Chapter 2.
 
 A fourteen-instruction register machine with 16 registers (r0 hardwired to
 zero, r1 holds return values by convention).  Calling convention: arguments
@@ -16,7 +16,7 @@ Entry point:
     RegVM(code).run()  ->  value in r1 after RHALT
 """
 
-# -- Opcodes
+# ── Opcodes ───────────────────────────────────────────────────────────────────
 
 RHALT = 0   # stop; result is in r1
 RMOVI = 1   # rd, imm:       rd = imm
@@ -36,7 +36,7 @@ RRET  = 13  # rs:            return value in rs
 _THREE_REG = (RADD, RSUB, RMUL, RDIV, REQ, RLT)
 
 
-# -- Core VM
+# ── Core VM ───────────────────────────────────────────────────────────────────
 
 class RegVM:
     def __init__(self, code):
@@ -103,7 +103,7 @@ class RegVM:
                 raise ValueError(f"unknown opcode {op} at pc={self.pc - 1}")
 
 
-# -- Demo
+# ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # Both programs share the same layout:
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     #  37   RMOVI r1, 1        3 bytes  (base case)
     #  40   RRET  r1           2 bytes
 
-    # -- Buggy factorial (from the book)
+    # ── Buggy factorial (from the book) ───────────────────────────────────────
     #
     # RMOV r2, r5 sets r2 = n-1 before RCALL.  RCALL saves the register file
     # at that moment (r2 = n-1, not n).  When RRET restores it, r2 = n-1 again.
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     print(f"factorial(5) buggy  = {buggy_result}  (expected 120, bug gives {buggy_result})")
     assert buggy_result != 120, "buggy version should not give the right answer"
 
-    # -- Corrected factorial
+    # ── Corrected factorial ───────────────────────────────────────────────────
     #
     # Fix: save n into r6 before overwriting r2 with n-1.  When RRET restores
     # the caller's register file, r6 holds n (as it was at save time).

@@ -1,13 +1,13 @@
 """
-Control flow compilation - companion code for Chapter 2.
+Control flow compilation — companion code for Chapter 2.
 
 Shows how structured control flow compiles to the stack VM's jump
 instructions.  Four patterns, in order of complexity:
 
-  1. if/else       - JMPZ to else-branch, JMP over it
-  2. while         - back-edge JMP + JMPZ exit
-  3. switch chain  - O(n) sequential EQ tests, one JMPZ per case
-  4. switch table  - O(1) arithmetic dispatch via a computed jump
+  1. if/else       — JMPZ to else-branch, JMP over it
+  2. while         — back-edge JMP + JMPZ exit
+  3. switch chain  — O(n) sequential EQ tests, one JMPZ per case
+  4. switch table  — O(1) arithmetic dispatch via a computed jump
 
 The jump table needs one new instruction not in the base VM:
 
@@ -36,7 +36,7 @@ from stack_vm import (
 JMPIND = 16   # pop address from stack, jump there
 
 
-# -- Extended VM
+# ── Extended VM ───────────────────────────────────────────────────────────────
 
 class CFStackVM(StackVM):
     """StackVM with JMPIND for computed jumps."""
@@ -86,7 +86,7 @@ def _run(code, x):
     return vm.run()
 
 
-# -- Pattern 1: if/else
+# ── Pattern 1: if/else ────────────────────────────────────────────────────────
 #
 #   if x < 5:
 #       result = 10
@@ -95,7 +95,7 @@ def _run(code, x):
 #
 # Compiled form:
 #   <x < 5>
-#   JMPZ  else        ; false -> skip then-branch
+#   JMPZ  else        ; false → skip then-branch
 #   PUSH  10
 #   STORE 1
 #   JMP   end
@@ -123,13 +123,13 @@ _if_else = assemble([
 ])
 
 
-# -- Pattern 2: while
+# ── Pattern 2: while ──────────────────────────────────────────────────────────
 #
 #   while x > 0:
 #       x = x - 1
 #   result = x          # (always 0)
 #
-# Condition x > 0  ≡  0 < x  -> PUSH 0 / LOAD x / LT
+# Condition x > 0  ≡  0 < x  → PUSH 0 / LOAD x / LT
 #
 # Compiled form:
 #  loop:
@@ -163,7 +163,7 @@ _while = assemble([
 ])
 
 
-# -- Pattern 3: switch - if-else chain
+# ── Pattern 3: switch — if-else chain ─────────────────────────────────────────
 #
 #   switch x:
 #     case 0:  result = 10
@@ -172,7 +172,7 @@ _while = assemble([
 #     case 3:  result = 40
 #     default: result = 99
 #
-# Each case: load x, push case_value, EQ, JMPZ next_case - O(n) comparisons.
+# Each case: load x, push case_value, EQ, JMPZ next_case — O(n) comparisons.
 
 _switch_chain = assemble([
     ('LOAD',  0), ('PUSH', 0), ('EQ',), ('JMPZ', 'c1'),
@@ -193,14 +193,14 @@ _switch_chain = assemble([
 ])
 
 
-# -- Pattern 4: switch - jump table
+# ── Pattern 4: switch — jump table ───────────────────────────────────────────
 #
 # Same switch, but dispatched in O(1):
 #
 #   1. Bounds-check: if x >= 4, jump default.
 #   2. Multiply x by 3 (the byte width of each JMP instruction).
 #   3. Add the table base address.
-#   4. JMPIND - jump to the computed address.
+#   4. JMPIND — jump to the computed address.
 #
 # The jump table is a contiguous block of JMP instructions.  Entry k
 # holds JMP to case k.  No comparisons are performed.
@@ -210,26 +210,26 @@ _switch_chain = assemble([
 #   0   LOAD  0         push x
 #   2   PUSH  4
 #   4   LT              x < 4?
-#   5   JMPZ  0  57     -> default if x >= 4
+#   5   JMPZ  0  57     → default if x >= 4
 #   8   LOAD  0         push x
 #  10   PUSH  3
 #  12   MUL             x * 3
 #  13   PUSH  17        table base
 #  15   ADD             17 + x*3
 #  16   JMPIND          jump there
-#  -- jump table (addr 17, 4×3 = 12 bytes) --
+#  ── jump table (addr 17, 4×3 = 12 bytes) ──
 #  17   JMP  0  29      case 0
 #  20   JMP  0  36      case 1
 #  23   JMP  0  43      case 2
 #  26   JMP  0  50      case 3
-#  -- case bodies (7 bytes each) --
+#  ── case bodies (7 bytes each) ──
 #  29   PUSH 10  STORE 1  JMP 0 61    case 0
 #  36   PUSH 20  STORE 1  JMP 0 61    case 1
 #  43   PUSH 30  STORE 1  JMP 0 61    case 2
 #  50   PUSH 40  STORE 1  JMP 0 61    case 3
-#  -- default (addr 57) --
+#  ── default (addr 57) ──
 #  57   PUSH 99  STORE 1
-#  -- end (addr 61) --
+#  ── end (addr 61) ──
 #  61   LOAD 1  HALT
 
 _switch_table = [
@@ -244,7 +244,7 @@ _switch_table = [
     MUL,
     PUSH,  17,          # table base
     ADD,
-    JMPIND,             # -> table entry
+    JMPIND,             # → table entry
     # jump table (addr 17)
     JMP,  0,  29,       # case 0
     JMP,  0,  36,       # case 1
@@ -265,22 +265,22 @@ _switch_table = [
 ]
 
 
-# -- Demo
+# ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # if/else
-    assert _run(_if_else, 3)  == 10   # 3 < 5 -> then-branch
-    assert _run(_if_else, 7)  == 20   # 7 >= 5 -> else-branch
+    assert _run(_if_else, 3)  == 10   # 3 < 5 → then-branch
+    assert _run(_if_else, 7)  == 20   # 7 >= 5 → else-branch
     print("if/else:")
-    print(f"  x=3 -> {_run(_if_else, 3)}  (3 < 5, then-branch)")
-    print(f"  x=7 -> {_run(_if_else, 7)}  (7 ≥ 5, else-branch)")
+    print(f"  x=3 → {_run(_if_else, 3)}  (3 < 5, then-branch)")
+    print(f"  x=7 → {_run(_if_else, 7)}  (7 ≥ 5, else-branch)")
 
     # while
     assert _run(_while, 5) == 0
     print("\nwhile x > 0: x -= 1")
-    print(f"  x=5 -> {_run(_while, 5)}  (counted down to 0)")
+    print(f"  x=5 → {_run(_while, 5)}  (counted down to 0)")
 
-    # switch chain vs. switch table - same results for all inputs
+    # switch chain vs. switch table — same results for all inputs
     EXPECTED = {0: 10, 1: 20, 2: 30, 3: 40, 5: 99, 9: 99}
     print("\nswitch chain vs. jump table:")
     print(f"  {'x':>3}  {'chain':>6}  {'table':>6}")
@@ -292,6 +292,6 @@ if __name__ == "__main__":
         print(f"  {x:>3}  {chain:>6}  {table:>6}")
 
     print(f"\nchain: {len(_switch_chain)} bytes, "
-          f"4 cases -> up to 4 EQ comparisons per dispatch")
+          f"4 cases → up to 4 EQ comparisons per dispatch")
     print(f"table: {len(_switch_table)} bytes, "
-          f"any number of cases -> 1 multiply + 1 add + 1 JMPIND")
+          f"any number of cases → 1 multiply + 1 add + 1 JMPIND")

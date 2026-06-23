@@ -1,5 +1,5 @@
 """
-Two-pass assembler for the stack VM - companion code for Chapter 2.
+Two-pass assembler for the stack VM — companion code for Chapter 2.
 
 Input:  a list of items, each either a label string ("fact:") or an
         instruction tuple ("PUSH", 5) / ("CALL", "fact") / ("HALT",).
@@ -69,7 +69,7 @@ def assemble(program):
     return code
 
 
-# -- Demo
+# ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # Factorial in assembler source (from the book, Section 2.4).

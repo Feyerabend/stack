@@ -1,5 +1,5 @@
 """
-Stack VM - companion code for Chapter 2.
+Stack VM — companion code for Chapter 2.
 
 A fifteen-instruction stack machine.  Argument convention: caller pushes
 arguments onto the operand stack before CALL; callee stores them into local
@@ -9,7 +9,7 @@ Entry point:
     StackVM(code).run()  ->  value at top of stack, or None
 """
 
-# -- Opcodes
+# ── Opcodes ───────────────────────────────────────────────────────────────────
 
 HALT  = 0   # stop; top of stack is the return value
 PUSH  = 1   # push the next byte as an integer literal
@@ -28,7 +28,7 @@ CALL  = 13  # next two bytes: target; save frame, jump
 RET   = 14  # pop return value, restore frame, push it
 
 
-# -- Core VM
+# ── Core VM ───────────────────────────────────────────────────────────────────
 
 class StackVM:
     def __init__(self, code):
@@ -95,7 +95,7 @@ class StackVM:
                 raise ValueError(f"unknown opcode {op} at pc={self.pc - 1}")
 
 
-# -- Constant pool extension
+# ── Constant pool extension ───────────────────────────────────────────────────
 # The book presents this as a sketch showing the one new branch to add.
 # Here it is as a complete runnable class.
 
@@ -156,7 +156,7 @@ class StackVMWithPool(StackVM):
                 raise ValueError(f"unknown opcode {op} at pc={self.pc - 1}")
 
 
-# -- Demo
+# ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # 3 * (4 + 5) = 27
