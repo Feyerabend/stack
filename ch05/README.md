@@ -16,9 +16,7 @@ Sections §5.2 (Scope) and §5.8 (Type Errors as Design) have no standalone code
 here: scope is realised by the symbol-table chain of §5.1, and type-error
 reporting is part of Lark's checker itself.
 
-The Lark snapshot for this chapter is `lark/03/src/` — the type-checker phase
-(Algorithm W with affine tracking). The book's code listings show the hardened
-final version in `lark/07/src/infer.py` and `ty.py`.
-
-Broader background that supports the chapter without illustrating a single
-section lives in `extras/` (see `extras/README.md`).
+The Lark snapshot for this chapter is [lark/03/src/](./../lark/03/src/)
+— the type-checker phase (Algorithm W with affine tracking).
+The book's code listings show the hardened final version in
+[lark/07/src/infer.py](./../lark/07/src/infer.py) and `ty.py`.
