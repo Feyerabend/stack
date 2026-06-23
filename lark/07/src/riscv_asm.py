@@ -225,6 +225,11 @@ class LarkAssembler:
                 vals = [v.strip() for v in rest_b.split(',') if v.strip()]
                 addr += len(vals)
                 continue
+            if line.startswith('.p2align'):
+                n = int(line.split()[1])
+                align = 1 << n
+                addr = (addr + align - 1) & ~(align - 1)
+                continue
 
             # Instruction
             parts = line.replace(',', ' ').split()
@@ -273,6 +278,13 @@ class LarkAssembler:
                     if tok:
                         binary += struct.pack('B', self._parse_int(tok) & 0xFF)
                         addr += 1
+                continue
+            if line.startswith('.p2align'):
+                n = int(line.split()[1])
+                align = 1 << n
+                pad = (align - addr % align) % align
+                binary += bytes(pad)
+                addr += pad
                 continue
 
             parts = line.replace(',', ' ').split()

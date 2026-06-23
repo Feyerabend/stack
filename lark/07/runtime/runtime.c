@@ -19,7 +19,13 @@
 #  define LARK_HEAP_BYTES (64 * 1024)   /* 64 KB — adjust for target */
 #endif
 
-static uint8_t  _heap[LARK_HEAP_BYTES];
+/* The bump allocator only ever hands out 4-byte-multiple offsets, so the word
+ * writes below (p[0] = len/tag) and the compiled code's `sw` stay aligned ONLY
+ * IF the base of _heap is itself aligned.  A bare uint8_t[] has alignment 1: the
+ * linker may place it at any address, and a misaligned word access traps on real
+ * RISC-V (the Pico's Hazard3 core) even though the byte-indexed Python VM
+ * tolerates it.  Force the base to a word boundary (8 for headroom). */
+static uint8_t  _heap[LARK_HEAP_BYTES] __attribute__((aligned(8)));
 static uint32_t _heap_ptr = 0;
 
 lark_ptr __heap_alloc(int n_words) {
@@ -76,6 +82,18 @@ lark_ptr __show_float(uint32_t bits) {
     memcpy(&f, &bits, 4);
     char buf[32];
     snprintf(buf, sizeof(buf), "%.7g", f);
+    /* The Pico SDK's printf renders %g WITHOUT trimming trailing zeros
+     * (e.g. "8.500000"), whereas host libc — and the CEK/TAC backends — trim to
+     * "8.5".  Trim here so every backend agrees on hardware: drop trailing zeros
+     * after the decimal point, keeping at least one digit.  (No-op on host, where
+     * %g already trimmed; skipped for exponent / nan / inf forms.) */
+    {
+        char *dot = strchr(buf, '.');
+        if (dot && !strpbrk(buf, "eEni")) {
+            char *end = buf + strlen(buf) - 1;
+            while (end > dot + 1 && *end == '0') *end-- = '\0';
+        }
+    }
     /* Ensure a decimal point is present so the value reads as a float. */
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'n') && !strchr(buf, 'i')) {
         size_t n = strlen(buf);
