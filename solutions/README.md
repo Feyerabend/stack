@@ -1,4 +1,5 @@
-# Solutions
+
+## Solutions
 
 Worked solutions to the end-of-chapter exercises in
 *The Language Stack: From Silicon to Semantics*.
@@ -10,7 +11,7 @@ exercise and gives a worked answer; exercises that call for code get a runnable,
 verified script next to it.
 
 | Chapter | Solutions | Code solutions |
-|---|---|---|
+|---------|-----------|----------------|
 | 1 — The Hardware Machine | [`ch01/solutions/`](../ch01/solutions/solutions.md) | `ex02_loop.py` (+ Ex.1 in `ch01/fde.py`) |
 | 2 — A Virtual Machine in Software | [`ch02/solutions/`](../ch02/solutions/solutions.md) | `ex01_mod.py`, `ex02_trace.py`, `ex03_iterative_fact.py`, `ex04_callee_saved.py`, `ex05_dispatch.py` |
 | 3 — Lexical Analysis | [`ch03/solutions/`](../ch03/solutions/solutions.md) | `ex01_number_exponent.py`, `ex02_underscore_idents.py`, `ex03_cmp_dfa.py`, `ex04_line_comments.py` |
@@ -24,12 +25,12 @@ verified script next to it.
 | 11 — Correctness | [`ch11/solutions/`](../ch11/solutions/solutions.md) | `ex02_03_proof_check.py`, `ex04_testing_methods.py`, `ex05_affine_io.py` |
 | 12 — Types as Proofs | [`ch12/solutions/`](../ch12/solutions/solutions.md) | `ex01_curry_howard.py`, `ex02_dependent_types.py` |
 
-## Conventions
+### Conventions
 
-- **Restate, then solve.** Every entry quotes the exercise before answering, so
+- *Restate, then solve.* Every entry quotes the exercise before answering, so
   the file stands on its own.
-- **Code is verified.** Each script has a top docstring (which exercise, how to
+- *Code is verified.* Each script has a top docstring (which exercise, how to
   run, expected output) and asserts its own result, so `python3 <script>.py`
   either prints the expected line or fails loudly.
-- **Open-ended exercises** ("discuss…", "explain…") get a model answer plus a
+- *Open-ended exercises* ("discuss…", "explain…") get a model answer plus a
   note on what a strong answer covers, rather than a single key.
