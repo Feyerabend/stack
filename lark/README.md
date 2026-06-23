@@ -255,3 +255,11 @@ change. The overflow is documented and reproducible.
   these become the "Design Decision" sidebars in the book
 - `formal/proof/README.md` — the lcore MLTT kernel and the type soundness proof
 - `07/samples/` — nine standalone Lark programs with comments
+
+
+### License
+
+To the extent possible under law, Set Lonnert has waived all copyright and
+related or neighboring rights to Lark. The work is dedicated to the public
+domain under the Creative Commons CC0 1.0 Universal dedication; see the
+`LICENSE` file or <https://creativecommons.org/publicdomain/zero/1.0/>.

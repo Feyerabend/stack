@@ -38,3 +38,5 @@ The foreword confronts a 2026-specific objection: if large language models can g
 The book targets technically literate programmers who want to understand what underlies their language. It is not a first programming book; it assumes familiarity with Python or C (preferably both) and basic data structures, and suits advanced undergraduates, graduate students, and working practitioners.
 
 It stops at a defined point on the type-theory ladder: Hindley-Milner inference plus affine types plus trait-bounded polymorphism. The next rung named is *dependent types*, where the type checker and the proof checker become the same thing--the territory of Idris, Agda, and Lean. The Conclusion points readers who want to go further toward that rung.
+
+
