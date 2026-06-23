@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Union
 
 
-# -- Types
+# ── Types ─────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TName:
@@ -42,7 +42,7 @@ class TTuple:
 Type = Union[TName, TApply, TFn, TUnit, TTuple]
 
 
-# -- Patterns
+# ── Patterns ──────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class PWild:
@@ -72,7 +72,7 @@ class PTuple:
 Pat = Union[PWild, PVar, PLit, PCon, PTuple]
 
 
-# -- Expressions
+# ── Expressions ───────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Lit:
@@ -144,7 +144,7 @@ Expr = Union[Lit, Var, Con, TupleExpr, Apply, BinOp, UnaryOp,
              LetExpr, IfExpr, MatchExpr, Lambda]
 
 
-# -- Supporting structures
+# ── Supporting structures ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Param:
@@ -185,7 +185,7 @@ class ImplMethod:
     body:   Expr
 
 
-# -- Declarations
+# ── Declarations ──────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class FnDecl:
@@ -227,7 +227,7 @@ class ImplDecl:
 Decl = Union[FnDecl, LetDecl, TypeDecl, TraitDecl, ImplDecl]
 
 
-# -- Program
+# ── Program ───────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class ImportDecl:

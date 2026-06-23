@@ -1,11 +1,10 @@
-
-## Lark - Design Decisions
+# Lark — Design Decisions
 
 Rationale for every significant choice made in Phase 0 (language design) and
 Phase 2 (lexer and parser). Each entry explains what was decided, what was
 rejected, and why. These become the "Design Decision" sidebars in the book.
 
-
+---
 
 ## Language design
 
@@ -14,7 +13,7 @@ rejected, and why. These become the "Design Decision" sidebars in the book.
 Lark uses `in` to close `let` and `end` to close `match`. There is no
 indentation sensitivity.
 
-The alternative--Python-style significant whitespace--is friendlier in small
+The alternative — Python-style significant whitespace — is friendlier in small
 programs. But it requires the lexer to emit synthetic INDENT and DEDENT tokens
 and makes the grammar context-sensitive at the lexical level. The parser then
 has to handle two kinds of "end of block": an explicit token and an inferred
@@ -25,7 +24,7 @@ the grammar and the parser side by side without any special cases. The
 trade-off is slightly more typing for the programmer; the gain is a grammar you
 can hold in your head.
 
-
+---
 
 ### Copy as a trait
 
@@ -43,10 +42,10 @@ two flags (is it pure? is it a resource?) rather than one (does it implement
 
 Rust's experience with opt-in `Copy` is the deciding precedent. Resources are
 safe by default; the programmer explicitly opts data types into copyability.
-`IO` has no `Copy` impl--which is not a special case, just the ordinary
+`IO` has no `Copy` impl — which is not a special case, just the ordinary
 consequence of the rule.
 
-
+---
 
 ### Result type for errors
 
@@ -55,7 +54,7 @@ matching. There are no exceptions.
 
 Exceptions break referential transparency: a function that might throw is
 indistinguishable in its type from one that cannot. They also complicate the
-CEK machine semantics considerably--exception handling requires a special
+CEK machine semantics considerably — exception handling requires a special
 continuation frame and a mechanism for unwinding the stack.
 
 `Result` makes errors visible in types. The caller must pattern-match on the
@@ -65,7 +64,7 @@ threading `Result` values explicitly. A `?` operator (like Rust's) could be
 added as surface sugar later; for now the verbosity is pedagogically useful
 because it makes every error-handling decision visible.
 
-
+---
 
 ### File-level modules
 
@@ -73,8 +72,8 @@ Each `.lark` file is a module. `module Name` declares the module. `export`
 makes a declaration public. `import Name exposing (x, y)` brings names into
 scope.
 
-The alternative of having no module system--all standard library definitions
-in global scope--works for tiny programs but gives readers no model for
+The alternative of having no module system — all standard library definitions
+in global scope — works for tiny programs but gives readers no model for
 organizing larger ones. The book builds a complete language; the language should
 be organizable.
 
@@ -84,7 +83,7 @@ structured polymorphism instead, which covers most of what OCaml uses modules
 for. A file-level module system is the minimum needed for code organization
 without the full OCaml complexity.
 
-
+---
 
 ### Affine IO via resource threading
 
@@ -97,7 +96,7 @@ fn read(io : IO) : (IO, String) = ...
 
 The programmer threads the IO resource explicitly through every IO operation.
 Since `IO` has no `Copy` impl, the type checker ensures you cannot use the
-same IO token twice--which means you cannot have two interleaved threads of IO
+same IO token twice — which means you cannot have two interleaved threads of IO
 without explicit sequencing.
 
 The main alternatives are monadic IO (Haskell's approach) and algebraic effects
@@ -106,13 +105,13 @@ notation as surface sugar over `bind` and `return`, and asks the reader to
 understand monads before they can write a hello-world program. Algebraic effects
 require a separate effect system layered on top of the type system.
 
-Resource threading is the oldest and most direct approach--it is essentially
+Resource threading is the oldest and most direct approach — it is essentially
 what Clean's uniqueness types enforce. In Lark's context it has a clear
 advantage: it makes IO completely transparent. Every IO operation is a function
 call that takes and returns the IO token. The type checker enforces the sequencing
 by virtue of affinity alone. No special cases, no monads, no effect rows.
 
-
+---
 
 ## Lexer design
 
@@ -128,12 +127,12 @@ pattern matching: in `match e with | Nil => ... | Cons(x, rest) => ...`, the
 lexer tells the parser immediately that `Nil` and `Cons` are constructors and
 `x` and `rest` are binders. The parser needs no symbol table to parse a pattern.
 
-The alternative--a single identifier class, distinguished by context--forces
+The alternative — a single identifier class, distinguished by context — forces
 the parser to carry type information into pattern parsing, or to perform a
 post-parse disambiguation pass. Both are possible; neither is as simple as a
 lexical rule.
 
-
+---
 
 ### `()` as a single UNIT token
 
@@ -146,7 +145,7 @@ The alternative is to let the parser distinguish `()` from `( )` contextually.
 This works but adds two extra production rules to the grammar. Treating `()` as
 a lexical token keeps the grammar simpler and avoids any ambiguity.
 
-
+---
 
 ### Nested block comments
 
@@ -159,7 +158,7 @@ comment out a block of code that already contains comments without modification.
 OCaml supports them for the same reason. The implementation cost is one integer
 counter in the lexer.
 
-
+---
 
 ## Parser design
 
@@ -187,19 +186,19 @@ One limitation: recursive descent as written here does not handle left-recursive
 grammars directly. Lark's grammar is designed to avoid left recursion; operator
 expressions use the level-chain pattern described below.
 
-
+---
 
 ### Operator precedence via level-chain
 
 Binary operator precedence is encoded as a chain of five functions:
 
 ```
-_parse_or  ->  _parse_and  ->  _parse_compare  ->  _parse_add  ->  _parse_mul
+_parse_or  →  _parse_and  →  _parse_compare  →  _parse_add  →  _parse_mul
 ```
 
 Each function loops on its own operators and calls the next function for
 operands. This makes `*` bind tighter than `+` because `_parse_mul` is called
-by `_parse_add`--the tighter binding is a consequence of the call graph.
+by `_parse_add` — the tighter binding is a consequence of the call graph.
 
 The alternative is a Pratt parser (top-down operator precedence), which handles
 any number of precedence levels in a single function driven by a precedence
@@ -208,7 +207,7 @@ Lark has five precedence levels; the level-chain approach is simpler to explain
 and equally correct. Adding a new level means adding one function; the structure
 remains obvious.
 
-
+---
 
 ### Separate syntactic and typed AST
 
@@ -216,7 +215,7 @@ The parser produces a syntactic AST (`tree.py`). The type checker will produce
 a separate typed AST (`typed_tree.py`, Phase 3). They are distinct data
 structures that do not share node types.
 
-A single AST with optional type annotations--the simpler initial design--
+A single AST with optional type annotations — the simpler initial design —
 requires the type checker to either mutate the tree (problematic with frozen
 dataclasses) or carry a parallel map from node to type. Either approach makes
 the phase boundary invisible in the code and harder to test in isolation.
@@ -225,7 +224,7 @@ Separate trees make the boundary explicit: the parser's output is complete and
 correct without any type information. The type checker takes a syntactic program
 and produces a typed one. Each phase can be tested independently.
 
-
+---
 
 ### `_` in parameter position
 
@@ -233,7 +232,7 @@ The grammar defines `_` as a WILDCARD pattern token. The parser also accepts
 it in function parameter position (`fn(acc, _) => ...`), producing a `Param`
 with name `"_"`.
 
-This is a small pragmatic extension to the grammar--technically `_` is not
+This is a small pragmatic extension to the grammar — technically `_` is not
 a valid `name` (names must start with lowercase). But every functional language
 that has a wildcard pattern also allows it in lambda parameters, and forbidding
 it would produce confusing errors on natural code. The type checker can treat

@@ -1,0 +1,19 @@
+(* Test 03 — Direct recursion
+   Covers: recursive fn, if-then-else, integer arithmetic
+   Expected output:
+     3628800
+     55 *)
+
+module Recursion
+
+fn factorial(n : Int) : Int =
+  if n == 0 then 1
+  else n * factorial(n - 1)
+
+fn fib(n : Int) : Int =
+  if n < 2 then n
+  else fib(n - 1) + fib(n - 2)
+
+fn main(io : IO) : IO =
+  let io = print(io, show(factorial(10))) in
+  print(io, show(fib(10)))

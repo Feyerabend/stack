@@ -44,6 +44,14 @@ int  def_define(const char *name, const char *src);
  */
 int  def_define_nocheck(const char *name, const char *type_src, const char *expr_src);
 
+/*
+ * Parse expr_src and type_src, evaluate the annotation, and CHECK expr_src
+ * against it (bidirectionally) before registering as name.  The checked
+ * counterpart of def_define_nocheck: a definition whose body does not have the
+ * declared type is rejected (returns -1).  Returns the def index, or -1.
+ */
+int  def_define_checked(const char *name, const char *type_src, const char *expr_src);
+
 /* ── Inductive family table ────────────────────────────────────────────────
  *
  * User-declared inductive families are stored here, separate from the flat

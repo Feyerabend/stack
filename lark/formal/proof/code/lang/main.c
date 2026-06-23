@@ -322,7 +322,8 @@ static int process_line(const char *raw, const char *origin, int quiet) {
         char *fix_src = (char *)arena_alloc(&a, fix_len);
         snprintf(fix_src, fix_len, "fix (\\%s. %s)", lname, body_pp);
 
-        int idx = def_define_nocheck(lname, type_src, fix_src);
+        int idx = type_src ? def_define_checked(lname, type_src, fix_src)
+                           : def_define_nocheck(lname, NULL, fix_src);
         if (idx < 0) {
             if (origin)
                 fprintf(stderr, "%s: could not define '%s'\n", origin, lname);
@@ -392,7 +393,8 @@ static int process_line(const char *raw, const char *origin, int quiet) {
         }
         const char *pp_expr = preprocess(&a, rest);
 
-        int idx = def_define_nocheck(lname, pp_type, pp_expr);
+        int idx = pp_type ? def_define_checked(lname, pp_type, pp_expr)
+                          : def_define_nocheck(lname, NULL, pp_expr);
         if (idx < 0) {
             if (origin)
                 fprintf(stderr, "%s: could not define '%s'\n", origin, lname);

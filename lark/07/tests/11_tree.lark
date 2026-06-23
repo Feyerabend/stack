@@ -1,0 +1,40 @@
+(* Test 11 — Nested recursive ADT (binary tree)
+   Covers: type with two recursive fields, multi-field constructor
+           patterns, tree traversal, let inside match arm
+   Expected output:
+     6
+     3 *)
+
+module Tree
+
+type Tree =
+  | Leaf
+  | Node of Tree, Int, Tree
+
+impl Copy for Tree = {}
+
+fn sum(t : Tree) : Int =
+  match t with
+  | Leaf           => 0
+  | Node(l, x, r) => sum(l) + x + sum(r)
+  end
+
+fn depth(t : Tree) : Int =
+  match t with
+  | Leaf           => 0
+  | Node(l, _, r) =>
+    let ld = depth(l) in
+    let rd = depth(r) in
+    if ld > rd then ld + 1 else rd + 1
+  end
+
+fn main(io : IO) : IO =
+  let t =
+    Node(
+      Node(Leaf, 1, Leaf),
+      2,
+      Node(Node(Leaf, 3, Leaf), 0, Leaf)
+    )
+  in
+  let io = print(io, show(sum(t))) in
+  print(io, show(depth(t)))

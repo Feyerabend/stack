@@ -20,7 +20,7 @@ from typing import Union
 import ty
 
 
-# -- Typed expressions
+# ── Typed expressions ─────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TLit:
@@ -95,7 +95,7 @@ TExpr = Union[
 ]
 
 
-# -- Typed patterns
+# ── Typed patterns ────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TPWild:
@@ -125,7 +125,7 @@ class TPTuple:
 TPat = Union[TPWild, TPVar, TPLit, TPCon, TPTuple]
 
 
-# -- Typed declarations
+# ── Typed declarations ────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TFnDecl:
@@ -157,7 +157,7 @@ class TTypeDecl:
 TDecl = Union[TFnDecl, TLetDecl, TTypeDecl]
 
 
-# -- Typed program
+# ── Typed program ─────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TProgram:

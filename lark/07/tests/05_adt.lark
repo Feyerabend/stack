@@ -1,0 +1,35 @@
+(* Test 05 — Algebraic data types and pattern matching
+   Covers: type with multiple constructors, match-with-end,
+           wildcard pattern, nested match
+   Expected output:
+     78.53975
+     12.0
+     unknown *)
+
+module Adt
+
+type Shape =
+  | Circle of Float
+  | Rect   of Float, Float
+  | Point
+
+let pi : Float = 3.14159
+
+fn area(s : Shape) : Float =
+  match s with
+  | Circle(r)  => pi * r * r
+  | Rect(w, h) => w * h
+  | Point      => 0.0
+  end
+
+fn describe(s : Shape) : String =
+  match s with
+  | Circle(_) => "circle"
+  | Rect(_, _) => "rect"
+  | _          => "unknown"
+  end
+
+fn main(io : IO) : IO =
+  let io = print(io, show(area(Circle(5.0)))) in
+  let io = print(io, show(area(Rect(3.0, 4.0)))) in
+  print(io, describe(Point))

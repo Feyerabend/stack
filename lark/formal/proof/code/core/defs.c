@@ -59,6 +59,21 @@ int def_define_nocheck(const char *name, const char *type_src, const char *expr_
     return def_add(name_perm, type, val);
 }
 
+int def_define_checked(const char *name, const char *type_src, const char *expr_src) {
+    char *name_perm = arena_strdup(&perm, name);
+    Term *ty = parse(&perm, type_src);
+    if (!ty) return -1;
+    /* The annotation must itself be a well-formed type. */
+    if (!infer(&perm, 0, NULL, NULL, ty)) return -1;
+    Val *type = nbe_eval(&perm, NULL, ty);
+    Term *t = parse(&perm, expr_src);
+    if (!t) return -1;
+    /* The body must check against the declared type. */
+    if (!check(&perm, 0, NULL, NULL, t, type)) return -1;
+    Val *val = nbe_eval(&perm, NULL, t);
+    return def_add(name_perm, type, val);
+}
+
 /* ── Inductive family table ──────────────────────────────────────────────── */
 
 int ind_add(IndDef *def) {

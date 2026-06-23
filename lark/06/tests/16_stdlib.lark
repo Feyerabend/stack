@@ -1,0 +1,53 @@
+(* Test 16 — Standard library
+   Covers: import Stdlib, Int ops (min/max/abs/clamp/pow),
+           Float ops (min/max/abs/sqrt/floor/ceil/clamp/round),
+           String ops (length/repeat/spaces),
+           Option type (is_some/is_none/unwrap_or/map_opt/and_then)
+   Expected output:
+     3
+     7
+     5
+     5
+     8
+     5.0
+     5.0
+     3.0
+     4.0
+     5
+     true
+     false
+     42
+     85 *)
+
+module Stdlib16
+
+import Stdlib exposing (
+  min_int, max_int, abs_int, clamp_int, pow_int,
+  min_float, max_float, abs_float, sqrt_float, floor_float, ceil_float,
+  length, repeat_str, spaces,
+  Option, None, Some,
+  is_some, is_none, unwrap_or, map_opt, and_then
+)
+
+fn main(io : IO) : IO =
+  (* Int ops *)
+  let io = print(io, show(min_int(3, 7))) in
+  let io = print(io, show(max_int(3, 7))) in
+  let io = print(io, show(abs_int(0 - 5))) in
+  let io = print(io, show(clamp_int(10, 0 - 5, 5))) in
+  let io = print(io, show(pow_int(2, 3))) in
+  (* Float ops *)
+  let lo = 0.0 - 5.0 in
+  let io = print(io, show(abs_float(lo))) in
+  let io = print(io, show(sqrt_float(25.0))) in
+  let io = print(io, show(floor_float(3.7))) in
+  let io = print(io, show(ceil_float(3.2))) in
+  (* String ops *)
+  let io = print(io, show(length("hello"))) in
+  (* Option ops *)
+  let some42 = Some(42) in
+  let none0  : Option(Int) = None in
+  let io = print(io, show(is_some(some42))) in
+  let io = print(io, show(is_none(some42))) in
+  let io = print(io, show(unwrap_or(some42, 0))) in
+  print(io, show(unwrap_or(map_opt(fn(x : Int) => x + 1, and_then(fn(x : Int) => Some(x * 2), some42)), 0)))

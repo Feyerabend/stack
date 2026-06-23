@@ -1,6 +1,6 @@
 -- lark-preservation.lcore
 --
--- Phase 5b: Multi-step reduction and evaluation soundness for Lark's STLC.
+-- Phase 5: Multi-step reduction and evaluation soundness for Lark's STLC.
 -- Checked by lcore (proof/code/core/).
 --
 -- Run: cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-subst.lcore ../../lark/lark-step.lcore ../../lark/lark-preservation.lcore | grep -v '^--' | grep -v '^[[:space:]]*$' | ./lcore

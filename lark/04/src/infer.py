@@ -55,7 +55,7 @@ Env     = dict[str, Scheme]
 Tracked = dict[str, int]   # name -> use count for locally-bound affine vars
 
 
-# -- Errors
+# ── Errors ────────────────────────────────────────────────────────────────────
 
 class TypeError(Exception):
     def __init__(self, msg: str) -> None:
@@ -66,7 +66,7 @@ class AffineError(Exception):
         super().__init__(f"affine variable '{name}' used more than once")
 
 
-# -- Copy check
+# ── Copy check ────────────────────────────────────────────────────────────────
 
 def is_copy(t: Mono, copy_types: frozenset[str]) -> bool:
     match t:
@@ -88,7 +88,7 @@ def is_copy(t: Mono, copy_types: frozenset[str]) -> bool:
             return all(is_copy(e, copy_types) for e in elems)
 
 
-# -- Generalise / instantiate
+# ── Generalise / instantiate ──────────────────────────────────────────────────
 
 def generalise(env: Env, t: Mono) -> Scheme:
     env_fvs: set[int] = set()
@@ -105,7 +105,7 @@ def instantiate(fresh: Fresh, sc: Scheme) -> Mono:
     return apply(sub, sc.body)
 
 
-# -- Convert syntactic type → monotype
+# ── Convert syntactic type → monotype ─────────────────────────────────────────
 
 def syntype_to_mono(t: Type, tvar_env: dict[str, TVar], fresh: Fresh) -> Mono:
     """Convert a surface type (tree.py) to an internal monotype.
@@ -138,7 +138,7 @@ def syntype_to_mono(t: Type, tvar_env: dict[str, TVar], fresh: Fresh) -> Mono:
             return TTup(tuple(syntype_to_mono(e, tvar_env, fresh) for e in elems))
 
 
-# -- Built-in operator types
+# ── Built-in operator types ───────────────────────────────────────────────────
 
 def _binop_type(op: str, fresh: Fresh) -> Mono:
     numeric = {"+", "-", "*", "/"}
@@ -154,7 +154,7 @@ def _binop_type(op: str, fresh: Fresh) -> Mono:
     raise TypeError(f"unknown binary operator: {op!r}")
 
 
-# -- Literal types
+# ── Literal types ─────────────────────────────────────────────────────────────
 
 def _lit_type(v: object) -> Mono:
     if v is None:
@@ -170,7 +170,7 @@ def _lit_type(v: object) -> Mono:
     raise TypeError(f"unknown literal type: {v!r}")
 
 
-# -- Pattern typing
+# ── Pattern typing ────────────────────────────────────────────────────────────
 
 def infer_pat(pat: Pat, fresh: Fresh) -> tuple[TPat, Mono, Env]:
     """Infer the type of a pattern and the bindings it introduces.
@@ -221,7 +221,7 @@ def infer_pat(pat: Pat, fresh: Fresh) -> tuple[TPat, Mono, Env]:
             return TPTuple(tuple(typed_elems), t), t, local
 
 
-# -- Expression inference
+# ── Expression inference ──────────────────────────────────────────────────────
 
 def infer(
     env: Env,
@@ -264,7 +264,7 @@ def infer(
             elem_types:  list[Mono]  = []
             s: Subst = {}
             for e in elems:
-                te, t, s2 = infer(env, tracked, e, fresh, copy_types)
+                te, t, s2 = infer(_apply_env(s, env), tracked, e, fresh, copy_types)
                 s = compose(s2, s)
                 typed_elems.append(te)
                 elem_types.append(apply(s, t))
@@ -284,7 +284,7 @@ def infer(
             s  = compose(s2, s)
             typed_args: list[TExpr] = []
             for av, arg in zip(arg_vars, args):
-                ta, at, s3 = infer(env, tracked, arg, fresh, copy_types)
+                ta, at, s3 = infer(_apply_env(s, env), tracked, arg, fresh, copy_types)
                 s4 = _unify_wrap(apply(s, at), apply(s, av), expr)
                 s  = compose(s4, compose(s3, s))
                 typed_args.append(ta)
@@ -294,7 +294,7 @@ def infer(
         case BinOp(op=op, left=left, right=right):
             op_t = _binop_type(op, fresh)
             tl, lt, s1 = infer(env, tracked, left, fresh, copy_types)
-            tr, rt, s2 = infer(env, tracked, right, fresh, copy_types)
+            tr, rt, s2 = infer(_apply_env(s1, env), tracked, right, fresh, copy_types)
             s = compose(s2, s1)
             result_v = fresh.var()
             expected = TFn(apply(s, lt), TFn(apply(s, rt), result_v))
@@ -346,9 +346,10 @@ def infer(
             tc, ct, s1 = infer(env, tracked, cond, fresh, copy_types)
             s2 = _unify_wrap(apply(s1, ct), T_BOOL, expr)
             s  = compose(s2, s1)
-            tt, tt_t, s3 = infer(env, tracked, then_, fresh, copy_types)
-            te, et_t, s4 = infer(env, tracked, else_, fresh, copy_types)
-            s  = compose(s4, compose(s3, s))
+            tt, tt_t, s3 = infer(_apply_env(s, env), tracked, then_, fresh, copy_types)
+            s  = compose(s3, s)
+            te, et_t, s4 = infer(_apply_env(s, env), tracked, else_, fresh, copy_types)
+            s  = compose(s4, s)
             s5 = _unify_wrap(apply(s, tt_t), apply(s, et_t), expr)
             s  = compose(s5, s)
             t  = apply(s, tt_t)
@@ -362,7 +363,8 @@ def infer(
                 tp, pt, pat_env = infer_pat(pat, fresh)
                 s2 = _unify_wrap(apply(s, st), apply(s, pt), expr)
                 s  = compose(s2, s)
-                arm_env = {**env, **{k: apply_scheme(s, v) for k, v in pat_env.items()}}
+                arm_env = {**_apply_env(s, env),
+                           **{k: apply_scheme(s, v) for k, v in pat_env.items()}}
                 ta, at, s3 = infer(arm_env, tracked, arm_body, fresh, copy_types)
                 s4 = _unify_wrap(apply(s3, apply(s, at)),
                                  apply(s3, apply(s, result_v)), expr)
@@ -405,7 +407,7 @@ def _apply_env(s: Subst, env: Env) -> Env:
     return {k: apply_scheme(s, v) for k, v in env.items()}
 
 
-# -- Declaration checking
+# ── Declaration checking ──────────────────────────────────────────────────────
 
 def check_fn_decl(
     decl: FnDecl,
@@ -517,7 +519,7 @@ def _register_type_decl(
     return copy_types
 
 
-# -- Top-level entry point
+# ── Top-level entry point ──────────────────────────────────────────────────────
 
 def _initial_env() -> tuple[Env, frozenset[str]]:
     fresh = Fresh()
@@ -735,7 +737,7 @@ def _load_import(
     return copy_types
 
 
-# -- CLI
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import pprint

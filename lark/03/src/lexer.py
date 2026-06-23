@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 
-# -- Token kinds
+# ── Token kinds ───────────────────────────────────────────────────────────────
 
 class TK(Enum):
     # Literals
@@ -113,7 +113,7 @@ _KEYWORDS: dict[str, TK] = {
 }
 
 
-# -- Token
+# ── Token ─────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Token:
@@ -127,7 +127,7 @@ class Token:
         return f"Token({self.kind.name:<12} {self.value!r:<20} {self.line}:{self.col})"
 
 
-# -- Error
+# ── Error ─────────────────────────────────────────────────────────────────────
 
 class LexError(Exception):
     def __init__(self, msg: str, filename: str, line: int, col: int) -> None:
@@ -138,7 +138,7 @@ class LexError(Exception):
         super().__init__(f"{filename}:{line}:{col}: {msg}")
 
 
-# -- Lexer
+# ── Lexer ─────────────────────────────────────────────────────────────────────
 
 class Lexer:
     def __init__(self, source: str, filename: str = "<stdin>") -> None:
@@ -148,7 +148,7 @@ class Lexer:
         self.line     = 1
         self.col      = 1
 
-    # -- Public
+    # ── Public ────────────────────────────────────────────────────
 
     def tokenize(self) -> list[Token]:
         tokens: list[Token] = []
@@ -159,7 +159,7 @@ class Lexer:
                 break
         return tokens
 
-    # -- Helpers
+    # ── Helpers ───────────────────────────────────────────────────
 
     def _peek(self, offset: int = 0) -> str:
         i = self.pos + offset
@@ -185,7 +185,7 @@ class Lexer:
              line: int, col: int) -> Token:
         return Token(kind, text, value, line, col)
 
-    # -- Skip whitespace and nested block comments (* ... *)
+    # ── Skip whitespace and nested block comments (* ... *) ───────
 
     def _skip(self) -> None:
         while self.pos < len(self.source):
@@ -215,7 +215,7 @@ class Lexer:
                 self._advance()
         raise self._error("unterminated comment", line, col)
 
-    # -- Main dispatch
+    # ── Main dispatch ─────────────────────────────────────────────
 
     def _next(self) -> Token:
         self._skip()
@@ -233,7 +233,7 @@ class Lexer:
         if ch == "_":             return self._read_wildcard(line, col)
         return                           self._read_symbol(line, col)
 
-    # -- Numbers
+    # ── Numbers ───────────────────────────────────────────────────
 
     def _read_number(self, line: int, col: int) -> Token:
         start = self.pos
@@ -248,7 +248,7 @@ class Lexer:
         text = self.source[start:self.pos]
         return self._tok(TK.INT, text, int(text), line, col)
 
-    # -- Strings
+    # ── Strings ───────────────────────────────────────────────────
 
     _ESCAPES: dict[str, str] = {
         '"': '"', "\\": "\\",
@@ -274,7 +274,7 @@ class Lexer:
         value = "".join(chars)
         return self._tok(TK.STRING, text, value, line, col)
 
-    # -- Names and keywords
+    # ── Names and keywords ────────────────────────────────────────
 
     def _read_name(self, line: int, col: int) -> Token:
         start = self.pos
@@ -294,7 +294,7 @@ class Lexer:
         text = self.source[start:self.pos]
         return self._tok(TK.UPPER, text, text, line, col)
 
-    # -- Wildcard
+    # ── Wildcard ──────────────────────────────────────────────────
 
     def _read_wildcard(self, line: int, col: int) -> Token:
         self._advance()              # consume _
@@ -302,7 +302,7 @@ class Lexer:
             raise self._error("identifiers may not start with '_'", line, col)
         return self._tok(TK.WILDCARD, "_", None, line, col)
 
-    # -- Symbols and operators
+    # ── Symbols and operators ─────────────────────────────────────
 
     def _read_symbol(self, line: int, col: int) -> Token:
         ch = self._advance()
@@ -366,7 +366,7 @@ class Lexer:
         raise self._error(f"unexpected character {ch!r}", line, col)
 
 
-# -- CLI — run lexer on a file and print tokens
+# ── CLI — run lexer on a file and print tokens ────────────────────────────────
 
 if __name__ == "__main__":
     import sys

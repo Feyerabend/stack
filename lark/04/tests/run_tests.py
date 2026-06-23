@@ -89,7 +89,7 @@ def collect_acceptance() -> list[pathlib.Path]:
 def main() -> None:
     ok = fail = 0
 
-    print("-- acceptance ----------------------------------------------")
+    print("── acceptance ──────────────────────────────────────────────")
     for path in collect_acceptance():
         label = str(path.relative_to(ROOT))
         passed, msg = check_acceptance(path)
@@ -99,7 +99,7 @@ def main() -> None:
 
     error_dir = ROOT / "errors"
     if error_dir.exists():
-        print("\n-- error tests ---------------------------------------------")
+        print("\n── error tests ─────────────────────────────────────────────")
         for path in sorted(error_dir.glob("*.lark")):
             label = str(path.relative_to(ROOT))
             passed, msg = check_error(path)

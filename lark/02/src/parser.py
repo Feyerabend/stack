@@ -1,5 +1,5 @@
 """
-Lark parser - hand-written recursive descent.
+Lark parser — hand-written recursive descent.
 
 Consumes a token list from the lexer and produces a Program AST node.
 The grammar is LL(1) throughout; no backtracking is needed.
@@ -9,7 +9,7 @@ Operator precedence (low → high):
 
 Entry point:
     Parser(tokens, filename).parse() -> Program
-    ParseError                          raised on syntax error, carries location
+    ParseError                         raised on syntax error, carries location
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from tree import (
 )
 
 
-# -- Error
+# ── Error ─────────────────────────────────────────────────────────────────────
 
 class ParseError(Exception):
     def __init__(self, msg: str, filename: str, line: int, col: int) -> None:
@@ -47,7 +47,7 @@ class ParseError(Exception):
         super().__init__(f"{filename}:{line}:{col}: {msg}")
 
 
-# -- Parser
+# ── Parser ────────────────────────────────────────────────────────────────────
 
 class Parser:
     def __init__(self, tokens: list[Token], filename: str = "<stdin>") -> None:
@@ -55,7 +55,7 @@ class Parser:
         self.filename = filename
         self.pos      = 0
 
-    # -- Core helpers
+    # ── Core helpers ──────────────────────────────────────────────
 
     def _peek(self) -> Token:
         return self.tokens[self.pos]
@@ -85,7 +85,7 @@ class Parser:
         t = tok or self._peek()
         return ParseError(msg, self.filename, t.line, t.col)
 
-    # -- Program
+    # ── Program ───────────────────────────────────────────────────
 
     def parse(self) -> Program:
         module  = self._parse_module_decl()
@@ -98,7 +98,7 @@ class Parser:
         self._expect(TK.MODULE)
         return self._expect(TK.UPPER).text
 
-    # -- Imports
+    # ── Imports ───────────────────────────────────────────────────
 
     def _parse_imports(self) -> list[ImportDecl]:
         imports = []
@@ -125,7 +125,7 @@ class Parser:
             return self._advance().text
         raise self._error("expected name or type name in exposing list")
 
-    # -- Top-level declarations
+    # ── Top-level declarations ────────────────────────────────────
 
     def _parse_decls(self) -> list[Decl]:
         decls = []
@@ -144,7 +144,7 @@ class Parser:
         raise self._error(f"expected declaration (fn/let/type/trait/impl), "
                           f"got {tok.kind.name} ({tok.text!r})")
 
-    # -- fn declaration
+    # ── fn declaration ────────────────────────────────────────────
 
     def _parse_fn_decl(self, exported: bool) -> FnDecl:
         self._expect(TK.FN)
@@ -160,7 +160,7 @@ class Parser:
         body = self._parse_expr()
         return FnDecl(name, bounds, params, ret, body, exported)
 
-    # -- let declaration
+    # ── let declaration ───────────────────────────────────────────
 
     def _parse_let_decl(self, exported: bool) -> LetDecl:
         self._expect(TK.LET)
@@ -172,7 +172,7 @@ class Parser:
         value = self._parse_expr()
         return LetDecl(name, ann, value, exported)
 
-    # -- type declaration
+    # ── type declaration ──────────────────────────────────────────
 
     def _parse_type_decl(self, exported: bool) -> TypeDecl:
         self._expect(TK.TYPE)
@@ -204,7 +204,7 @@ class Parser:
             types.append(self._parse_type())
         return types[0] if len(types) == 1 else TTuple(tuple(types))
 
-    # -- trait declaration
+    # ── trait declaration ─────────────────────────────────────────
 
     def _parse_trait_decl(self, exported: bool) -> TraitDecl:
         self._expect(TK.TRAIT)
@@ -227,7 +227,7 @@ class Parser:
         typ  = self._parse_type()
         return TraitMethod(name, typ)
 
-    # -- impl declaration
+    # ── impl declaration ──────────────────────────────────────────
 
     def _parse_impl_decl(self) -> ImplDecl:
         self._expect(TK.IMPL)
@@ -256,7 +256,7 @@ class Parser:
         body = self._parse_expr()
         return ImplMethod(name, params, body)
 
-    # -- Parameters and bounds
+    # ── Parameters and bounds ─────────────────────────────────────
 
     def _parse_params(self) -> tuple[Param, ...]:
         if self._at(TK.RPAREN):
@@ -289,7 +289,7 @@ class Parser:
         var   = self._expect(TK.NAME).text
         return Bound(trait, var)
 
-    # -- Expressions
+    # ── Expressions ───────────────────────────────────────────────
 
     def _parse_expr(self) -> Expr:
         if self._at(TK.LET):   return self._parse_let_expr()
@@ -428,7 +428,7 @@ class Parser:
         raise self._error(
             f"unexpected token {tok.kind.name} ({tok.text!r}) in expression")
 
-    # -- Types
+    # ── Types ─────────────────────────────────────────────────────
 
     def _parse_type(self) -> Type:
         return self._parse_fn_type()
@@ -475,7 +475,7 @@ class Parser:
         raise self._error(
             f"unexpected token {tok.kind.name} ({tok.text!r}) in type")
 
-    # -- Patterns
+    # ── Patterns ──────────────────────────────────────────────────
 
     def _parse_pattern(self) -> Pat:
         tok = self._peek()
@@ -521,7 +521,7 @@ class Parser:
             f"unexpected token {tok.kind.name} ({tok.text!r}) in pattern")
 
 
-# -- Convenience function
+# ── Convenience function ──────────────────────────────────────────────────────
 
 def parse_file(path: str) -> Program:
     from lexer import Lexer
@@ -531,7 +531,7 @@ def parse_file(path: str) -> Program:
     return Parser(tokens, path).parse()
 
 
-# -- CLI
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

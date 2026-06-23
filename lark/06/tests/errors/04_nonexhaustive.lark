@@ -1,0 +1,17 @@
+(* Error test 04 — Non-exhaustive pattern match at runtime
+   The type checker does not verify exhaustiveness; the CEK machine
+   raises when no arm matches.
+   Expected: RuntimeError: non-exhaustive match *)
+
+module NonExhaustive
+
+type Color = | Red | Green | Blue
+
+fn name(c : Color) : String =
+  match c with
+  | Red   => "red"
+  | Green => "green"
+  end
+
+fn main(io : IO) : IO =
+  print(io, name(Blue))

@@ -1,0 +1,27 @@
+(* Test 17 — Mutual recursion
+   Covers: two top-level functions calling each other,
+           Bool values (True/False literals) returned and shown,
+           two-pass name registration enabling forward references.
+   Expected output:
+     true
+     false
+     true
+     false *)
+
+module MutualRec
+
+impl Copy for Bool = {}
+
+fn is_even(n : Int) : Bool =
+  if n == 0 then True
+  else is_odd(n - 1)
+
+fn is_odd(n : Int) : Bool =
+  if n == 0 then False
+  else is_even(n - 1)
+
+fn main(io : IO) : IO =
+  let io = print(io, show(is_even(4))) in
+  let io = print(io, show(is_even(3))) in
+  let io = print(io, show(is_odd(7))) in
+  print(io, show(is_odd(0)))

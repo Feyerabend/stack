@@ -1,0 +1,44 @@
+(* Sample 04 — N-Queens backtracking
+   Count distinct solutions for boards of size N.
+   A solution is a placement of N queens so no two attack each other.
+
+   Representation: a list of column positions, one per row (head = latest row).
+   Safety check: compare the new column against every previously placed queen,
+   checking both same-column and same-diagonal (|col - q| == row_distance).
+
+   Expected output:
+     N=6: 4
+     N=8: 92 *)
+
+module Queens
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Int) = {}
+
+fn safe(col : Int, placed : List(Int), dist : Int) : Bool =
+  match placed with
+  | Nil            => true
+  | Cons(q, rest)  =>
+    if col == q               then false
+    else if int_abs(col - q) == dist then false
+    else safe(col, rest, dist + 1)
+  end
+
+fn solve(n : Int, row : Int, placed : List(Int)) : Int =
+  if row == n then 1
+  else try_col(n, row, placed, 0)
+
+fn try_col(n : Int, row : Int, placed : List(Int), col : Int) : Int =
+  if col >= n then 0
+  else
+    let rest_count = try_col(n, row, placed, col + 1) in
+    if safe(col, placed, 1)
+    then solve(n, row + 1, Cons(col, placed)) + rest_count
+    else rest_count
+
+fn main(io : IO) : IO =
+  let io = print(io, "N=6: " + show(solve(6, 0, Nil))) in
+  print(io, "N=8: " + show(solve(8, 0, Nil)))

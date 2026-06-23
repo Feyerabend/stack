@@ -1,0 +1,26 @@
+(* Test 15 — Tail recursion with values that fit in 32 bits
+   Covers: self-tail-call TCO (no stack overflow), three-arg tail call,
+           TCO firing on every recursive call, result correctness.
+   Expected output:
+     500500
+     55
+     0 *)
+
+module TailRec2
+
+fn sum_small(n : Int, acc : Int) : Int =
+  if n == 0 then acc
+  else sum_small(n - 1, acc + n)
+
+fn fib_tail(n : Int, a : Int, b : Int) : Int =
+  if n == 0 then a
+  else fib_tail(n - 1, b, a + b)
+
+fn countdown(n : Int) : Int =
+  if n <= 0 then n
+  else countdown(n - 1)
+
+fn main(io : IO) : IO =
+  let io = print(io, show(sum_small(1000, 0))) in
+  let io = print(io, show(fib_tail(10, 0, 1))) in
+  print(io, show(countdown(100000)))

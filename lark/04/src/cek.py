@@ -32,7 +32,7 @@ from typed_tree import (
 import ty
 
 
-# -- Values
+# ── Values ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class VInt:
@@ -114,7 +114,7 @@ Value = Union[
 ]
 
 
-# -- Continuation frames
+# ── Continuation frames ───────────────────────────────────────────────────────
 
 @dataclass
 class ApplyFnF:
@@ -169,7 +169,7 @@ Frame = Union[ApplyFnF, ApplyArgF, LetF, IfF, MatchF,
               BinOpLF, BinOpRF, UnaryF, TupleF]
 
 
-# -- States
+# ── States ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Eval:
@@ -185,7 +185,7 @@ class Return:
 State = Union[Eval, Return]
 
 
-# -- Machine context
+# ── Machine context ───────────────────────────────────────────────────────────
 
 @dataclass
 class Machine:
@@ -194,7 +194,7 @@ class Machine:
     con_arity:   dict[str, int]               = field(default_factory=dict)
 
 
-# -- Helpers
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _lit_val(v: object) -> Value:
     if v is None:            return VUnit()
@@ -237,7 +237,7 @@ def runtime_type(v: Value, m: Machine) -> str:
         case _: return "?"
 
 
-# -- Arithmetic / logic
+# ── Arithmetic / logic ────────────────────────────────────────────────────────
 
 def binop(op: str, l: Value, r: Value) -> Value:
     if op == "+" and isinstance(l, VStr) and isinstance(r, VStr):
@@ -279,7 +279,7 @@ def unaryop(op: str, v: Value) -> Value:
     raise RuntimeError(f"cannot apply unary '{op}' to {v!r}")
 
 
-# -- Pattern matching
+# ── Pattern matching ──────────────────────────────────────────────────────────
 
 def match_pat(pat: TPat, val: Value, env: dict) -> dict | None:
     match pat:
@@ -312,7 +312,7 @@ def match_pat(pat: TPat, val: Value, env: dict) -> dict | None:
     return None
 
 
-# -- Application
+# ── Application ───────────────────────────────────────────────────────────────
 
 def apply(fn: Value, arg: Value, kont: list[Frame], m: Machine) -> State:
     """Apply fn to arg, returning the next CEK state."""
@@ -372,7 +372,7 @@ def builtin(name: str, arg: Value, kont: list[Frame], m: Machine) -> State:
             raise RuntimeError(f"unknown builtin: {name!r}")
 
 
-# -- CEK steps
+# ── CEK steps ─────────────────────────────────────────────────────────────────
 
 def step(state: State, m: Machine) -> State:
     match state:
@@ -487,7 +487,7 @@ def step_ret(val: Value, frame: Frame, rest: list[Frame], m: Machine) -> State:
             raise RuntimeError(f"unknown frame: {type(frame).__name__}")
 
 
-# -- Main loop
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run(init: State, m: Machine) -> Value:
     state = init
@@ -499,7 +499,7 @@ def run(init: State, m: Machine) -> Value:
                 state = step(state, m)
 
 
-# -- Program evaluation
+# ── Program evaluation ────────────────────────────────────────────────────────
 
 def make_closure(name: str, params: tuple, body: TExpr, env: dict) -> Value:
     """Build a (possibly curried) named closure."""
@@ -623,7 +623,7 @@ def load_import(imp: ImportDecl, src_dir: str, env: dict, m: Machine) -> None:
             env[name] = val
 
 
-# -- Entry point
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_file(path: str) -> None:
     """Parse, type-check, and run a Lark source file."""

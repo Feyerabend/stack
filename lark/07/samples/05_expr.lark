@@ -1,0 +1,53 @@
+(* Sample 05 — Arithmetic expression evaluator
+   ADT for expressions: Num, Add, Sub, Mul, Div, Neg.
+   Two passes over the same tree: eval (Int result) and pretty (String).
+   Expected output:
+     ((3 + 4) * (10 - 3)) = 49
+     ((2 * 8) + (15 / 3)) = 21
+     (-(5 - 12)) = 7
+     ((100 / (2 + 3)) * (7 - 2)) = 100 *)
+
+module Expr
+
+type Expr =
+  | Num of Int
+  | Add of Expr, Expr
+  | Sub of Expr, Expr
+  | Mul of Expr, Expr
+  | Div of Expr, Expr
+  | Neg of Expr
+
+impl Copy for Expr = {}
+
+fn eval(e : Expr) : Int =
+  match e with
+  | Num(n)    => n
+  | Add(a, b) => eval(a) + eval(b)
+  | Sub(a, b) => eval(a) - eval(b)
+  | Mul(a, b) => eval(a) * eval(b)
+  | Div(a, b) => eval(a) / eval(b)
+  | Neg(a)    => 0 - eval(a)
+  end
+
+fn pretty(e : Expr) : String =
+  match e with
+  | Num(n)    => show(n)
+  | Add(a, b) => "(" + pretty(a) + " + " + pretty(b) + ")"
+  | Sub(a, b) => "(" + pretty(a) + " - " + pretty(b) + ")"
+  | Mul(a, b) => "(" + pretty(a) + " * " + pretty(b) + ")"
+  | Div(a, b) => "(" + pretty(a) + " / " + pretty(b) + ")"
+  | Neg(a)    => "(-" + pretty(a) + ")"
+  end
+
+fn display(e : Expr) : String =
+  pretty(e) + " = " + show(eval(e))
+
+fn main(io : IO) : IO =
+  let e1 = Mul(Add(Num(3), Num(4)), Sub(Num(10), Num(3))) in
+  let e2 = Add(Mul(Num(2), Num(8)), Div(Num(15), Num(3))) in
+  let e3 = Neg(Sub(Num(5), Num(12))) in
+  let e4 = Mul(Div(Num(100), Add(Num(2), Num(3))), Sub(Num(7), Num(2))) in
+  let io = print(io, display(e1)) in
+  let io = print(io, display(e2)) in
+  let io = print(io, display(e3)) in
+  print(io, display(e4))

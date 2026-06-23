@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Union
 
 
-# -- Monotypes
+# ── Monotypes ─────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TVar:
@@ -56,7 +56,7 @@ class TTup:
 Mono = Union[TVar, TCon, TApp, TFn, TTup]
 
 
-# -- Polytype (scheme)
+# ── Polytype (scheme) ─────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Scheme:
@@ -72,7 +72,7 @@ class Scheme:
         return len(self.qs) == 0
 
 
-# -- Fresh variable supply
+# ── Fresh variable supply ──────────────────────────────────────────────────────
 
 class Fresh:
     """Monotonically increasing type variable counter."""
@@ -90,7 +90,7 @@ class Fresh:
         return v
 
 
-# -- Substitution
+# ── Substitution ──────────────────────────────────────────────────────────────
 
 Subst = dict[int, Mono]   # TVar.id → Mono
 
@@ -144,7 +144,7 @@ def free_vars_scheme(sc: Scheme) -> set[int]:
     return free_vars(sc.body) - set(sc.qs)
 
 
-# -- Unification
+# ── Unification ───────────────────────────────────────────────────────────────
 
 class UnifyError(Exception):
     def __init__(self, a: Mono, b: Mono, reason: str = "") -> None:
@@ -200,7 +200,7 @@ def _unify_seq(
     return s
 
 
-# -- Pretty printer
+# ── Pretty printer ────────────────────────────────────────────────────────────
 
 def pretty(t: Mono, *, paren: bool = False) -> str:
     result = _pretty_inner(t)
@@ -227,7 +227,7 @@ def _pretty_inner(t: Mono) -> str:
             return "(" + ", ".join(pretty(e) for e in elems) + ")"
 
 
-# -- Built-in types
+# ── Built-in types ────────────────────────────────────────────────────────────
 
 T_INT    = TCon("Int")
 T_FLOAT  = TCon("Float")
@@ -254,7 +254,7 @@ def t_fn(*types: Mono) -> Mono:
     return result
 
 
-# -- Copy-able types
+# ── Copy-able types ───────────────────────────────────────────────────────────
 # A set of type constructor names whose values are freely copyable.
 # User types can be added at type-check time when `impl Copy for T` is seen.
 

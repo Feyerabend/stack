@@ -2,7 +2,7 @@
 ## A Proof Checker for Homotopy Type Theory, Written in C
 
 This repository is a programming language laboratory for students studying
-dependent type theory and Homotopy Type Theory ([HoTT](./../hott)).
+dependent type theory and Homotopy Type Theory (HoTT).
 It implements Martin-Löf Type Theory extended with HoTT features--identity types,
 univalence, higher inductive types, universe polymorphism, and inductive
 families - in around 4 000 lines of C source that you can read, run, and
@@ -29,17 +29,7 @@ code/
                           NbE evaluator, elaborator. REPL: lcore.
   lang/                   A call-by-need graph reducer using the same surface syntax
                           and type checker. REPL: llang.
-docs/
-  01.md                   Orientation: what the system is, how to build it, a quick tour
-  02.md                   First read: tracing one expression end to end through the code
-  03.md                   Terms and Values: the two-representation design and why it works
-  04.md                   Normalisation by Evaluation: eval, quote, eliminators, neutrals
-  exercises/
-    01_add_lmax.md        Medium exercise: add lmax (maximum of two levels)
-    02_quotient_types.md  Large exercise: add quotient types as a HIT
 ```
-
-Start with [docs/01.md](docs/01.md).
 
 
 
@@ -145,22 +135,6 @@ is a detailed walkthrough of everything in the library.
 | `fin.lam`     | `Fin`, `toNat`, `finWeaken` - bounded natural numbers            |
 | `proofs.lam`  | `plus_zero_l`, `plus_zero_r`, `plus_succ_r`, `plus_comm`         |
 | `prelude.lam` | Entry point - imports all of the above                           |
-
-
-
-### Exercises
-
-The [docs/exercises/](./docs/exercises/) folder contains
-guided extensions to the system:
-
-- *Add `lmax`* (`01_add_lmax.md`): Implement the maximum of two universe
-  levels. Medium difficulty, around 80 lines across 5 files. Covers the full
-  pipeline: parsing, evaluation, type checking, quoting, and conversion.
-
-- *Quotient types* (`02_quotient_types.md`): Add `A / R` as a higher
-  inductive type. Large exercise, around 300 lines. Covers path constructors,
-  the coherence condition in the eliminator, and the connection between
-  quotients and the univalence axiom.
 
 
 

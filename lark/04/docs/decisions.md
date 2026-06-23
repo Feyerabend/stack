@@ -1,5 +1,4 @@
-
-## Lark — Design Decisions
+# Lark — Design Decisions
 
 Rationale for every significant choice made in Phase 0 (language design),
 Phase 2 (lexer and parser), and Phase 3 (type checker). Each entry explains
@@ -8,11 +7,11 @@ Decision" sidebars in the book.
 
 The type checker decisions are at the bottom of this file.
 
+---
 
+## Language design
 
-### Language design
-
-#### Delimiter-based syntax
+### Delimiter-based syntax
 
 Lark uses `in` to close `let` and `end` to close `match`. There is no
 indentation sensitivity.
@@ -28,9 +27,9 @@ the grammar and the parser side by side without any special cases. The
 trade-off is slightly more typing for the programmer; the gain is a grammar you
 can hold in your head.
 
+---
 
-
-#### Copy as a trait
+### Copy as a trait
 
 All Lark types are affine by default: a value may be used at most once. A type
 opts into free copying by implementing the `Copy` marker trait. Built-in types
@@ -49,9 +48,9 @@ safe by default; the programmer explicitly opts data types into copyability.
 `IO` has no `Copy` impl — which is not a special case, just the ordinary
 consequence of the rule.
 
+---
 
-
-#### Result type for errors
+### Result type for errors
 
 `type Result a b = | Ok of a | Err of b`. Errors are values, handled by pattern
 matching. There are no exceptions.
@@ -68,9 +67,9 @@ threading `Result` values explicitly. A `?` operator (like Rust's) could be
 added as surface sugar later; for now the verbosity is pedagogically useful
 because it makes every error-handling decision visible.
 
+---
 
-
-#### File-level modules
+### File-level modules
 
 Each `.lark` file is a module. `module Name` declares the module. `export`
 makes a declaration public. `import Name exposing (x, y)` brings names into
@@ -87,9 +86,9 @@ structured polymorphism instead, which covers most of what OCaml uses modules
 for. A file-level module system is the minimum needed for code organization
 without the full OCaml complexity.
 
+---
 
-
-#### Affine IO via resource threading
+### Affine IO via resource threading
 
 `IO` is a resource type. IO operations take the IO resource and return it:
 
@@ -115,11 +114,11 @@ advantage: it makes IO completely transparent. Every IO operation is a function
 call that takes and returns the IO token. The type checker enforces the sequencing
 by virtue of affinity alone. No special cases, no monads, no effect rows.
 
+---
 
+## Lexer design
 
-### Lexer design
-
-#### name / Name lexical convention
+### name / Name lexical convention
 
 Identifiers starting with a lowercase letter (`name`) are variables, function
 names, and type variables. Identifiers starting with an uppercase letter
@@ -136,9 +135,9 @@ the parser to carry type information into pattern parsing, or to perform a
 post-parse disambiguation pass. Both are possible; neither is as simple as a
 lexical rule.
 
+---
 
-
-#### `()` as a single UNIT token
+### `()` as a single UNIT token
 
 The unit value and type are both written `()`. The lexer produces a single
 `UNIT` token when it sees `(` immediately followed by `)` (no whitespace
@@ -149,9 +148,9 @@ The alternative is to let the parser distinguish `()` from `( )` contextually.
 This works but adds two extra production rules to the grammar. Treating `()` as
 a lexical token keeps the grammar simpler and avoids any ambiguity.
 
+---
 
-
-#### Nested block comments
+### Nested block comments
 
 Comments are written `(* ... *)` and may be nested:
 `(* outer (* inner *) still outer *)`. The lexer tracks comment depth with a
@@ -162,11 +161,11 @@ comment out a block of code that already contains comments without modification.
 OCaml supports them for the same reason. The implementation cost is one integer
 counter in the lexer.
 
+---
 
+## Parser design
 
-### Parser design
-
-#### Hand-written recursive descent
+### Hand-written recursive descent
 
 The Lark parser is a hand-written recursive descent parser. One function per
 grammar rule. No parser generator, no combinator library.
@@ -190,9 +189,9 @@ One limitation: recursive descent as written here does not handle left-recursive
 grammars directly. Lark's grammar is designed to avoid left recursion; operator
 expressions use the level-chain pattern described below.
 
+---
 
-
-#### Operator precedence via level-chain
+### Operator precedence via level-chain
 
 Binary operator precedence is encoded as a chain of five functions:
 
@@ -211,9 +210,9 @@ Lark has five precedence levels; the level-chain approach is simpler to explain
 and equally correct. Adding a new level means adding one function; the structure
 remains obvious.
 
+---
 
-
-#### Separate syntactic and typed AST
+### Separate syntactic and typed AST
 
 The parser produces a syntactic AST (`tree.py`). The type checker will produce
 a separate typed AST (`typed_tree.py`, Phase 3). They are distinct data
@@ -228,9 +227,9 @@ Separate trees make the boundary explicit: the parser's output is complete and
 correct without any type information. The type checker takes a syntactic program
 and produces a typed one. Each phase can be tested independently.
 
+---
 
-
-#### `_` in parameter position
+### `_` in parameter position
 
 The grammar defines `_` as a WILDCARD pattern token. The parser also accepts
 it in function parameter position (`fn(acc, _) => ...`), producing a `Param`
@@ -242,11 +241,11 @@ that has a wildcard pattern also allows it in lambda parameters, and forbidding
 it would produce confusing errors on natural code. The type checker can treat
 `_` parameters as anonymous bindings that are never referenced.
 
+---
 
+## Type checker design
 
-### Type checker design
-
-#### Hindley-Milner with bidirectional checking
+### Hindley-Milner with bidirectional checking
 
 The Lark type checker implements Algorithm W (Hindley-Milner inference) with a
 bidirectional structure borrowed from the proof/ reference implementation.
@@ -266,9 +265,9 @@ annotated with `IO`, that annotation flows in and the parameter is immediately
 marked as affine in the tracked set. Without bidirectional propagation we would
 have to wait until unification to discover the parameter's type.
 
+---
 
-
-#### Separate internal type representation (`ty.py`)
+### Separate internal type representation (`ty.py`)
 
 The type checker uses its own type representation (`ty.py`) distinct from the
 surface types in `tree.py`. Internal types use integer-identified type variables
@@ -286,9 +285,9 @@ Integer-identified type variables are the standard approach in every Haskell
 implementation of HM. The conversion from surface type to internal type is a
 single function (`syntype_to_mono`) and the boundary is explicit.
 
+---
 
-
-#### Affine tracking via an explicit tracked set
+### Affine tracking via an explicit tracked set
 
 The checker does not attempt to check affinity for every non-Copy type. Instead
 it maintains a `tracked` set: names of locally-bound parameters whose annotation
@@ -309,9 +308,9 @@ one is added only if the new value's type is non-Copy. This handles the
 IO-threading pattern: each successive `let io = print(io, ...) in` correctly
 consumes the old token and tracks the new one.
 
+---
 
-
-#### Function types are Copy
+### Function types are Copy
 
 Function values (type `TFn`) are treated as freely copyable. A function can be
 referenced any number of times without being "consumed."
@@ -329,9 +328,9 @@ Making function types non-Copy would force every higher-order function to thread
 function values through a chain of let-bindings, which is both impractical and
 unsupported by the type theory we are building toward.
 
+---
 
-
-#### Let-recursion via a fresh type variable
+### Let-recursion via a fresh type variable
 
 Each function declaration adds its own name to the local environment with a
 fresh type variable before type-checking the body. After the body is checked,
@@ -347,9 +346,9 @@ The current implementation handles direct recursion correctly. Mutual recursion
 across top-level declarations is handled by the two-pass architecture: all
 types are registered before any function body is checked.
 
+---
 
-
-#### ADT constructor types
+### ADT constructor types
 
 Each variant of an ADT becomes a function in the type environment. A nullary
 constructor `| Nil` gets the type of the ADT directly. A unary constructor
@@ -367,11 +366,11 @@ was ambiguous: `| Box of (Float, Float)` (one tuple field) looked the same
 as `| Rect of Float, Float` (two separate fields). The tuple representation
 makes the distinction structural.
 
+---
 
+## CEK machine design
 
-### CEK machine design
-
-#### Small-step iterative loop
+### Small-step iterative loop
 
 The CEK machine is implemented as a single iterative `while` loop in `run`.
 Each call to `step` produces the next state; the loop exits when it reaches
@@ -388,9 +387,9 @@ the state, the loop exits. There is no "detect tail call and optimize" step —
 the iterative structure makes it impossible to accumulate Python frames in the
 first place.
 
+---
 
-
-#### Continuation as a list of frames
+### Continuation as a list of frames
 
 The continuation is a plain Python list `list[Frame]`. Frames are prepended
 (`[new_frame] + rest`) and consumed from the front.
@@ -401,9 +400,9 @@ representation is more idiomatic in Python and does not change the semantics.
 The match pattern in `step_ret` destructures the frame and the remaining list
 in one line: `case Return(val=v, kont=[frame, *rest])`.
 
+---
 
-
-#### `VPartialCon` for constructors
+### `VPartialCon` for constructors
 
 Constructors are curried in the value domain. A constructor with two fields
 (e.g., `Cons : a -> List a -> List a`) is initially represented as
@@ -415,9 +414,9 @@ differently from functions. That would require two code paths for application.
 `VPartialCon` means constructors go through the same `apply` path as closures;
 no special casing needed.
 
+---
 
-
-#### `VDispatch` for trait methods
+### `VDispatch` for trait methods
 
 Trait dispatch is deferred entirely to runtime. When a trait method like
 `describe` appears as a value, it is represented as `VDispatch("describe")`.
@@ -431,9 +430,9 @@ do. For the interpreter, runtime dispatch is simpler: the type checker does not
 need to thread dispatch information into the typed AST, and new implementations
 can be added by updating the dispatch table without touching the evaluator.
 
+---
 
-
-#### `is_copy(TVar) = True`
+### `is_copy(TVar) = True`
 
 The `is_copy` function returns `True` for unresolved type variables. The
 alternative — `False` (conservative) — caused false affine errors.
@@ -452,9 +451,9 @@ not be tracked. A `TVar` that resolves to a non-Copy type would be a false
 negative, but this only arises in recursive functions that produce non-Copy
 output, which is an edge case not present in the current test suite.
 
+---
 
-
-#### Refactoring: direct imports over `importlib`
+### Refactoring: direct imports over `importlib`
 
 Early versions of `cek.py` and `infer.py` loaded sibling modules (`parser`,
 `infer`) via `importlib.util.spec_from_file_location`. This was an artefact of
