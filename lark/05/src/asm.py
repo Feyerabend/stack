@@ -466,6 +466,7 @@ def _data_section(global_vars: dict[str, str],
     out: list[str] = []
     if global_vars:
         out.append(".section .data")
+        out.append("  .p2align 2")
         for name, lbl in global_vars.items():
             out.append(f"{lbl}:")
             out.append(f"  .word 0")
@@ -475,6 +476,10 @@ def _data_section(global_vars: dict[str, str],
             encoded = s.encode("utf-8")
             n = len(encoded)
             byte_list = ", ".join(str(b) for b in encoded)
+            # Each string is [.word len, ...bytes, 0]; re-align to 4 bytes before
+            # the next record, or its .word length header is loaded with a
+            # misaligned `lw` (tolerated by the Python VM, traps on real RISC-V).
+            out.append("  .p2align 2")
             out.append(f"{lbl}:")
             out.append(f"  .word {n}")
             out.append(f"  .byte {byte_list}, 0" if byte_list else "  .byte 0")
