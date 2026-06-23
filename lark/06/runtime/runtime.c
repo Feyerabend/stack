@@ -19,7 +19,10 @@
 #  define LARK_HEAP_BYTES (64 * 1024)   /* 64 KB — adjust for target */
 #endif
 
-static uint8_t  _heap[LARK_HEAP_BYTES];
+/* aligned(8): the bump allocator hands out 4-byte-multiple offsets, but a bare
+ * uint8_t[] has alignment 1 — a misaligned base makes every word write (p[0]=...)
+ * trap on real RISC-V though the byte-indexed Python VM tolerates it. */
+static uint8_t  _heap[LARK_HEAP_BYTES] __attribute__((aligned(8)));
 static uint32_t _heap_ptr = 0;
 
 lark_ptr __heap_alloc(int n_words) {
@@ -76,6 +79,15 @@ lark_ptr __show_float(uint32_t bits) {
     memcpy(&f, &bits, 4);
     char buf[32];
     snprintf(buf, sizeof(buf), "%.7g", f);
+    /* The Pico SDK printf does not trim trailing zeros from %g ("8.500000");
+     * host libc does ("8.5").  Trim here so hardware matches the other backends. */
+    {
+        char *dot = strchr(buf, '.');
+        if (dot && !strpbrk(buf, "eEni")) {
+            char *end = buf + strlen(buf) - 1;
+            while (end > dot + 1 && *end == '0') *end-- = '\0';
+        }
+    }
     /* Ensure a decimal point is present so the value reads as a float. */
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'n') && !strchr(buf, 'i')) {
         size_t n = strlen(buf);

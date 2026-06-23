@@ -1,4 +1,5 @@
-# Prebuilt firmware — Lark samples on the Pico 2 / 2W
+
+## Prebuilt firmware — Lark samples on the Pico 2 / 2W
 
 Each `.uf2` here is a sample from [`../samples/`](../samples/) compiled all the way
 down to a **Raspberry Pi Pico 2 / 2W (RP2350, RISC-V)** image. They let you run the
@@ -13,8 +14,8 @@ interpreter exactly.
 Hold **BOOTSEL**, plug the board in (or tap RESET). It mounts as a USB drive
 named `RP2350`. Then either:
 
-- **Drag-and-drop:** copy the `.uf2` onto the `RP2350` drive, or
-- **picotool:** `picotool load -x 03_primes.uf2`
+- *Drag-and-drop:* copy the `.uf2` onto the `RP2350` drive, or
+- *picotool:* `picotool load -x 03_primes.uf2`
 
 The board reboots and runs the program.
 
@@ -33,7 +34,7 @@ screen /dev/tty.usbmodem* 115200   # Ctrl-A K to quit
 ## What each one does
 
 | Firmware | Sample | Expected output |
-|---|---|---|
+|----------|--------|-----------------|
 | `01_mergesort.uf2` | Merge sort | `1 2 3 4 5 6 7 8 9` |
 | `02_bst.uf2` | Binary search tree | in-order `1 3 4 5 7 9`, membership `true`/`false`, `height: 3` |
 | `03_primes.uf2` | Sieve of primes ≤ 50 | `2 3 5 … 47` then `15 primes up to 50` |
