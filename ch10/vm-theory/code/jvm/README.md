@@ -11,6 +11,9 @@ your-project/
 │   ├── parser/
 │   ├── runtime/
 │   └── utils/
+├── examples/         # Runnable demos, one folder per program
+├── Example.java      # The "Hello" demo (Example.class is committed)
+├── Makefile          # `make run` compiles + runs every example
 ├── debug_test.py     # Test to understand System.out behaviour
 ├── main.py           # Entry point for running Java classes
 ├── quick_test.py     # Some internal check, no need for Java
@@ -24,6 +27,33 @@ Before diving into Java:
 ```bash
 python verify_setup.py
 ```
+
+### Bundled examples
+
+Ready-to-run programs live under `examples/`, one folder per program:
+
+| Folder | Program | Shows |
+|--------|---------|-------|
+| `examples/arithmetic/` | `Arithmetic.java` | integer `+ - * / %` and printing an `int` |
+| `examples/factorial/`  | `Factorial.java`  | recursion via `invokestatic` |
+| `examples/sumloop/`    | `SumLoop.java`    | a counted `for` loop (`iinc`) |
+| `examples/gcd/`        | `Gcd.java`        | a `while` loop (`goto` + `ifeq`, `irem`) |
+
+Compiling them needs a Java compiler. A JDK-less machine can still run the
+committed `Example.class`; to build the rest, install one (e.g. Homebrew's
+keg-only OpenJDK) and either put it on `PATH` or point `make` at it:
+
+```bash
+make run JAVAC=/opt/homebrew/opt/openjdk/bin/javac
+```
+
+`make run` compiles every example and runs it through the interpreter; `make clean`
+removes the compiled `.class` files and `__pycache__`.
+
+A caveat on the sources: modern `javac` compiles string `+` concatenation to an
+`invokedynamic` call this teaching interpreter does not model, so the examples
+print a label with `print(String)` and a value with `println(int)` rather than
+concatenating — the same style as `Example.java`.
 
 ### Running Your First Java Program
 
@@ -173,9 +203,10 @@ public class RandomExample {
 
 Supported Instructions:
 - Load/store variables
-- Arithmetic operations
-- Control flow (if, goto)
-- Method invocation (all types)
+- Arithmetic operations (`iadd`, `isub`, `imul`, `idiv`, `irem`)
+- Increment-in-place (`iinc`), so counted `for`/`while` loops work
+- Control flow (`if*`, `if_icmp*`, `goto`)
+- Method invocation (all types), including recursion
 - Object creation
 - Field access (instance and static)
 - Return statements
@@ -228,5 +259,3 @@ Import errors:
 - Make sure you're running from the directory containing `jvm_interpreter/`
 - Verify Python 3.7+ is installed: `python --version`
 
-
-![Inside](./../../assets/inside.png)

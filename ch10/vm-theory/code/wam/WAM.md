@@ -22,8 +22,7 @@ logical variables.
    variable bindings and logical constraints.
 2. *Backtracking*: Prolog uses backtracking to explore alternative solutions when a
    computation fails. The WAM implements this via a stack-based structure with choice
-   points for efficient state restoration. (More on backtracking in ch07
-   [WAM](./../../../ch07/mech/backtrack/).)
+   points for efficient state restoration.
 3. *Efficient Term Representation*: Terms (variables, constants, lists, structures)
    are compactly stored in memory using tagged cells to differentiate types.
 
@@ -50,22 +49,24 @@ self.registers = {
 #### 2. Memory Areas
 
 The WAM organises memory into distinct areas:
-- *Heap*: Stores terms like variables and constants.
+- *Heap*: Stores variable cells (and fresh anonymous variables).
   
 ```python
-self.heap = []  # term storage
+self.heap = []  # variable cells
 ```
 
-- *Stack*: Holds intermediate values, such as variable bindings.
+- *Argument registers*: Hold the arguments of the goal currently being called.
+  A goal loads them with `put_*`; the called clause's head reads them with `get_*`.
 
 ```python
-self.stack = []  # execution stack
+self.argregs = [None] * 8  # A0, A1, ...
 ```
 
-- *Call Stack*: Tracks return addresses for nested predicate calls.
+- *Call Stack*: Tracks, for each active call, the return address and the cut
+  barrier (the choice-point height to cut back to).
 
 ```python
-self.call_stack = []  # procedure return addresses
+self.call_stack = []  # entries: (return_ip, cut_barrier)
 ```
 
 - *Choice Points*: Stores execution state snapshots for backtracking.
@@ -96,18 +97,30 @@ Instructions are tuples, e.g.:
 ('CALL', ('child', 1), 0)  # Invokes child/1 predicate
 ```
 
-Key instructions include:
-- *CALL*: Invokes a predicate.
-- *GET_VARIABLE*: Allocates a variable reference.
-- *PUT_CONSTANT*: Places a constant on the heap.
-- *PROCEED*: Completes a predicate and returns.
-- *CUT*: Discards choice points to prune alternatives.
-- *TRY_ME_ELSE*, *RETRY_ME_ELSE*, *TRUST_ME*: Manage multiple clauses for backtracking.
-- *UNIFY_VARIABLE*: Unifies a variable with a stack term.
-- *BUILTIN*: Executes built-in predicates like `\=` (inequality).
-- *HALT*: Terminates execution.
+The instructions split along the two sides of a call. A *goal* loads the argument
+registers and calls; a clause *head* unifies those registers against its own
+arguments.
 
-The `fetch_execute` method drives execution by fetching, decoding, and executing
+Goal side (`put_*`, building a call):
+- *PUT_CONST*: Loads a constant into an argument register.
+- *PUT_VAR*: Loads a variable reference into an argument register.
+- *PUT_VOID*: Loads a fresh anonymous variable.
+- *CALL*: Invokes a predicate, saving the return address and cut barrier.
+
+Head side (`get_*`, matching a clause head):
+- *GET_CONST*: Unifies an argument register with a constant.
+- *GET_VAR*: Unifies an argument register with a (head) variable.
+- *GET_VOID*: An anonymous head argument; unifies with anything.
+- *PROCEED*: Completes a clause and returns to the caller.
+
+Control and the rest:
+- *CUT*: Discards choice points back to the clause's cut barrier.
+- *TRY_ME_ELSE*, *RETRY_ME_ELSE*, *TRUST_ME*: Manage multiple clauses for backtracking.
+- *BUILTIN*: Executes built-in predicates like `\=` (inequality).
+- *HALT*: Marks query success (a solution is recorded, then the machine
+  backtracks to look for more).
+
+The `run` method drives execution by fetching, decoding, and executing
 instructions, updating registers and memory.
 
 
@@ -125,17 +138,18 @@ For example, a fact:
 parent(zeb, john).
 ```
 
-Compiles to:
+Compiles to a clause head that unifies the incoming argument registers against
+its constants:
 
 ```python
 [
-    ('PUT_CONSTANT', 0, 0),  # 'zeb' -> argument 0
-    ('PUT_CONSTANT', 1, 1),  # 'john' -> argument 1
-    ('PROCEED', 0, 0)        # Return
+    ('GET_CONST', 0, 0),  # unify A0 with 'zeb'
+    ('GET_CONST', 1, 1),  # unify A1 with 'john'
+    ('PROCEED', 0, 0)     # return to caller
 ]
 ```
 
-A query:
+A query loads the argument registers and calls:
 
 ```prolog
 ?- child(X).
@@ -145,8 +159,9 @@ Compiles to:
 
 ```python
 [
-    ('GET_VARIABLE', 0, 0),  # allocate variable 'X'
-    ('CALL', ('child', 1), 0)  # call child/1
+    ('PUT_VAR', 0, 0),         # A0 := variable 'X'
+    ('CALL', ('child', 1), 0), # call child/1
+    ('HALT', 0, 0)             # query goal succeeded
 ]
 ```
 
@@ -161,13 +176,20 @@ Execution begins by loading compiled instructions:
 vm.load(compiler)
 ```
 
-The WAM starts at the query’s entry point, e.g.:
+Each query is compiled with its own entry address (recorded in
+`compiler.query_addrs`); the machine starts there, runs the goal, and reports the
+bindings of the query's variables:
 
 ```python
-vm.registers['IP'] = vm.predicates[('child', 1)]
+for query, query_vars, start in compiler.query_addrs:
+    vm = WAM()
+    vm.load(compiler)
+    vm.query_vars = query_vars
+    vm.registers['IP'] = start
+    vm.run(find_all=True)
 ```
 
-The `fetch_execute` method cycles through:
+The `run` method cycles through:
 - *Unification*: Matches terms using `unify` and `deref`.
 - *Predicate Calls*: Invokes predicates via `CALL` and `PROCEED`.
 - *Backtracking*: Restores state using `backtrack` and choice points.
@@ -216,14 +238,5 @@ and predicate execution. The `Compiler` and `WAM` classes work together to compi
 simulating the WAM’s model.
 
 The WAM remains a cornerstone of logic programming, influencing modern Prolog systems like SWI-Prolog and
-SICStus Prolog[^sics]. Its design has also impacted constraint logic programming and theorem proving systems,
+SICStus Prolog[. Its design has also impacted constraint logic programming and theorem proving systems,
 underscoring its lasting significance.
-
-[^sics]: In the effort to keep pace with developments in computing during the mid-1980s—particularly the
-"Fifth Generation" initiative (cf. [SEASONS](./../../../ch08/ai/SEASONS.md))--the Swedish state established
-the Swedish Institute of Computer Science (SICS): https://en.wikipedia.org/wiki/Swedish_Institute_of_Computer_Science.
-Among the many projects produced there was, naturally, a Prolog engine: https://sicstus.sics.se/.
-Professor Sten Åke Tärnlund at Uppsala was a leading figure in advancing the logic programming approach to AI,
-along with several of his students. For a time, I attended Upmail, a seminar held near the institution where
-Tärnlund was affiliated. The seminar brought together many topics that interested me, such as programming and
-its connections to formal logic. (Bibliography of Tärnlund: https://dblp.org/pid/t/StenAkeTarnlund.html.)

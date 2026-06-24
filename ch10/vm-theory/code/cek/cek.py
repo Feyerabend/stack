@@ -35,7 +35,7 @@ Derivation note (theory doc, §6.4):
 Correspondence table:
 
   Evaluation context        Continuation constructor
-  ─────────────────────     ────────────────────────
+  ---------------------     ------------------------
   □ e₂  (eval operator)     EvalArg(e₂, env, rest)
   v □   (eval argument)     Apply(v, rest)
   □ op e₂                   OpRight(op, e₂, env, rest)
@@ -289,7 +289,7 @@ def _apply_op(op: str, lv: Value, rv: Value) -> Value:
 def step(s: State) -> State:
     c, e, k = s.ctrl, s.env, s.kont
 
-    # ── Eval mode: c is an expression ─────────────────────────────────────
+    # -- Eval mode: c is an expression -------------------------------------
 
     if isinstance(c, Var):
         # Look up the variable in the environment.
@@ -336,7 +336,7 @@ def step(s: State) -> State:
         new_env[c.name] = clos          # cyclic: clos.env contains clos
         return State(c.body, new_env, k)
 
-    # ── Return mode: c is a value; consult the continuation ───────────────
+    # -- Return mode: c is a value; consult the continuation ---------------
 
     if _is_value(c):
         v = c
@@ -412,7 +412,7 @@ def let(name: str, defn: Expr, body: Expr) -> App:
 # ---------------------------------------------------------------------------
 
 def _check(label: str, expr: Expr, expected, debug: bool = False) -> None:
-    print(f'\n{"─" * 60}')
+    print(f'\n{"-" * 60}')
     print(f'  {label}')
     if debug:
         print(f'  expr: {expr!r}')
@@ -431,7 +431,7 @@ if __name__ == '__main__':
     print('CEK Machine -- call-by-value lambda calculus')
     print('Theory of Virtual Machines, §6.2\n')
 
-    # ── 1. Numerals and arithmetic ─────────────────────────────────────────
+    # -- 1. Numerals and arithmetic -----------------------------------------
     #
     # The continuation K grows as we descend into subexpressions, then
     # shrinks as values return.  For  (2 + 3) * 4:
@@ -448,14 +448,14 @@ if __name__ == '__main__':
            BinOp('*', BinOp('+', Num(2), Num(3)), Num(4)),
            expected=20)
 
-    # ── 2. Trace of K growing and shrinking ───────────────────────────────
+    # -- 2. Trace of K growing and shrinking -------------------------------
 
-    print(f'\n{"─" * 60}')
+    print(f'\n{"-" * 60}')
     print('  Trace: K grows and shrinks while evaluating (2 + 3) * 4')
     print()
     run(BinOp('*', BinOp('+', Num(2), Num(3)), Num(4)), debug=True)
 
-    # ── 3. Identity function ───────────────────────────────────────────────
+    # -- 3. Identity function -----------------------------------------------
     #
     # (λx. x) 7
     #
@@ -473,7 +473,7 @@ if __name__ == '__main__':
            App(Lam('x', Var('x')), Num(7)),
            expected=7)
 
-    # ── 4. Constant function: demonstrates that the argument is discarded ──
+    # -- 4. Constant function: demonstrates that the argument is discarded --
     #
     # (λx. λy. x) 1 2
 
@@ -481,7 +481,7 @@ if __name__ == '__main__':
            App(App(Lam('x', Lam('y', Var('x'))), Num(1)), Num(2)),
            expected=1)
 
-    # ── 5. Call-by-value argument evaluation ──────────────────────────────
+    # -- 5. Call-by-value argument evaluation ------------------------------
     #
     # The argument is fully evaluated before the function is applied.
     # Here the argument is  2 * 3, which reduces to 6 before the
@@ -492,13 +492,13 @@ if __name__ == '__main__':
                BinOp('*', Num(2), Num(3))),
            expected=7)
 
-    # ── 6. Conditional ────────────────────────────────────────────────────
+    # -- 6. Conditional ----------------------------------------------------
 
     _check('Conditional  if 3 < 5 then 10 else 20 = 10',
            If(BinOp('<', Num(3), Num(5)), Num(10), Num(20)),
            expected=10)
 
-    # ── 7. Higher-order: function composition ─────────────────────────────
+    # -- 7. Higher-order: function composition -----------------------------
     #
     # compose = λf. λg. λx. f (g x)
     # (compose double inc) 5  =  double (inc 5)  =  double 6  =  12
@@ -517,7 +517,7 @@ if __name__ == '__main__':
            App(App(App(compose, double), inc), Num(5)),
            expected=12)
 
-    # ── 8. let sugar ──────────────────────────────────────────────────────
+    # -- 8. let sugar ------------------------------------------------------
     #
     # let x = 3 + 4 in x * x  =  49
     # Desugars to  (λx. x * x)(3 + 4).
@@ -527,7 +527,7 @@ if __name__ == '__main__':
                BinOp('*', Var('x'), Var('x'))),
            expected=49)
 
-    # ── 9. Recursion via letrec ───────────────────────────────────────────
+    # -- 9. Recursion via letrec -------------------------------------------
     #
     # letrec fact = λn. if n == 0 then 1 else n * fact(n − 1)
     # in fact 6  =  720
@@ -547,7 +547,7 @@ if __name__ == '__main__':
            Letrec('fact', fact_body, App(Var('fact'), Num(6))),
            expected=720)
 
-    # ── 10. Mutual closure: church-style boolean ───────────────────────────
+    # -- 10. Mutual closure: church-style boolean ---------------------------
     #
     # Church true  = λt. λf. t
     # Church false = λt. λf. f
@@ -568,5 +568,5 @@ if __name__ == '__main__':
            App(App(church_false, Num(10)), Num(20)),
            expected=20)
 
-    print(f'\n{"─" * 60}')
+    print(f'\n{"-" * 60}')
     print('  All examples completed.')

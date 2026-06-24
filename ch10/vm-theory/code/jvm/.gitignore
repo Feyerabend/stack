@@ -1,0 +1,3 @@
+# Compiled example classes are build artifacts (recreated by `make examples`).
+# The base Example.class is committed deliberately so the demo runs without a JDK.
+examples/**/*.class

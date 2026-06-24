@@ -107,6 +107,7 @@ class Interpreter:
             104: self.instr_imul,
             108: self.instr_idiv,
             112: self.instr_irem,
+            132: self.instr_iinc,
             153: self.instr_ifeq,
             154: self.instr_ifne,
             155: self.instr_iflt,
@@ -320,7 +321,12 @@ class Interpreter:
         v2 = self.stack.pop()
         v1 = self.stack.pop()
         self.stack.append(v1 % v2)
-    
+
+    def instr_iinc(self):
+        index = self.advance()
+        const = struct.unpack('!b', bytes([self.advance()]))[0]
+        self.locals[index] += const
+
     # ========== Control Flow Instructions ==========
     
     def instr_ifeq(self):
@@ -647,14 +653,29 @@ class Interpreter:
         return class_name, method_name, descriptor
     
     def _count_args(self, descriptor: str) -> int:
-        """Count arguments from method descriptor"""
+        """Count arguments from a method descriptor.
+
+        Parses each parameter type so primitives (I, J, F, D, ...) count too, not
+        just reference types. long/double occupy one value in this interpreter, so
+        every parameter counts as one. Array dimensions ('[') prefix a type and do
+        not count on their own.
+        """
         if not descriptor.startswith('('):
             return 0
-        param_part = descriptor[1:descriptor.index(')')]
-        if not param_part:
-            return 0
-        # Count reference types (end with ;)
-        return param_part.count(';')
+        params = descriptor[1:descriptor.index(')')]
+        count = 0
+        i = 0
+        while i < len(params):
+            c = params[i]
+            if c == '[':
+                i += 1                      # array prefix; the element type counts
+            elif c == 'L':
+                i = params.index(';', i) + 1
+                count += 1
+            else:                           # primitive: B C D F I J S Z
+                i += 1
+                count += 1
+        return count
     
     def _invoke_bytecode_method(self, class_name: str, method_name: str, 
                                 descriptor: str, obj: Optional[Any], 

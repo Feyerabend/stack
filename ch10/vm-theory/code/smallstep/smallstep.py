@@ -21,9 +21,9 @@ Three semantic styles for the same language, all shown to agree.
 from __future__ import annotations
 from dataclasses import dataclass
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §2  Abstract syntax  (an inductive set)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # The grammar  e ::= n | b | e₁ ⊕ e₂ | if e then e₁ else e₂
 # defines Expr as the least set closed under the constructors below.
@@ -63,9 +63,9 @@ def is_val(e: Expr) -> bool:
     """Values are the irreducible normal forms: integers and booleans."""
     return isinstance(e, (Num, Bool_))
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §3.1  Denotational semantics
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # ⟦·⟧ : Expr → ℤ ∪ 𝔹
 #
@@ -92,21 +92,21 @@ def denote(e: Expr) -> int | bool:
         return denote(e.then_) if denote(e.cond) else denote(e.else_)
     raise TypeError(f'Cannot denote: {e!r}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §3.2  Big-step operational semantics  (natural semantics)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # The relation  e ⇓ v  is defined by four inductive rules:
 #
-#   ─────  (Val)      n ⇓ n,  b ⇓ b
+#   -----  (Val)      n ⇓ n,  b ⇓ b
 #   v ⇓ v
 #
 #   e₁ ⇓ n₁   e₂ ⇓ n₂   n₁ ⊕ n₂ = n
-#   ────────────────────────────────── (Op)
+#   ---------------------------------- (Op)
 #          e₁ ⊕ e₂ ⇓ n
 #
 #   e ⇓ true   e₁ ⇓ v                   e ⇓ false   e₂ ⇓ v
-#   ──────────────────── (IfT)           ──────────────────── (IfF)
+#   -------------------- (IfT)           -------------------- (IfF)
 #   if e then e₁ else e₂ ⇓ v            if e then e₁ else e₂ ⇓ v
 #
 # Big-step semantics evaluates in one 'big' step to a value.  There is no
@@ -137,9 +137,9 @@ def _apply(op: str, lv: Expr, rv: Expr) -> Num | Bool_:
             case '<':  return Bool_(lv.n < rv.n)
     raise TypeError(f'Cannot apply {op!r} to {lv!r} and {rv!r}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §3.2  Small-step operational semantics  (structural operational semantics)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # The relation  e → e'  is defined by base rules applied at the outermost
 # position.  These are the 'axioms'; congruence rules (applying inside
@@ -148,13 +148,13 @@ def _apply(op: str, lv: Expr, rv: Expr) -> Num | Bool_:
 # Base rules:
 #
 #   n₁ ⊕ n₂ = n
-#   ─────────────  (β-Op)    where both n₁, n₂ are numeric values
+#   -------------  (β-Op)    where both n₁, n₂ are numeric values
 #   n₁ ⊕ n₂ → n
 #
-#   ────────────────────────────────  (β-IfT)
+#   --------------------------------  (β-IfT)
 #   if true then e₁ else e₂ → e₁
 #
-#   ─────────────────────────────────  (β-IfF)
+#   ---------------------------------  (β-IfF)
 #   if false then e₁ else e₂ → e₂
 
 def step_base(e: Expr) -> Expr | None:
@@ -168,9 +168,9 @@ def step_base(e: Expr) -> Expr | None:
         return e.then_ if e.cond.b else e.else_
     return None
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §5  Evaluation contexts  (making the reduction strategy explicit)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # Grammar (left-to-right, call-by-value):
 #
@@ -189,7 +189,7 @@ def step_base(e: Expr) -> Expr | None:
 # The contextual rule then gives a deterministic small-step:
 #
 #   e → e'  (base rule)
-#   ────────────────────  (Context)
+#   --------------------  (Context)
 #   E[e] → E[e']
 
 @dataclass(frozen=True)
@@ -299,7 +299,7 @@ def step(e: Expr) -> Expr | None:
     One deterministic small step, implementing the contextual rule:
 
       e → e'  (base rule)
-      ────────────────────  (Context)
+      --------------------  (Context)
       E[e] → E[e']
 
     1. Find the unique redex and its context via decompose.
@@ -332,9 +332,9 @@ def reduce_star(e: Expr, verbose: bool = False) -> list[Expr]:
             print(f'  → {e!r}')
     return seq
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §4  Confluence  (Church-Rosser)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #
 # A transition system is confluent if whenever s →* s₁ and s →* s₂,
 # there exists s' such that s₁ →* s' and s₂ →* s'.
@@ -384,9 +384,9 @@ def normal_form(e: Expr, max_steps: int = 1000) -> Expr:
         e = e2
     raise RuntimeError('max_steps exceeded')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # §3.4  Correspondence theorems
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def check_correspondence(e: Expr) -> None:
     """
@@ -413,17 +413,17 @@ def check_correspondence(e: Expr) -> None:
     print(f'    denotational ⟦e⟧ = {d_expr!r},  ⟦v⟧ = {d_val!r}  {"✓" if ok2 else "✗ FAIL"}')
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Examples
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-SEP = '─' * 64
+SEP = '-' * 64
 
 if __name__ == '__main__':
     print('Small-Step Semantics and Evaluation Contexts')
     print('Theory of Virtual Machines, §§2–5\n')
 
-    # ── 1. Basic reduction sequence ───────────────────────────────────────
+    # -- 1. Basic reduction sequence ---------------------------------------
     #
     # (1 + 2) * (3 + 4)
     #
@@ -438,7 +438,7 @@ if __name__ == '__main__':
     e1 = BinOp('*', BinOp('+', Num(1), Num(2)), BinOp('+', Num(3), Num(4)))
     reduce_star(e1, verbose=True)
 
-    # ── 2. Evaluation context decomposition (visible) ─────────────────────
+    # -- 2. Evaluation context decomposition (visible) ---------------------
     #
     # Show decompose() explicitly: the redex and the context E such that
     # E[redex] = e.  Each step is the contextual rule E[redex] → E[redex'].
@@ -462,14 +462,14 @@ if __name__ == '__main__':
         step_n += 1
     print(f'    value  = {current!r}')
 
-    # ── 3. Conditional ────────────────────────────────────────────────────
+    # -- 3. Conditional ----------------------------------------------------
 
     print(f'\n{SEP}')
     print('3. Conditional  if (2 < 3) then (10 - 1) else 99\n')
     e3 = If(BinOp('<', Num(2), Num(3)), BinOp('-', Num(10), Num(1)), Num(99))
     reduce_star(e3, verbose=True)
 
-    # ── 4. Correspondence theorems  (§3.4) ───────────────────────────────
+    # -- 4. Correspondence theorems  (§3.4) -------------------------------
 
     print(f'\n{SEP}')
     print('4. Correspondence theorems  (§3.4)\n')
@@ -483,7 +483,7 @@ if __name__ == '__main__':
         check_correspondence(ex)
         print()
 
-    # ── 5. Confluence  (§4) ───────────────────────────────────────────────
+    # -- 5. Confluence  (§4) -----------------------------------------------
     #
     # The non-deterministic step_any allows reducing either operand first.
     # For  (1 + 2) + (3 + 4), there are two possible first steps:
@@ -514,7 +514,7 @@ if __name__ == '__main__':
     assert len(finals) == 1, f'Confluence violated: {finals}'
     print(f'    All paths reach {next(iter(finals))!r}  ✓  (Church-Rosser)\n')
 
-    # ── 6. Three styles, one language ────────────────────────────────────
+    # -- 6. Three styles, one language ------------------------------------
     #
     # Summary: all three semantics agree on every expression.
 

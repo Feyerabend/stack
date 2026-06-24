@@ -20,7 +20,7 @@ Definition (Cost-preserving compiler):
 Definition (Resource budget):
   Budget B ∈ W for a guest: halt when accumulated cost > B.
 
-─────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 Machines in this file:
 
 M_S : arithmetic small-step evaluator  (source, same language as simulation.py)
@@ -38,15 +38,15 @@ Cost models shown:
 Key results:
   Under κ_uniform: cost_T(C(e)) = 2·cost_S(e) + 1  (linear blowup, c = 3)
   Under κ_ops:     cost_T(C(e)) = cost_S(e)          (exact preservation, c = 1)
-─────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Source language: arithmetic expressions
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Num:
@@ -82,9 +82,9 @@ def step_source(e: Expr) -> tuple[Expr, Expr] | None:
         return Num(_arith(e.op, e.left.n, e.right.n)), e
     raise RuntimeError(f'Stuck: {e!r}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Target language: stack machine
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Push:
@@ -115,9 +115,9 @@ def target_step(stack: list[int], code: tuple[Instr, ...], pc: int
         stack.append(_arith(instr.op, a, b))
     return stack, pc + 1, instr
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Cost monoids  W = (W, +, 0)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Time:
@@ -139,9 +139,9 @@ class TimeSpace:
         return TimeSpace(self.steps + other.steps, max(self.peak, other.peak))
     def __repr__(self) -> str: return f'({self.steps} steps, depth≤{self.peak})'
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Budget enforcement
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class BudgetExceeded(Exception):
     """
@@ -156,9 +156,9 @@ class BudgetExceeded(Exception):
         self.budget = budget
         super().__init__(f'Budget exceeded: used {used}, budget {budget}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Generic cost-annotated runner
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_source_with_cost(e: Expr, budget: Time | None = None
                          ) -> tuple[Expr, Time, list]:
@@ -219,9 +219,9 @@ def run_target_with_cost_2d(code: tuple[Instr, ...]) -> tuple[int, TimeSpace]:
         ts = ts + TimeSpace(1, len(stack))
     return stack[0], ts
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Cost models κ : Instr → ℕ
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def kappa_uniform(instr: Instr) -> int:
     """Every instruction costs 1.  Models a flat machine where all ops take equal time."""
@@ -235,9 +235,9 @@ def kappa_ops_only(instr: Instr) -> int:
     """
     return 0 if isinstance(instr, Push) else 1
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Demonstrations
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _fmt(instrs) -> str:
     return '[' + ', '.join(repr(i) for i in instrs) + ']'
@@ -299,10 +299,10 @@ def demo_cost_preservation() -> None:
 
     W = 66
     print()
-    print('  ' + '─' * W)
+    print('  ' + '-' * W)
     print(f'  {"Expression":<34}  {"cS":>4}  {"cT(unif)":>9}  {"ratio":>6}  '
           f'{"cT(ops)":>8}  {"ratio":>6}')
-    print('  ' + '─' * W)
+    print('  ' + '-' * W)
 
     for e in exprs:
         code = tuple(compile(e))
@@ -315,7 +315,7 @@ def demo_cost_preservation() -> None:
         print(f'  {label:<34}  {cs.steps:>4}  {ct_u.steps:>9}  {ratio_u:>6.2f}'
               f'  {ct_o.steps:>8}  {ratio_o:>6.2f}')
 
-    print('  ' + '─' * W)
+    print('  ' + '-' * W)
     print('  Under κ_uniform: cost_T ≤ 3·cost_S  (c = 3, constant-factor bound)')
     print('  Under κ_ops:     cost_T = cost_S     (c = 1, exact cost preservation)')
 
@@ -347,12 +347,12 @@ if __name__ == '__main__':
     print('Cost-Annotated Transition Systems and Resource Budgets')
     print('Theory of Virtual Machines, §11')
 
-    # ── 1. Cost traces ─────────────────────────────────────────────────────
+    # -- 1. Cost traces -----------------------------------------------------
     print('\n' + '━' * 70)
     print('1. Cost-annotated execution traces')
     demo_cost_trace(BinOp('*', BinOp('+', Num(2), Num(3)), Num(4)))
 
-    # ── 2. Budget enforcement ───────────────────────────────────────────────
+    # -- 2. Budget enforcement -----------------------------------------------
     print('\n' + '━' * 70)
     print('2. Resource budgets  (Definition: halt when cost > B)')
     print()
@@ -364,12 +364,12 @@ if __name__ == '__main__':
     # same expression with a generous budget 10
     demo_budget(BinOp('*', BinOp('+', Num(1), Num(2)), Num(3)), budget_steps=10)
 
-    # ── 3. Cost-preserving compilation ─────────────────────────────────────
+    # -- 3. Cost-preserving compilation -------------------------------------
     print('\n' + '━' * 70)
     print('3. Cost-preserving compilation  (Definition: cost_T ≤ c · cost_S)')
     demo_cost_preservation()
 
-    # ── 4. Two-dimensional cost ─────────────────────────────────────────────
+    # -- 4. Two-dimensional cost ---------------------------------------------
     print('\n' + '━' * 70)
     print('4. Two-dimensional cost  W = ℕ²  (time × peak stack depth)')
     print('   Space dimension = live-memory cost (Definition: size of live cells)')

@@ -34,3 +34,17 @@ content has a demo. The small-step → CEK derivation of §10.4 — the explicit
 "reify the evaluation context as a continuation" transformation — is mechanised
 in `04_derivation/`, alongside the standalone `smallstep/` and `cek/` endpoints
 in `vm-theory/`.
+
+## Running
+
+```sh
+make run        # all Python demos + Prolog tests + Hoare C + the JDK-less JVM Example
+make run-jvm    # compile and run the Java examples (needs a JDK)
+make clean      # remove build artifacts (C binaries, .class, __pycache__, .dSYM)
+```
+
+The Python demos each self-run with no arguments (e.g. `python3
+vm-theory/code/secd/secd.py`, `python3 06_prolog/sprolog.py`, `python3
+vm-theory/code/wam/wam.py`). `06_prolog/mprolog.py` is an interactive REPL, so it
+is not part of `make run`. The JVM interpreter needs a Java compiler only to build
+the `examples/`; see `vm-theory/code/jvm/README.md`.

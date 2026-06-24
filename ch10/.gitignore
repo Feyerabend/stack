@@ -1,0 +1,9 @@
+# Build artifacts. The top-level .gitignore already covers __pycache__,
+# .DS_Store, *.dSYM, etc.; these are the extensionless C binaries the Hoare
+# Makefile builds next to their sources. (Compiled JVM example classes are
+# ignored by vm-theory/code/jvm/.gitignore.)
+vm-theory/code/hoare/c/various
+vm-theory/code/hoare/c/linked_list
+vm-theory/code/hoare/c/concurrency
+vm-theory/code/hoare/c/incorrectness
+vm-theory/code/hoare/c/higher_order

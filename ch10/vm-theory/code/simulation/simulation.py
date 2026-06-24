@@ -17,7 +17,7 @@ We exhibit:
   - C   : standard left-to-right compilation
   - R   : a structural simulation relation on (M_S-state, M_T-state) pairs
 
-─────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 Language and machines
 
 Source language:
@@ -35,7 +35,7 @@ Compiler C : Expr → list[Instr]:
   C(n)         = [PUSH n]
   C(e₁ ⊕ e₂)  = C(e₁) ++ C(e₂) ++ [OP ⊕]
 
-─────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 Simulation relation R ⊆ States_S × States_T
 
   (e, (stack, code, pc)) ∈ R
@@ -57,15 +57,15 @@ Simulation condition (Def. 9.2, clause 2):
   there exist one or more target steps landing in ts' with (e', ts') ∈ R.
   The target takes exactly len(C(redex)) steps per source step —
   the number of instructions needed to reduce the redex.
-─────────────────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Source language
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Num:
@@ -90,9 +90,9 @@ def _arith(op: str, a: int, b: int) -> int:
     if op == '*': return a * b
     raise ValueError(f'Unknown op: {op!r}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Source machine M_S: left-to-right small-step
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def step_source(e: Expr) -> tuple[Expr, Expr] | None:
     """
@@ -127,9 +127,9 @@ def reduce_source(e: Expr) -> Num:
     assert isinstance(e, Num)
     return e
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Target machine M_T: stack machine
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Push:
@@ -165,9 +165,9 @@ def reduce_target(code: tuple[Instr, ...]) -> int:
         stack, pc = target_step(stack, code, pc)
     return stack[0]
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Compiler C : Expr → list[Instr]
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def compile(e: Expr) -> list[Instr]:
     """
@@ -182,9 +182,9 @@ def compile(e: Expr) -> list[Instr]:
         return compile(e.left) + compile(e.right) + [Oper(e.op)]
     raise TypeError(f'Cannot compile: {e!r}')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Simulation relation R
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def compile_stack(stack: list[int]) -> list[Instr]:
     """
@@ -201,9 +201,9 @@ def in_R(e: Expr, stack: list[int], code: tuple[Instr, ...], pc: int) -> bool:
     """
     return compile_stack(stack) + list(code[pc:]) == compile(e)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Lockstep simulation runner
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def advance_to_R(e_new: Expr, stack: list[int], code: tuple[Instr, ...], pc: int,
                  max_steps: int = 200) -> tuple[list[int], int, list]:
@@ -232,9 +232,9 @@ def advance_to_R(e_new: Expr, stack: list[int], code: tuple[Instr, ...], pc: int
     raise RuntimeError(
         f'advance_to_R: no state in R with {e_new!r} after {max_steps} steps')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Pretty-printing helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _fmt(instrs: list[Instr]) -> str:
     return '[' + ', '.join(repr(i) for i in instrs) + ']'
@@ -243,9 +243,9 @@ def _fmt_state(stack: list[int], code: tuple[Instr, ...], pc: int) -> str:
     remaining = list(code[pc:])
     return f'stack={stack}  code[{pc}:]={_fmt(remaining)}'
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # simulate: the main demonstration function
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def simulate(e: Expr) -> None:
     """
@@ -282,7 +282,7 @@ def simulate(e: Expr) -> None:
         assert r is not None
         e_new, redex = r
 
-        print('  ' + '─' * W)
+        print('  ' + '-' * W)
         print(f'  Source step {step_n}: {e!r}')
         print(f'    →  {e_new!r}     [redex = {redex!r}]')
         print()
@@ -310,13 +310,13 @@ def simulate(e: Expr) -> None:
         e = e_new
         step_n += 1
 
-    print('  ' + '─' * W)
+    print('  ' + '-' * W)
     assert isinstance(e, Num) and stack == [e.n]
     print(f'  Final: source = {e!r},  target stack = {stack}  ✓')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Semantic preservation check (Theorem 9.3, consequence)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def check_preservation(e: Expr) -> None:
     """
@@ -332,31 +332,31 @@ def check_preservation(e: Expr) -> None:
     print(f'    ⟦C(e)⟧_T = {tgt}    {status}')
     assert src == tgt, f'Preservation failed for {e!r}'
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Demonstrations
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     print('Simulation Relations and Compiler Correctness')
     print('Theory of Virtual Machines, §9.2–9.3')
 
-    # ── Example 1: (2+3)*4 ────────────────────────────────────────────────
+    # -- Example 1: (2+3)*4 ------------------------------------------------
     # Source reduces left-to-right:  (2+3)*4 → 5*4 → 20
     # Each source step consumes len(C(redex)) target steps.
     simulate(BinOp('*', BinOp('+', Num(2), Num(3)), Num(4)))
 
-    # ── Example 2: (1+2)*(3+4) ────────────────────────────────────────────
+    # -- Example 2: (1+2)*(3+4) --------------------------------------------
     # Three source steps; second step leaves two partial values on the stack.
     simulate(BinOp('*', BinOp('+', Num(1), Num(2)), BinOp('+', Num(3), Num(4))))
 
-    # ── Example 3: ((10-3)*2) - (1+1) ────────────────────────────────────
+    # -- Example 3: ((10-3)*2) - (1+1) ------------------------------------
     # Deeper nesting; R must account for the stack growing across levels.
     simulate(
         BinOp('-',
               BinOp('*', BinOp('-', Num(10), Num(3)), Num(2)),
               BinOp('+', Num(1), Num(1))))
 
-    # ── Semantic preservation summary ─────────────────────────────────────
+    # -- Semantic preservation summary -------------------------------------
     print()
     print('  ' + '━' * 62)
     print('  Semantic preservation  ⟦C(e)⟧_T = ⟦e⟧_S  (Theorem 9.3)')

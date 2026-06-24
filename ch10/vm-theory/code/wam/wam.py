@@ -1,491 +1,363 @@
+"""A small Warren Abstract Machine.
+
+This is a teaching-sized WAM: it compiles a Horn-clause program (facts, rules,
+and queries) into a flat list of instructions and executes them with the WAM's
+characteristic machinery -- argument registers, unification against clause heads,
+choice points for backtracking, a trail for undoing bindings, and a cut barrier.
+
+The instruction set follows Warren's split between the two sides of a call:
+
+  * a goal/query loads the *argument registers* with ``put_*`` instructions and
+    then CALLs the predicate;
+  * a clause *head* unifies those argument registers against its own arguments
+    with ``get_*`` instructions.
+
+Terms here are only variables and atomic constants (no compound structures), which
+is enough for the family-relations program at the bottom of the file.
+"""
+
+
 class WAM:
     def __init__(self, debug=False):
         self.debug = debug
         self.registers = {
             'IP': 0,    # instruction pointer
-            'CP': 0,    # current predicate
+            'CP': 0,    # current predicate (unused in this miniature)
             'HP': 0,    # heap pointer
         }
-        self.heap = []          # term storage
-        self.stack = []         # execution stack
-        self.call_stack = []    # procedure return addresses
+        self.heap = []          # variable cells (and fresh anonymous vars)
+        self.argregs = [None] * 8   # argument registers A0, A1, ...
+        self.call_stack = []    # entries: (return_ip, cut_barrier)
         self.choice_points = [] # backtrack points
+        self.trail = []         # records bindings so they can be undone
         self.instructions = []  # loaded program
-        self.predicates = {}    # predicate table
-        self.constants = {}     # constant table
-        self.variables = {}     # variable table
-        self.trail = []         # trail for variable bindings (for backtracking)
-        self.solutions = []     # store found solutions
+        self.predicates = {}    # (name, arity) -> entry address
+        self.constants = {}     # index -> name
+        self.variables = {}     # name -> index
+        self.query_vars = []    # (name, index) reported in a solution
+        self.solutions = []     # bindings found for the current query
 
     def load(self, compiler):
         self.instructions = compiler.instructions
         self.predicates = compiler.predicates
-        self.constants = {v:k for k,v in compiler.constants.items()}
+        self.constants = {v: k for k, v in compiler.constants.items()}
         self.variables = compiler.vars
-        self.heap = [None] * (len(compiler.vars) + len(compiler.constants) + 10)  # +10 buffer
+        # One heap cell per program variable, each initially unbound (self-ref).
+        self.heap = [('REF', i) for i in range(len(compiler.vars))]
+        self.registers['HP'] = len(self.heap)
 
-    def create_choice_point(self, alternatives):
-        """Create a choice point for backtracking"""
-        choice_point = {
-            'IP': self.registers['IP'],
-            'stack': self.stack.copy(),
-            'heap': self.heap.copy(),
-            'trail': self.trail.copy(),
-            'call_stack': self.call_stack.copy(),
-            'alternatives': alternatives,
-            'next_alternative': 0
-        }
-        self.choice_points.append(choice_point)
-        return len(self.choice_points) - 1  # Return index of the new choice point
+    # ---- term operations -------------------------------------------------
 
-    def backtrack(self):
-        """Backtrack to the last choice point"""
-        if not self.choice_points:
-            return False  # No more choice points, fail
-        
-        choice_point = self.choice_points[-1]
-        
-        # Try the next alternative
-        if choice_point['next_alternative'] >= len(choice_point['alternatives']):
-            # No more alternatives, backtrack to previous choice point
-            self.choice_points.pop()
-            return self.backtrack()
-        
-        # Restore state
-        self.registers['IP'] = choice_point['alternatives'][choice_point['next_alternative']]
-        choice_point['next_alternative'] += 1  # Move to next alternative for future backtracking
-        self.stack = choice_point['stack'].copy()
-        self.heap = choice_point['heap'].copy()
-        self.trail = choice_point['trail'].copy()
-        self.call_stack = choice_point['call_stack'].copy()
-        
-        return True  # Successfully backtracked
-
-    def unify(self, term1, term2):
-        """Unify two terms, return True if successful"""
-        # Dereference terms to their values
-        term1_val = self.deref(term1)
-        term2_val = self.deref(term2)
-        
-        # If both are references to unbound variables
-        if term1_val[0] == 'REF' and term2_val[0] == 'REF':
-            if term1_val[1] == term2_val[1]:  # Same variable
-                return True
-            # Bind one variable to another
-            self.bind(term1_val[1], term2_val)
-            return True
-        
-        # If term1 is an unbound variable
-        if term1_val[0] == 'REF':
-            self.bind(term1_val[1], term2_val)
-            return True
-        
-        # If term2 is an unbound variable
-        if term2_val[0] == 'REF':
-            self.bind(term2_val[1], term1_val)
-            return True
-        
-        # If both are constants
-        if term1_val[0] == 'CONST' and term2_val[0] == 'CONST':
-            return term1_val[1] == term2_val[1]
-        
-        # If neither match, unification fails
-        return False
+    def new_var(self):
+        """Allocate a fresh unbound variable cell and return a reference to it."""
+        addr = len(self.heap)
+        self.heap.append(('REF', addr))
+        self.registers['HP'] = len(self.heap)
+        return ('REF', addr)
 
     def deref(self, term):
-        """Dereference a term to find its value"""
-        if isinstance(term, tuple) and term[0] == 'REF':
-            # Find the actual value by following reference chain
+        """Follow the reference chain to a constant or an unbound variable."""
+        while isinstance(term, tuple) and term[0] == 'REF':
             addr = term[1]
-            while isinstance(self.heap[addr], tuple) and self.heap[addr][0] == 'REF' and self.heap[addr][1] != addr:
-                addr = self.heap[addr][1]
-            return self.heap[addr] if self.heap[addr] is not None else ('REF', addr)
+            cell = self.heap[addr]
+            if isinstance(cell, tuple) and cell[0] == 'REF' and cell[1] == addr:
+                return term  # unbound: points to itself
+            term = cell
         return term
 
     def bind(self, var_addr, value):
-        """Bind a variable to a value and record in trail for backtracking"""
+        """Bind a variable cell to a value, recording the old value on the trail."""
         self.trail.append((var_addr, self.heap[var_addr]))
         self.heap[var_addr] = value
 
-    def fetch_execute(self, find_all=False):
+    def unify(self, term1, term2):
+        t1 = self.deref(term1)
+        t2 = self.deref(term2)
+
+        if t1[0] == 'REF' and t2[0] == 'REF':
+            if t1[1] == t2[1]:
+                return True
+            self.bind(t1[1], t2)
+            return True
+        if t1[0] == 'REF':
+            self.bind(t1[1], t2)
+            return True
+        if t2[0] == 'REF':
+            self.bind(t2[1], t1)
+            return True
+        if t1[0] == 'CONST' and t2[0] == 'CONST':
+            return t1[1] == t2[1]
+        return False
+
+    # ---- choice points and backtracking ---------------------------------
+
+    def push_choice_point(self, next_addr):
+        """Snapshot the machine so a later failure can resume at next_addr."""
+        self.choice_points.append({
+            'next': next_addr,
+            'heap': self.heap.copy(),
+            'argregs': self.argregs.copy(),
+            'trail': self.trail.copy(),
+            'call_stack': self.call_stack.copy(),
+        })
+
+    def backtrack(self):
+        """Restore the most recent choice point and resume at its alternative."""
+        if not self.choice_points:
+            return False
+        cp = self.choice_points[-1]
+        self.heap = cp['heap'].copy()
+        self.argregs = cp['argregs'].copy()
+        self.trail = cp['trail'].copy()
+        self.call_stack = cp['call_stack'].copy()
+        self.registers['IP'] = cp['next']
+        return True
+
+    # ---- the fetch/execute cycle ----------------------------------------
+
+    def run(self, find_all=True):
         try:
-            while self.registers['IP'] < len(self.instructions):
+            while 0 <= self.registers['IP'] < len(self.instructions):
                 instr = self.instructions[self.registers['IP']]
                 op, arg1, arg2 = instr
                 current_ip = self.registers['IP']
                 self.registers['IP'] += 1
-                
-                if self.debug:
-                    print(f"\n[{current_ip}] {op} {arg1} {arg2 if arg2 else ''}")
-                    print(f"Registers: {self.registers}")
-                    print(f"Stack: {self.stack}")
-                    print(f"Heap: {[x for x in self.heap if x is not None]}")
-                    print(f"Call Stack: {self.call_stack}")
-                    print(f"Choice Points: {len(self.choice_points)}")
 
-                if op == 'CALL':
-                    pred_name, arity = arg1
-                    # Check if predicate exists
-                    if (pred_name, arity) in self.predicates:
-                        # Create a choice point if there are multiple clauses
-                        if isinstance(self.predicates[(pred_name, arity)], list):
-                            # Multiple clause addresses
-                            clause_addrs = self.predicates[(pred_name, arity)]
-                            self.create_choice_point(clause_addrs)
-                            self.registers['IP'] = clause_addrs[0]  # Try first clause
-                        else:
-                            # Single clause address
-                            self.call_stack.append(self.registers['IP'])
-                            self.registers['IP'] = self.predicates[(pred_name, arity)]
-                    else:
-                        if self.debug:
-                            print(f"Predicate {pred_name}/{arity} not found")
+                if self.debug:
+                    print(f"[{current_ip:3d}] {op} {arg1} {arg2}  "
+                          f"A={self.argregs[:3]} cp={len(self.choice_points)}")
+
+                if op == 'PUT_CONST':
+                    self.argregs[arg1] = ('CONST', self.constants[arg2])
+                elif op == 'PUT_VAR':
+                    self.argregs[arg1] = ('REF', arg2)
+                elif op == 'PUT_VOID':
+                    self.argregs[arg1] = self.new_var()
+                elif op == 'GET_CONST':
+                    if not self.unify(self.argregs[arg1], ('CONST', self.constants[arg2])):
                         if not self.backtrack():
-                            break  # No more choice points
-                elif op == 'TRY_ME_ELSE':
-                    # First clause of multiple, next is at arg1
-                    choice_point_idx = self.create_choice_point([arg1])
-                elif op == 'RETRY_ME_ELSE':
-                    # Middle clause of multiple, next is at arg1
-                    if self.choice_points:
-                        self.choice_points[-1]['alternatives'].append(arg1)
-                elif op == 'TRUST_ME':
-                    # Last clause of multiple, no next
-                    pass
-                elif op == 'PROCEED':
-                    # End of a clause, return to caller
-                    if self.call_stack:
-                        self.registers['IP'] = self.call_stack.pop()
-                    else:
-                        # End of query, we found a solution
-                        self.save_solution()
-                        if find_all:
-                            # Try to find more solutions
-                            if not self.backtrack():
-                                print("\nNo more solutions")
-                                return
-                        else:
-                            print("\nExecution completed successfully")
                             return
-                elif op == 'GET_VARIABLE':
-                    # Push variable reference onto stack
-                    self.stack.append(('REF', arg1))
-                elif op == 'GET_CONSTANT':
-                    # Push constant onto stack
-                    self.stack.append(('CONST', self.constants[arg1]))
-                elif op == 'PUT_CONSTANT':
-                    # Store constant in heap
-                    self.heap[arg1] = ('CONST', self.constants[arg2])
-                elif op == 'PUT_VARIABLE':
-                    # Initialize variable on heap
-                    self.heap[arg1] = ('REF', arg1)
-                elif op == 'UNIFY_VARIABLE':
-                    # Try to unify top of stack with variable
-                    term = self.stack.pop()
-                    if not self.unify(('REF', arg1), term):
+                elif op == 'GET_VAR':
+                    if not self.unify(self.argregs[arg1], ('REF', arg2)):
                         if not self.backtrack():
-                            print("\nUnification failed, no more alternatives")
-                            return False
-                elif op == 'PUT_ANY':
-                    # Store anonymous variable
-                    self.heap[arg1] = ('REF', arg1)
-                elif op == 'GET_ANY':
-                    # Create a new reference for anonymous variable
-                    new_addr = len(self.heap)
-                    self.heap.append(('REF', new_addr))
-                    self.stack.append(('REF', new_addr))
+                            return
+                elif op == 'GET_VOID':
+                    pass  # an anonymous head argument unifies with anything
+                elif op == 'CALL':
+                    if arg1 in self.predicates:
+                        cut_barrier = len(self.choice_points)
+                        self.call_stack.append((self.registers['IP'], cut_barrier))
+                        self.registers['IP'] = self.predicates[arg1]
+                    else:
+                        if not self.backtrack():
+                            return
+                elif op == 'PROCEED':
+                    if self.call_stack:
+                        self.registers['IP'] = self.call_stack.pop()[0]
+                    else:
+                        return
+                elif op == 'TRY_ME_ELSE':
+                    self.push_choice_point(arg1)
+                elif op == 'RETRY_ME_ELSE':
+                    if self.choice_points:
+                        self.choice_points[-1]['next'] = arg1
+                elif op == 'TRUST_ME':
+                    if self.choice_points:
+                        self.choice_points.pop()
                 elif op == 'CUT':
-                    # Remove choice points created since arg1
-                    self.choice_points = self.choice_points[:arg1]
+                    barrier = self.call_stack[-1][1] if self.call_stack else 0
+                    del self.choice_points[barrier:]
                 elif op == 'BUILTIN':
-                    # Execute built-in predicate
                     if not self.execute_builtin(arg1):
                         if not self.backtrack():
-                            break  # No more choice points
+                            return
                 elif op == 'HALT':
-                    print("\nExecution completed successfully")
-                    return True
+                    # The query goal succeeded: record bindings, then look for more.
+                    self.save_solution()
+                    if find_all:
+                        if not self.backtrack():
+                            return
+                    else:
+                        return
                 else:
                     raise ValueError(f"Unknown instruction: {op}")
-
         except Exception as e:
             print(f"\nERROR AT [{current_ip}] {instr}: {e}")
             raise
 
     def execute_builtin(self, builtin):
         if builtin == r'\=':
-            right = self.stack.pop()
-            left = self.stack.pop()
-            # Dereference before comparison
-            left_val = self.deref(left)
-            right_val = self.deref(right)
-            
-            if left_val[0] == 'REF' or right_val[0] == 'REF':
-                # One is an unbound variable, can't determine equality yet
+            left = self.deref(self.argregs[0])
+            right = self.deref(self.argregs[1])
+            if left[0] == 'REF' or right[0] == 'REF':
+                # Not enough is known to prove they differ; treat as failure.
                 return False
-            
-            if left_val == right_val:
-                # Values are equal, which means inequality fails
-                return False
-            return True
-        else:
-            raise ValueError(f"Unknown built-in predicate: {builtin}")
+            return left != right
+        raise ValueError(f"Unknown built-in predicate: {builtin}")
+
+    # ---- reporting -------------------------------------------------------
 
     def save_solution(self):
-        """Save the current variable bindings as a solution"""
-        solution = {}
-        for var_name, var_idx in self.variables.items():
-            # Skip system variables and anonymous variables
-            if var_name != '_' and var_name[0].isupper():
-                solution[var_name] = self.pretty_print_term(('REF', var_idx))
+        solution = {name: self.pretty_print_term(('REF', idx))
+                    for name, idx in self.query_vars}
         self.solutions.append(solution)
-        print(f"\nSolution found: {solution}")
 
     def pretty_print_term(self, term):
-        """Print a term in a readable format"""
         term_val = self.deref(term)
         if term_val[0] == 'REF':
-            return f"_{term_val[1]}"  # Unbound variable
-        elif term_val[0] == 'CONST':
-            return term_val[1]  # Constant
-        return str(term_val)  # Default case
+            return f"_{term_val[1]}"   # still unbound
+        return term_val[1]            # a constant's name
 
 
 class Compiler:
     def __init__(self, debug=False):
         self.debug = debug
-        self.vars = {}        # maps variables (VARIABLES) to indices
-        self.constants = {}   # maps constants (lowercase) to indices
-        self.predicates = {}  # maps predicates to code addresses
+        self.vars = {}          # variable name -> index
+        self.constants = {}     # constant name -> index
+        self.predicates = {}    # (name, arity) -> entry address
         self.instructions = []
-        self.pred_clauses = {} # maps predicates to lists of clauses for multi-clause compilation
+        self.pred_clauses = {}  # (name, arity) -> [clause, ...]
+        self.query_addrs = []   # [(query_term, query_vars, start_address), ...]
 
-        # register built-in predicates
         self.builtins = {r'\=': self.compile_inequality}
+
+    # ---- symbol tables ---------------------------------------------------
+
+    def intern_const(self, name):
+        if name not in self.constants:
+            self.constants[name] = len(self.constants)
+        return self.constants[name]
+
+    def intern_var(self, name):
+        if name not in self.vars:
+            self.vars[name] = len(self.vars)
+        return self.vars[name]
+
+    @staticmethod
+    def is_var(token):
+        return isinstance(token, str) and token != '_' and token[0].isupper()
+
+    # ---- emitting head and goal arguments --------------------------------
+
+    def compile_head(self, head):
+        """A clause head unifies its arguments against the argument registers."""
+        for i, arg in enumerate(head[1:]):
+            if arg == '_':
+                self.instructions.append(('GET_VOID', i, 0))
+            elif self.is_var(arg):
+                self.instructions.append(('GET_VAR', i, self.intern_var(arg)))
+            else:
+                self.instructions.append(('GET_CONST', i, self.intern_const(arg)))
+
+    def compile_goal(self, goal):
+        """A goal loads the argument registers, then calls the predicate."""
+        name, args = goal[0], goal[1:]
+        for i, arg in enumerate(args):
+            if arg == '_':
+                self.instructions.append(('PUT_VOID', i, 0))
+            elif self.is_var(arg):
+                self.instructions.append(('PUT_VAR', i, self.intern_var(arg)))
+            else:
+                self.instructions.append(('PUT_CONST', i, self.intern_const(arg)))
+        self.instructions.append(('CALL', (name, len(args)), 0))
 
     def compile_inequality(self, args):
         left, right = args
-
-        if left[0].isupper():  # variable, X, Y, etc.
-            self.instructions.append(('GET_VARIABLE', self.vars[left], 0))
-        else:  # constant, a, b, etc.
-            self.instructions.append(('GET_CONSTANT', self.constants[left], 0))
-        
-        if right[0].isupper():
-            self.instructions.append(('GET_VARIABLE', self.vars[right], 0))
-        else:
-            self.instructions.append(('GET_CONSTANT', self.constants[right], 0))
-        
+        for i, arg in enumerate((left, right)):
+            if self.is_var(arg):
+                self.instructions.append(('PUT_VAR', i, self.intern_var(arg)))
+            else:
+                self.instructions.append(('PUT_CONST', i, self.intern_const(arg)))
         self.instructions.append(('BUILTIN', r'\=', 0))
 
-    # First collect all clauses, then compile them to handle multiple clauses per predicate
-    def compile(self, clauses):
-        # First pass: collect clauses by predicate
-        for clause in clauses:
-            if clause[0] == ':-':
-                head = clause[1]
-                pred_name, pred_args = head[0], head[1:]
-                pred_key = (pred_name, len(pred_args))
-                if pred_key not in self.pred_clauses:
-                    self.pred_clauses[pred_key] = []
-                self.pred_clauses[pred_key].append(clause)
-            elif clause[0] == '?-':
-                # Queries are handled separately
-                pass
-            else:
-                # Facts are single-clause predicates
-                pred_name, pred_args = clause[0], clause[1:]
-                pred_key = (pred_name, len(pred_args))
-                if pred_key not in self.pred_clauses:
-                    self.pred_clauses[pred_key] = []
-                self.pred_clauses[pred_key].append(clause)
-        
-        # Second pass: compile predicates with multiple clauses
-        for pred_key, pred_clauses in self.pred_clauses.items():
-            if len(pred_clauses) > 1:
-                self.compile_multi_clause_predicate(pred_key, pred_clauses)
-            else:
-                # Single clause predicate
-                clause = pred_clauses[0]
-                if clause[0] == ':-':
-                    self.compile_rule(clause[1], clause[2:])
-                else:
-                    self.compile_fact(clause)
-        
-        # Compile queries last
-        for clause in clauses:
-            if clause[0] == '?-':
-                self.compile_query(clause[1])
-        
-        # HALT at the end
-        self.instructions.append(('HALT', 0, 0))
-
-    def compile_multi_clause_predicate(self, pred_key, clauses):
-        """Compile a predicate with multiple clauses using TRY/RETRY/TRUST instructions"""
-        pred_name, arity = pred_key
-        clause_addrs = []
-        
-        if self.debug:
-            print(f"\nCompiling multi-clause predicate {pred_name}/{arity} with {len(clauses)} clauses")
-        
-        # Store the predicate entry point
-        self.predicates[pred_key] = len(self.instructions)
-        
-        # TRY_ME_ELSE points to the next clause
-        for i in range(len(clauses) - 1):
-            # Record where this clause begins
-            clause_addr = len(self.instructions)
-            clause_addrs.append(clause_addr)
-            
-            # The next clause will be at the end of the current instructions plus this clause's instructions
-            next_clause_addr = None  # Will be filled in after compiling this clause
-            
-            if i == 0:
-                self.instructions.append(('TRY_ME_ELSE', next_clause_addr, 0))
-            else:
-                self.instructions.append(('RETRY_ME_ELSE', next_clause_addr, 0))
-                
-            # Compile the clause body
-            clause = clauses[i]
-            if clause[0] == ':-':
-                self.compile_rule_body(clause[1], clause[2:], updating_addrs=True)
-            else:
-                self.compile_fact_body(clause, updating_addrs=True)
-            
-            # Now update the next_clause_addr in the TRY/RETRY instruction
-            next_clause_addr = len(self.instructions)
-            self.instructions[clause_addr] = (self.instructions[clause_addr][0], next_clause_addr, 0)
-        
-        # Last clause uses TRUST_ME
-        clause_addr = len(self.instructions)
-        clause_addrs.append(clause_addr)
-        self.instructions.append(('TRUST_ME', 0, 0))
-        
-        # Compile the last clause
-        clause = clauses[-1]
-        if clause[0] == ':-':
-            self.compile_rule_body(clause[1], clause[2:], updating_addrs=True)
-        else:
-            self.compile_fact_body(clause, updating_addrs=True)
-
-    def compile_rule_body(self, head, body, updating_addrs=False):
-        """Compile just the body of a rule, without creating a new predicate entry"""
-        pred_name, pred_args = head[0], head[1:]
-        
-        if not updating_addrs:
-            if self.debug:
-                print(f"\nCompiling rule body {pred_name}/{len(pred_args)}")
-
-        # Register all variables from the head
-        for arg in pred_args:
-            if arg != '_' and arg not in self.vars and arg[0].isupper():
-                self.vars[arg] = len(self.vars)
-                if self.debug:
-                    print(f"  Variable {arg} => v{self.vars[arg]}")
-
-        # Register all variables from the body
-        for goal in body:
-            if isinstance(goal, list):  # skip cut operator '!'
-                for arg in goal[1:]:   # skip the functor
-                    if arg != '_' and arg not in self.vars and arg[0].isupper():
-                        self.vars[arg] = len(self.vars)
-                        if self.debug:
-                            print(f"  Variable {arg} => v{self.vars[arg]}")
-
-        # Compile body
+    def compile_body(self, body):
         for goal in body:
             if goal == '!':
-                if self.debug:
-                    print("  Compiling cut")
-                self.instructions.append(('CUT', len(self.vars), 0))
+                self.instructions.append(('CUT', 0, 0))
             elif isinstance(goal, list) and goal[0] in self.builtins:
-                if self.debug:
-                    print(f"  Compiling built-in {goal[0]}")
-                # built-in predicates
                 self.builtins[goal[0]](goal[1:])
             else:
                 self.compile_goal(goal)
 
+    def compile_clause(self, clause):
+        """Compile one clause's head + body (no predicate-entry bookkeeping)."""
+        if clause[0] == ':-':
+            head, body = clause[1], clause[2:]
+        else:
+            head, body = clause, []
+        # Register every variable first so indices are stable across the clause.
+        for token in self._clause_tokens(head, body):
+            if self.is_var(token):
+                self.intern_var(token)
+        self.compile_head(head)
+        self.compile_body(body)
         self.instructions.append(('PROCEED', 0, 0))
 
-    def compile_rule(self, head, body):
-        pred_name, pred_args = head[0], head[1:]
-        arity = len(pred_args)
-        self.predicates[(pred_name, arity)] = len(self.instructions)
-        
-        if self.debug:
-            print(f"\nCompiling rule {pred_name}/{arity}")
-        self.compile_rule_body(head, body)
+    @staticmethod
+    def _clause_tokens(head, body):
+        yield from head[1:]
+        for goal in body:
+            if isinstance(goal, list):
+                yield from goal[1:]
 
-    def compile_fact_body(self, fact, updating_addrs=False):
-        """Compile just the body of a fact, without creating a new predicate entry"""
-        pred_name, pred_args = fact[0], fact[1:]
-        
-        if not updating_addrs:
-            if self.debug:
-                print(f"\nCompiling fact body {pred_name}/{len(pred_args)}")
+    # ---- top-level compilation ------------------------------------------
 
-        for i, arg in enumerate(pred_args):
-            if arg == '_':
-                self.instructions.append(('PUT_ANY', i, 0))
-            elif isinstance(arg, str) and arg[0].islower():
-                if arg not in self.constants:
-                    self.constants[arg] = len(self.constants)
-                    if self.debug:
-                        print(f"  Constant {arg} => c{self.constants[arg]}")
-                self.instructions.append(('PUT_CONSTANT', i, self.constants[arg]))
+    def compile(self, clauses):
+        # First pass: group facts and rules by predicate.
+        for clause in clauses:
+            if clause[0] == '?-':
+                continue
+            head = clause[1] if clause[0] == ':-' else clause
+            key = (head[0], len(head) - 1)
+            self.pred_clauses.setdefault(key, []).append(clause)
+
+        # Second pass: emit each predicate's clauses.
+        for key, clauses_for_pred in self.pred_clauses.items():
+            if len(clauses_for_pred) > 1:
+                self.compile_multi_clause(key, clauses_for_pred)
             else:
-                if arg not in self.vars:
-                    self.vars[arg] = len(self.vars)
-                    if self.debug:
-                        print(f"  Variable {arg} => v{self.vars[arg]}")
-                self.instructions.append(('PUT_VARIABLE', self.vars[arg], 0))
+                self.predicates[key] = len(self.instructions)
+                self.compile_clause(clauses_for_pred[0])
 
-        self.instructions.append(('PROCEED', 0, 0))
+        # Queries last: each gets its own entry point and a trailing HALT.
+        for clause in clauses:
+            if clause[0] == '?-':
+                self.compile_query(clause[1])
 
-    def compile_fact(self, fact):
-        pred_name, pred_args = fact[0], fact[1:]
-        arity = len(pred_args)
-        self.predicates[(pred_name, arity)] = len(self.instructions)
-        
-        if self.debug:
-            print(f"\nCompiling fact {pred_name}/{arity}")
-        self.compile_fact_body(fact)
-
-    def compile_goal(self, goal):
-        pred_name, pred_args = goal[0], goal[1:]
-        arity = len(pred_args)
-        
-        if self.debug:
-            print(f"  Compiling goal {pred_name}/{arity}")
-
-        for arg in pred_args:
-            if arg == '_':
-                self.instructions.append(('GET_ANY', 0, 0))
-            elif isinstance(arg, str) and arg[0].islower():
-                if arg not in self.constants:
-                    self.constants[arg] = len(self.constants)
-                    if self.debug:
-                        print(f"  Constant {arg} => c{self.constants[arg]}")
-                self.instructions.append(('GET_CONSTANT', self.constants[arg], 0))
+    def compile_multi_clause(self, key, clauses):
+        """Lay out clauses with TRY_ME_ELSE / RETRY_ME_ELSE / TRUST_ME."""
+        self.predicates[key] = len(self.instructions)
+        for i, clause in enumerate(clauses):
+            control_addr = len(self.instructions)
+            if i == 0:
+                self.instructions.append(['TRY_ME_ELSE', None, 0])
+            elif i < len(clauses) - 1:
+                self.instructions.append(['RETRY_ME_ELSE', None, 0])
             else:
-                self.instructions.append(('GET_VARIABLE', self.vars[arg], 0))
-        
-        self.instructions.append(('CALL', (pred_name, arity), 0))
+                self.instructions.append(['TRUST_ME', 0, 0])
+            self.compile_clause(clause)
+            # Patch the control instruction to point at the next clause.
+            if i < len(clauses) - 1:
+                self.instructions[control_addr][1] = len(self.instructions)
+        # Freeze the control instructions back into tuples.
+        for addr, instr in enumerate(self.instructions):
+            if isinstance(instr, list):
+                self.instructions[addr] = tuple(instr)
 
     def compile_query(self, query):
-        if self.debug:
-            print(f"\nCompiling query: {query}")
-
-        # Register variables in the query
-        for arg in query[1:]:  # skip the functor
-            if arg != '_' and arg not in self.vars and arg[0].isupper():
-                self.vars[arg] = len(self.vars)
-                if self.debug:
-                    print(f"  Variable {arg} => v{self.vars[arg]}")
-
-        # Compile the query as a goal
+        query_vars = []
+        for arg in query[1:]:
+            if self.is_var(arg) and arg not in dict(query_vars):
+                query_vars.append((arg, self.intern_var(arg)))
+        start = len(self.instructions)
         self.compile_goal(query)
+        self.instructions.append(('HALT', 0, 0))
+        self.query_addrs.append((query, query_vars, start))
+
+
+def format_query(query):
+    name, args = query[0], query[1:]
+    return f"{name}({', '.join(args)})"
 
 
 program = [
@@ -498,55 +370,35 @@ program = [
     [':-', ['sibling', 'X', 'Y'], ['parent', 'Z', 'X'], ['parent', 'Z', 'Y'], [r'\=', 'X', 'Y']],
     ['?-', ['child', 'X']],
     ['?-', ['grandparent', 'zeb', 'Who']],
-    ['?-', ['sibling', 'john', 'Sibling']]
+    ['?-', ['sibling', 'john', 'Sibling']],
 ]
 
 
-print("=== COMPILATION ===")
-compiler = Compiler()
-compiler.compile(program)
+if __name__ == '__main__':
+    print("=== COMPILATION ===")
+    compiler = Compiler()
+    compiler.compile(program)
 
-print("\n=== COMPILATION RESULTS ===")
-print(f"Variables: {compiler.vars}")
-print(f"Constants: {compiler.constants}")
-print(f"Predicates: {compiler.predicates}")
-print("\nGenerated Code:")
-for addr, instr in enumerate(compiler.instructions):
-    print(f"{addr:3d}: {instr}")
+    print(f"Variables:  {compiler.vars}")
+    print(f"Constants:  {compiler.constants}")
+    print(f"Predicates: {compiler.predicates}")
+    print("\nGenerated code:")
+    for addr, instr in enumerate(compiler.instructions):
+        print(f"{addr:3d}: {instr}")
 
-print("\n=== EXECUTION ===")
-vm = WAM()
-vm.load(compiler)
+    print("\n=== EXECUTION ===")
+    for query, query_vars, start in compiler.query_addrs:
+        vm = WAM()
+        vm.load(compiler)
+        vm.query_vars = query_vars
+        vm.registers['IP'] = start
+        vm.run(find_all=True)
 
-print("Starting execution with child(X)...")
-try:
-    # init call stack with HALT
-    vm.call_stack.append(len(vm.instructions)-1)  # address of HALT
-    # start execution at child/1
-    vm.registers['IP'] = vm.predicates[('child', 1)]
-    vm.fetch_execute(find_all=True)  # Set to True to find all solutions
-    
-    print("\nFound solutions:", vm.solutions)
-    
-    # Try the next query: grandparent(zeb, Who)
-    print("\nStarting execution with grandparent(zeb, Who)...")
-    vm = WAM()  # Create a new VM instance
-    vm.load(compiler)
-    vm.call_stack.append(len(vm.instructions)-1)  # address of HALT
-    vm.registers['IP'] = vm.predicates[('grandparent', 2)]
-    vm.fetch_execute(find_all=True)
-    
-    print("\nFound solutions:", vm.solutions)
-    
-    # Try the next query: sibling(john, Sibling)
-    print("\nStarting execution with sibling(john, Sibling)...")
-    vm = WAM()  # Create a new VM instance
-    vm.load(compiler)
-    vm.call_stack.append(len(vm.instructions)-1)  # address of HALT
-    vm.registers['IP'] = vm.predicates[('sibling', 2)]
-    vm.fetch_execute(find_all=True)
-    
-    print("\nFound solutions:", vm.solutions)
-    
-except Exception as e:
-    print(f"Execution failed: {e}")
+        print(f"\n?- {format_query(query)}.")
+        if not vm.solutions:
+            print("   false.")
+        elif not query_vars:
+            print("   true.")
+        else:
+            for sol in vm.solutions:
+                print("   " + ",  ".join(f"{name} = {val}" for name, val in sol.items()))
