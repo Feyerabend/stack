@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Short Tour of Lark</title>
+<style>
+  :root { --ink:#1c1c1c; --dim:#5a5a5a; --rule:#e3e3e3; --bg:#fbfbf9;
+          --code-bg:#f4f3ee; --accent:#7a3b2e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.65 Georgia,"Iowan Old Style",serif; -webkit-font-smoothing:antialiased; }
+  main { max-width:760px; margin:0 auto; padding:3rem 1.25rem 5rem; }
+  h1 { font-size:2.1rem; line-height:1.15; margin:0 0 1.6rem; }
+  h2 { font-size:1.4rem; margin:2.6rem 0 .6rem; padding-top:1.4rem; border-top:1px solid var(--rule); }
+  p, li, td, th { color:var(--ink); }
+  a { color:var(--accent); }
+  code { font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:.86em;
+         background:var(--code-bg); padding:.08em .35em; border-radius:3px; }
+  pre { background:var(--code-bg); border:1px solid var(--rule); border-left:3px solid var(--accent);
+        border-radius:5px; padding:1rem 1.1rem; overflow-x:auto; line-height:1.5; }
+  pre code { background:none; padding:0; font-size:.84rem; }
+  blockquote { margin:.6rem 0; padding:.5rem .9rem; background:#f0efe9; border-radius:4px;
+               color:var(--dim); font-size:.92rem; }
+  blockquote strong { color:var(--ink); }
+  table { border-collapse:collapse; width:100%; font-size:.92rem; margin:.5rem 0; }
+  td, th { border-bottom:1px solid var(--rule); padding:.35rem .5rem; text-align:left; }
+  hr { border:0; border-top:1px solid var(--rule); margin:2.4rem 0 1rem; }
+  /* Lark syntax colours */
+  .co { color:#8a8676; font-style:italic; }   /* comment  */
+  .st { color:#4a7a3a; }                       /* string   */
+  .kw { color:var(--accent); font-weight:bold; } /* keyword */
+  .ty { color:#2d6a8e; }                       /* type / constructor */
+  .nu { color:#9a5a00; }                       /* number   */
+  .op { color:#666; }                          /* operator */
+</style>
+</head>
+<body>
+<main>
+<h1>A Short Tour of Lark</h1>
+<p><em>Lark — <strong>L</strong>ambda <strong>A</strong>ffine <strong>R</strong>esource <strong>K</strong>ernel. Companion to</em> The Language Stack: From Silicon to Semantics.</p>
+<p>Lark is a small, purely functional language: Hindley–Milner type inference, <em>affine ownership</em> as a resource discipline (no garbage collector, no mutation), traits for polymorphism, and RISC-V as its compilation target. This tour walks the teaching programs in <code>lark/01/tests/</code> (and a few from later phases), from <code>Hello</code> to traits. Every snippet here is a real, runnable Lark program.</p>
+<h2>1. Hello, Lark</h2>
+<p>A program is a <code>module</code> with a <code>main</code> function. The one surprise is its signature: <code>main</code> takes an <code>IO</code> and returns an <code>IO</code>. That is the whole of Lark&#x27;s effect system in miniature, and the next sections explain why.</p>
+<pre><code class="lang-lark"><span class="co">(* module declaration, IO threading, the print built-in *)</span>
+<span class="kw">module</span> <span class="ty">Hello</span>
+
+<span class="kw">fn</span> main(io : <span class="ty">IO</span>) : <span class="ty">IO</span> <span class="op">=</span>
+  print(io, <span class="st">&quot;Hello, Lark!&quot;</span>)</code></pre>
+<blockquote><strong>output:</strong> Hello, Lark!</blockquote>
+<h2>2. Values, functions, arithmetic</h2>
+<p>Top-level values use <code>let</code>; functions use <code>fn name(args) : Ret = body</code>. Inside a body, <code>let … in …</code> binds a local. There is no statement/expression split — everything is an expression, including <code>if … then … else</code>. <code>show</code> turns a value into a <code>String</code>.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Arithmetic</span>
+
+<span class="kw">let</span> x : <span class="ty">Int</span> <span class="op">=</span> <span class="nu">6</span>
+<span class="kw">let</span> y : <span class="ty">Int</span> <span class="op">=</span> <span class="nu">7</span>
+
+<span class="kw">fn</span> square(n : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">=</span> n <span class="op">*</span> n
+
+<span class="kw">fn</span> max(a : <span class="ty">Int</span>, b : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">if</span> a <span class="op">&gt;</span> b <span class="kw">then</span> a <span class="kw">else</span> b
+
+<span class="kw">fn</span> main(io : <span class="ty">IO</span>) : <span class="ty">IO</span> <span class="op">=</span>
+  <span class="kw">let</span> product <span class="op">=</span> x <span class="op">*</span> y <span class="kw">in</span>
+  <span class="kw">let</span> sq      <span class="op">=</span> square(<span class="nu">6</span>) <span class="kw">in</span>
+  <span class="kw">let</span> largest <span class="op">=</span> max(<span class="nu">3</span>, <span class="nu">7</span>) <span class="kw">in</span>
+  <span class="kw">let</span> io      <span class="op">=</span> print(io, show(product)) <span class="kw">in</span>
+  <span class="kw">let</span> io      <span class="op">=</span> print(io, show(sq)) <span class="kw">in</span>
+  print(io, show(largest))</code></pre>
+<blockquote><strong>output:</strong> 42 · 36 · 7</blockquote>
+<h2>3. Recursion</h2>
+<p>Functions recurse directly. Lark is pure, so a loop <em>is</em> a recursion.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Recursion</span>
+
+<span class="kw">fn</span> factorial(n : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">if</span> n <span class="op">==</span> <span class="nu">0</span> <span class="kw">then</span> <span class="nu">1</span>
+  <span class="kw">else</span> n <span class="op">*</span> factorial(n <span class="op">-</span> <span class="nu">1</span>)
+
+<span class="kw">fn</span> fib(n : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">if</span> n <span class="op">&lt;</span> <span class="nu">2</span> <span class="kw">then</span> n
+  <span class="kw">else</span> fib(n <span class="op">-</span> <span class="nu">1</span>) <span class="op">+</span> fib(n <span class="op">-</span> <span class="nu">2</span>)</code></pre>
+<blockquote><strong>output:</strong> <code>factorial(10)</code> → 3628800, <code>fib(10)</code> → 55</blockquote>
+<p>A <em>tail</em> call — a recursive call in tail position — is compiled to a jump, not a stack frame, so an accumulator loop runs in constant space. This one counts to a million without overflowing:</p>
+<pre><code class="lang-lark"><span class="kw">fn</span> sum_to(n : <span class="ty">Int</span>, acc : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">if</span> n <span class="op">==</span> <span class="nu">0</span> <span class="kw">then</span> acc
+  <span class="kw">else</span> sum_to(n <span class="op">-</span> <span class="nu">1</span>, acc <span class="op">+</span> n)   <span class="co">(* tail call: no stack growth *)</span></code></pre>
+<blockquote><strong>output:</strong> <code>sum_to(1000000, 0)</code> → 500000500000</blockquote>
+<h2>4. Affine ownership: why IO is threaded</h2>
+<p>Here is Lark&#x27;s defining idea. An <em>affine</em> value may be used <strong>at most once</strong>. <code>IO</code> is affine — so each call to <code>print</code> <em>consumes</em> the <code>io</code> token and hands back a fresh one, which you must bind and pass on:</p>
+<pre><code class="lang-lark"><span class="kw">let</span> io <span class="op">=</span> print(io, show(product)) <span class="kw">in</span>   <span class="co">(* old io consumed, new io bound *)</span>
+<span class="kw">let</span> io <span class="op">=</span> print(io, show(sq))      <span class="kw">in</span>
+print(io, show(largest))               <span class="co">(* the last use returns the final IO *)</span></code></pre>
+<p>You cannot use the same <code>io</code> twice, and you cannot drop it — the type checker rejects both. That single rule gives a pure language a well-defined <em>order</em> of effects without any mutable state: the data dependency on <code>io</code> is the sequencing. The same discipline governs any resource you mark affine (a file handle, a buffer); &quot;do not use a closed handle&quot; becomes a compile-time guarantee rather than a runtime hope. Values that are safe to copy freely opt out with an <code>impl Copy</code> — the next section shows what its absence costs, and §9 puts one to use.</p>
+<h2>5. When the checker says no</h2>
+<p>The flip side of affine ownership is what the checker <em>refuses</em>. These programs type-check in most languages; Lark rejects them before they ever run. (They live in <code>lark/01/tests/errors/</code>.)</p>
+<pre><code class="lang-lark"><span class="co">(* IO is affine: it has no Copy, so it cannot be used twice *)</span>
+<span class="kw">module</span> <span class="ty">AffineError</span>
+
+<span class="kw">fn</span> use_twice(io : <span class="ty">IO</span>) : (<span class="ty">IO</span>, <span class="ty">IO</span>) <span class="op">=</span>
+  (io, io)</code></pre>
+<blockquote><strong>rejected:</strong> type error — <code>io</code> is consumed more than once</blockquote>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">NoCopyError</span>
+
+<span class="kw">type</span> <span class="ty">Handle</span> <span class="op">=</span> <span class="op">|</span> <span class="ty">Handle</span> <span class="kw">of</span> <span class="ty">Int</span>   <span class="co">(* no impl Copy — so Handle is affine *)</span>
+
+<span class="kw">fn</span> duplicate(h : <span class="ty">Handle</span>) : (<span class="ty">Handle</span>, <span class="ty">Handle</span>) <span class="op">=</span>
+  (h, h)</code></pre>
+<blockquote><strong>rejected:</strong> type error — <code>Handle</code> is not <code>Copy</code>, cannot be duplicated</blockquote>
+<p>A type with no <code>impl Copy</code> is affine by default; you declare <code>impl Copy</code> only when duplicating a value is genuinely free (as for <code>Int</code>, <code>Bool</code>, and the integer lists of §9). This is resource safety the compiler <em>proves</em>, not a convention you maintain by hand.</p>
+<h2>6. Data types and pattern matching</h2>
+<p>A <code>type</code> declares an algebraic data type — a choice of <em>constructors</em>, each carrying zero or more fields. You take them apart with <code>match … with … end</code>; <code>_</code> is a wildcard.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Adt</span>
+
+<span class="kw">type</span> <span class="ty">Shape</span> <span class="op">=</span>
+  <span class="op">|</span> <span class="ty">Circle</span> <span class="kw">of</span> <span class="ty">Float</span>
+  <span class="op">|</span> <span class="ty">Rect</span>   <span class="kw">of</span> <span class="ty">Float</span>, <span class="ty">Float</span>
+  <span class="op">|</span> <span class="ty">Point</span>
+
+<span class="kw">let</span> pi : <span class="ty">Float</span> <span class="op">=</span> <span class="nu">3.14159</span>
+
+<span class="kw">fn</span> area(s : <span class="ty">Shape</span>) : <span class="ty">Float</span> <span class="op">=</span>
+  <span class="kw">match</span> s <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">Circle</span>(r)  <span class="op">=&gt;</span> pi <span class="op">*</span> r <span class="op">*</span> r
+  <span class="op">|</span> <span class="ty">Rect</span>(w, h) <span class="op">=&gt;</span> w <span class="op">*</span> h
+  <span class="op">|</span> <span class="ty">Point</span>      <span class="op">=&gt;</span> <span class="nu">0.0</span>
+  <span class="kw">end</span>
+
+<span class="kw">fn</span> describe(s : <span class="ty">Shape</span>) : <span class="ty">String</span> <span class="op">=</span>
+  <span class="kw">match</span> s <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">Circle</span>(_)  <span class="op">=&gt;</span> <span class="st">&quot;circle&quot;</span>
+  <span class="op">|</span> <span class="ty">Rect</span>(_, _) <span class="op">=&gt;</span> <span class="st">&quot;rect&quot;</span>
+  <span class="op">|</span> _          <span class="op">=&gt;</span> <span class="st">&quot;unknown&quot;</span>
+  <span class="kw">end</span></code></pre>
+<blockquote><strong>output:</strong> <code>area(Circle(5.0))</code> → 78.53975, <code>area(Rect(3.0, 4.0))</code> → 12.0</blockquote>
+<h2>7. Tuples</h2>
+<p>Tuples are anonymous, fixed-size products — <code>(Int, Int)</code> is a pair — built and destructured with the same <code>(…)</code> syntax, and matched like any other pattern.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Tuples</span>
+
+<span class="kw">fn</span> swap(p : (<span class="ty">Int</span>, <span class="ty">Int</span>)) : (<span class="ty">Int</span>, <span class="ty">Int</span>) <span class="op">=</span>
+  <span class="kw">match</span> p <span class="kw">with</span>
+  <span class="op">|</span> (x, y) <span class="op">=&gt;</span> (y, x)
+  <span class="kw">end</span>
+
+<span class="kw">fn</span> min_max(a : <span class="ty">Int</span>, b : <span class="ty">Int</span>) : (<span class="ty">Int</span>, <span class="ty">Int</span>) <span class="op">=</span>
+  <span class="kw">if</span> a <span class="op">&lt;</span> b <span class="kw">then</span> (a, b) <span class="kw">else</span> (b, a)</code></pre>
+<blockquote><strong>output:</strong> <code>min_max(7, 2)</code> is <code>(2, 7)</code>; swapped, <code>(7, 2)</code></blockquote>
+<h2>8. Literal and boolean patterns</h2>
+<p>A <code>match</code> arm can be a literal value or the <code>Bool</code> constructors <code>True</code> / <code>False</code>, not only your own constructors. (<code>Bool</code> opts into <code>Copy</code>, so it passes around freely.)</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">LitPat</span>
+
+<span class="kw">impl</span> <span class="ty">Copy</span> <span class="kw">for</span> <span class="ty">Bool</span> <span class="op">=</span> {}
+
+<span class="kw">fn</span> describe(n : <span class="ty">Int</span>) : <span class="ty">String</span> <span class="op">=</span>
+  <span class="kw">match</span> n <span class="kw">with</span>
+  <span class="op">|</span> <span class="nu">0</span> <span class="op">=&gt;</span> <span class="st">&quot;zero&quot;</span>
+  <span class="op">|</span> <span class="nu">1</span> <span class="op">=&gt;</span> <span class="st">&quot;one&quot;</span>
+  <span class="op">|</span> _ <span class="op">=&gt;</span> <span class="st">&quot;many&quot;</span>
+  <span class="kw">end</span>
+
+<span class="kw">fn</span> yesno(b : <span class="ty">Bool</span>) : <span class="ty">String</span> <span class="op">=</span>
+  <span class="kw">match</span> b <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">True</span>  <span class="op">=&gt;</span> <span class="st">&quot;yes&quot;</span>
+  <span class="op">|</span> <span class="ty">False</span> <span class="op">=&gt;</span> <span class="st">&quot;no&quot;</span>
+  <span class="kw">end</span></code></pre>
+<blockquote><strong>output:</strong> <code>describe(0)</code> → zero, <code>describe(99)</code> → many, <code>yesno(True)</code> → yes</blockquote>
+<h2>9. Generics, lists, higher-order functions</h2>
+<p>Types take parameters (<code>List a</code>), and a recursive constructor builds the classic cons-list. Functions are values: pass them as arguments, or write them inline as lambdas with <code>fn(args) =&gt; body</code>. <code>impl Copy for List(Int) = {}</code> marks integer lists as freely copyable.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Lists</span>
+
+<span class="kw">type</span> <span class="ty">List</span> a <span class="op">=</span>
+  <span class="op">|</span> <span class="ty">Nil</span>
+  <span class="op">|</span> <span class="ty">Cons</span> <span class="kw">of</span> a, <span class="ty">List</span>(a)
+
+<span class="kw">impl</span> <span class="ty">Copy</span> <span class="kw">for</span> <span class="ty">List</span>(<span class="ty">Int</span>) <span class="op">=</span> {}
+
+<span class="kw">fn</span> fold(f : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span>, acc : <span class="ty">Int</span>, xs : <span class="ty">List</span>(<span class="ty">Int</span>)) : <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">match</span> xs <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">Nil</span>           <span class="op">=&gt;</span> acc
+  <span class="op">|</span> <span class="ty">Cons</span>(x, rest) <span class="op">=&gt;</span> fold(f, f(acc, x), rest)
+  <span class="kw">end</span>
+
+<span class="kw">fn</span> map(f : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span>, xs : <span class="ty">List</span>(<span class="ty">Int</span>)) : <span class="ty">List</span>(<span class="ty">Int</span>) <span class="op">=</span>
+  <span class="kw">match</span> xs <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">Nil</span>           <span class="op">=&gt;</span> <span class="ty">Nil</span>
+  <span class="op">|</span> <span class="ty">Cons</span>(x, rest) <span class="op">=&gt;</span> <span class="ty">Cons</span>(f(x), map(f, rest))
+  <span class="kw">end</span>
+
+<span class="kw">fn</span> main(io : <span class="ty">IO</span>) : <span class="ty">IO</span> <span class="op">=</span>
+  <span class="kw">let</span> xs      <span class="op">=</span> <span class="ty">Cons</span>(<span class="nu">1</span>, <span class="ty">Cons</span>(<span class="nu">2</span>, <span class="ty">Cons</span>(<span class="nu">3</span>, <span class="ty">Cons</span>(<span class="nu">4</span>, <span class="ty">Cons</span>(<span class="nu">5</span>, <span class="ty">Nil</span>))))) <span class="kw">in</span>
+  <span class="kw">let</span> total   <span class="op">=</span> fold(<span class="kw">fn</span>(acc, x) <span class="op">=&gt;</span> acc <span class="op">+</span> x, <span class="nu">0</span>, xs) <span class="kw">in</span>
+  <span class="kw">let</span> doubled <span class="op">=</span> map(<span class="kw">fn</span>(x) <span class="op">=&gt;</span> x <span class="op">*</span> <span class="nu">2</span>, xs) <span class="kw">in</span>
+  print(io, show(total))</code></pre>
+<blockquote><strong>output:</strong> <code>total</code> → 15; <code>doubled</code> is 2 4 6 8 10</blockquote>
+<h2>10. Closures</h2>
+<p>A function can <em>return</em> a function that captures values from its environment — a closure. <code>adder(5)</code> hands back a function that remembers <code>n = 5</code>; <code>compose</code> builds a new function from two others.</p>
+<pre><code class="lang-lark"><span class="kw">module</span> <span class="ty">Closures</span>
+
+<span class="kw">fn</span> adder(n : <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">fn</span>(x : <span class="ty">Int</span>) <span class="op">=&gt;</span> n <span class="op">+</span> x            <span class="co">(* captures n *)</span>
+
+<span class="kw">fn</span> compose(f : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span>, g : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span>) : <span class="ty">Int</span> <span class="op">-&gt;</span> <span class="ty">Int</span> <span class="op">=</span>
+  <span class="kw">fn</span>(x : <span class="ty">Int</span>) <span class="op">=&gt;</span> f(g(x))
+
+<span class="kw">fn</span> main(io : <span class="ty">IO</span>) : <span class="ty">IO</span> <span class="op">=</span>
+  <span class="kw">let</span> add5   <span class="op">=</span> adder(<span class="nu">5</span>) <span class="kw">in</span>
+  <span class="kw">let</span> double <span class="op">=</span> <span class="kw">fn</span>(x : <span class="ty">Int</span>) <span class="op">=&gt;</span> x <span class="op">*</span> <span class="nu">2</span> <span class="kw">in</span>
+  <span class="kw">let</span> io     <span class="op">=</span> print(io, show(add5(<span class="nu">10</span>))) <span class="kw">in</span>
+  print(io, show(compose(double, add5)(<span class="nu">3</span>)))</code></pre>
+<blockquote><strong>output:</strong> <code>add5(10)</code> → 15, <code>compose(double, add5)(3)</code> → 16</blockquote>
+<h2>11. Errors as values: Result</h2>
+<p>Lark has no exceptions. A function that can fail returns a value that says so, and the caller must <code>match</code> on it — the type system will not let you forget the error case.</p>
+<pre><code class="lang-lark"><span class="kw">type</span> <span class="ty">Result</span> a b <span class="op">=</span>
+  <span class="op">|</span> <span class="ty">Ok</span>  <span class="kw">of</span> a
+  <span class="op">|</span> <span class="ty">Err</span> <span class="kw">of</span> b
+
+<span class="kw">fn</span> safe_divide(x : <span class="ty">Int</span>, y : <span class="ty">Int</span>) : <span class="ty">Result</span>(<span class="ty">Int</span>, <span class="ty">String</span>) <span class="op">=</span>
+  <span class="kw">if</span> y <span class="op">==</span> <span class="nu">0</span> <span class="kw">then</span> <span class="ty">Err</span>(<span class="st">&quot;division by zero&quot;</span>)
+  <span class="kw">else</span> <span class="ty">Ok</span>(x <span class="op">/</span> y)
+
+<span class="kw">fn</span> show_result(r : <span class="ty">Result</span>(<span class="ty">Int</span>, <span class="ty">String</span>)) : <span class="ty">String</span> <span class="op">=</span>
+  <span class="kw">match</span> r <span class="kw">with</span>
+  <span class="op">|</span> <span class="ty">Ok</span>(n)  <span class="op">=&gt;</span> show(n)
+  <span class="op">|</span> <span class="ty">Err</span>(s) <span class="op">=&gt;</span> <span class="st">&quot;error: &quot;</span> <span class="op">+</span> s
+  <span class="kw">end</span></code></pre>
+<blockquote><strong>output:</strong> <code>safe_divide(1, 0)</code> shown → error: division by zero</blockquote>
+<h2>12. Traits: polymorphism with a bound</h2>
+<p>A <code>trait</code> names a capability; an <code>impl</code> supplies it for a type. A function can then demand the capability with a <em>bound</em> in square brackets — <code>[Describe a]</code> reads &quot;for any type <code>a</code> that implements <code>Describe</code>.&quot;</p>
+<pre><code class="lang-lark"><span class="kw">trait</span> <span class="ty">Describe</span> a <span class="op">=</span> {
+  <span class="kw">fn</span> describe : a <span class="op">-&gt;</span> <span class="ty">String</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Describe</span> <span class="kw">for</span> <span class="ty">Color</span> <span class="op">=</span> {
+  <span class="kw">fn</span> describe(c) <span class="op">=</span>
+    <span class="kw">match</span> c <span class="kw">with</span>
+    <span class="op">|</span> <span class="ty">Red</span>   <span class="op">=&gt;</span> <span class="st">&quot;red&quot;</span>
+    <span class="op">|</span> <span class="ty">Green</span> <span class="op">=&gt;</span> <span class="st">&quot;green&quot;</span>
+    <span class="op">|</span> <span class="ty">Blue</span>  <span class="op">=&gt;</span> <span class="st">&quot;blue&quot;</span>
+    <span class="kw">end</span>
+}
+
+<span class="kw">fn</span> label[<span class="ty">Describe</span> a](x : a) : <span class="ty">String</span> <span class="op">=</span>
+  <span class="st">&quot;the color is &quot;</span> <span class="op">+</span> describe(x)</code></pre>
+<blockquote><strong>output:</strong> <code>label(Red)</code> → the color is red</blockquote>
+<h2>13. Running these programs, and reading real ones</h2>
+<p>The programs above live in <code>lark/01/tests/</code> (<code>01_hello.lark</code> … <code>08_traits.lark</code>), with the closures, tuples, and literal-pattern examples in the later phases&#x27; <code>tests/</code> (<code>10</code>–<code>18</code>) and the rejected programs in <code>tests/errors/</code>. Lark is built in phases — the CEK interpreter that runs source directly is Phase 04, the compiler to RISC-V is Phase 05, and a native C runtime is Phase 07. See the top-level <a href="../README.md">lark/README.md</a> for how to build and run a given phase.</p>
+<p>When the tour is not enough, <code>lark/07/samples/</code> holds nine complete programs in pure Lark — merge sort, a binary search tree, a prime sieve, N-queens, an expression evaluator, run-length encoding, Towers of Hanoi, Conway&#x27;s Game of Life, and a recursive-descent arithmetic parser — the language doing real work.</p>
+<table><thead><tr><th>If you want…</th><th>Look at…</th></tr></thead><tbody><tr><td>the grammar and lexer</td><td><code>lark/01/</code> (book ch. 3)</td></tr><tr><td>the parser</td><td><code>lark/02/</code> (ch. 4)</td></tr><tr><td>type inference + affine checking + traits</td><td><code>lark/03/</code> (ch. 5)</td></tr><tr><td>the interpreter (CEK machine)</td><td><code>lark/04/</code> (ch. 6)</td></tr><tr><td>the compiler to RISC-V</td><td><code>lark/05/</code> (ch. 7, 9)</td></tr><tr><td>nine complete sample programs</td><td><code>lark/07/samples/</code> (ch. 10)</td></tr><tr><td>the soundness proof</td><td><code>lark/formal/proof/</code> (ch. 11–12)</td></tr></tbody></table>
+<hr>
+<p><em>A short tour of Lark, rebuilt from the acceptance tests in <code>lark/01/tests/</code>. For the full story — silicon to semantics — read the book.</em></p>
+</main>
+</body>
+</html>

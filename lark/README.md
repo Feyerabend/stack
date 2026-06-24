@@ -5,6 +5,11 @@ Lark is a small, serious, purely functional language. It is built in this
 repository phase by phase, with each phase as a sealed snapshot you can run
 independently. The build is the book.
 
+**New to the language?** Start with the short, syntax-highlighted tour in
+[`lang/tutorial.html`](./lang/tutorial.html) — from `Hello` to traits, every
+snippet a runnable program. (Source: [`lang/tutorial.md`](./lang/tutorial.md);
+regenerate the HTML with `python3 lang/render.py`.)
+
 *Language properties*
 
 - Hindley–Milner type inference
@@ -29,6 +34,8 @@ lark/
   06/       Phase 6 — Hardening: differential tests, Hypothesis, formal spec
   07/       Phase 7 — C CEK native runtime, REPL, nine sample programs
 
+  lang/           A short language tutorial: tutorial.md (source) + render.py
+                  (a dependency-free Markdown -> HTML renderer) -> tutorial.html
   formal/proof/   MLTT kernel (lcore + llang) and the type-soundness proof —
                   the verification side of Phase 5; not a numbered snapshot
 ```
