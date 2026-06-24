@@ -476,7 +476,9 @@ class RISCVVM:
         
         if syscall_num == 1:  # Print integer
             val = self.signed(self.regs[10])  # a0
-            print(val)
+            # No trailing newline: programs print their own separators with
+            # syscall 11 (e.g. a space between values, a newline at the end).
+            print(val, end='')
             self.output.append(str(val))
         elif syscall_num == 4:  # Print string
             addr = self.regs[10]  # a0

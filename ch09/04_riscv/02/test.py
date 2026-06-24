@@ -98,11 +98,12 @@ def main():
     # Test single-file programs
     print(f"{Colors.BOLD}Testing single-file programs:{Colors.RESET}")
     
+    # Expected output compared against stdout.strip(), so no trailing newline.
     test_cases = [
-        ("hello", "42\n"),
-        ("factorial", "120\n"),
-        ("fibonacci", "0 1 1 2 3 5 8 13 21 34 \n"),
-        ("sum_array", "150\n"),
+        ("hello", "42"),
+        ("factorial", "120"),
+        ("fibonacci", "0 1 1 2 3 5 8 13 21 34"),
+        ("sum_array", "150"),
     ]
     
     for name, expected in test_cases:
@@ -115,7 +116,7 @@ def main():
     
     # Test multi-file program
     print(f"{Colors.BOLD}Testing multi-file linking:{Colors.RESET}")
-    if test_multifile("12 24\n"):
+    if test_multifile("12 24"):
         tests_passed += 1
     else:
         tests_failed += 1

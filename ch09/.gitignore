@@ -1,0 +1,6 @@
+# Generated build artifacts. The top-level .gitignore already covers
+# __pycache__, .DS_Store, *.dSYM, etc.; these are the directories the
+# RISC-V toolchains build (and the samples/ that 02's setup.sh generates).
+04_riscv/01/bin/
+04_riscv/02/build/
+04_riscv/02/samples/
