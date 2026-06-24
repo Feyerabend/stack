@@ -1,6 +1,11 @@
 
 ## Symbol Tables
 
+Companion code for §5.1 (Names and the Symbol Table) and §5.2 (Scope) of
+*The Language Stack*. The three implementations — `procedural.py`, `functional.py`,
+`logic.py` — show how the same idea takes different shapes across paradigms;
+see also [`PROJECTS.md`](./PROJECTS.md).
+
 Imagine writing a simple program:
 
 ```python

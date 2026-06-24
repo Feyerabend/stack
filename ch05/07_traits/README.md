@@ -1,7 +1,39 @@
 
-## Vtable and Projects
+## §5.8 — Traits (vtables and dynamic dispatch)
 
-Vtables, or virtual method tables, are described in the sources as a behind-the-scenes mechanism
+Companion code for §5.8 of *The Language Stack*. Traits resolve to a runtime
+*method table*; this folder contains a small compiler that makes that mechanism
+concrete by lowering a tiny class-based OOP language to C with explicit vtables.
+
+### What's here
+
+A complete pipeline, one phase per file:
+
+| File | Phase |
+|------|-------|
+| `lexer.py` | Tokenises the source (`class`, `inherits`, `def`, `print`, …) |
+| `parser.py` | Builds the AST of classes, methods, and statements |
+| `vtable_builder.py` / `vtable.py` | Constructs each class's virtual method table, resolving inheritance |
+| `visualizer.py` | Prints the class hierarchy and vtable layout |
+| `codegen.py` | Emits C (`output.c`) with structs + function-pointer vtables |
+| `main.py` | Drives the whole pipeline on a sample program |
+| `Makefile` | `make run` = generate C, compile it, run it |
+
+### Run
+
+```sh
+make run        # python3 main.py -> output.c -> gcc -> ./output
+make clean      # remove output.c, output, and __pycache__
+```
+
+The generated C shows the trait mechanism with nothing hidden: each object
+carries a pointer to its class's vtable, and a method call is an indirect call
+through that table — exactly what the chapter describes as the runtime cost of
+dynamic dispatch.
+
+### Background
+
+Vtables, or virtual method tables, are a behind-the-scenes mechanism
 used in object-oriented programming (OOP) to enable *dynamic polymorphism*. This allows objects of
 different types to respond uniquely to the same method call.
 

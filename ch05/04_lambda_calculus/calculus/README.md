@@ -1,6 +1,9 @@
 
 ## Lambda Calculus Type Systems Progression
 
+Companion code for §5.4 (The Simply Typed Lambda Calculus) and §5.5
+(Hindley-Milner Type Inference) of *The Language Stack*.
+
 - *[lambda.py](lambda.py)*: Basic simply typed lambda calculus with explicit
   type annotations and type checking (no inference).
 - *[hm.py](hm.py)*: Hindley-Milner (HM) type inference, adding polymorphism

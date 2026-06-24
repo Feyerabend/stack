@@ -1,6 +1,10 @@
 
 ## What Are Affine Types?
 
+Companion code for §5.7 (Affine Types and Ownership) of *The Language Stack* —
+the type discipline behind Lark's ownership model. The runnable demo is
+`affine.py`.
+
 *Affine types* are types where values can be used *at most once*.
 This is a constraint from linear logic/type theory.
 

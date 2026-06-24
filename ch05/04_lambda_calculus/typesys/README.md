@@ -1,6 +1,10 @@
 
 ## Type Systems: Projects
 
+Supplemental projects for §5.4–§5.5 of *The Language Stack* — a hands-on survey
+of typing disciplines (`type_systems.py`, `type_systems.c`) that complements the
+λ-calculus progression in [`../calculus/`](./../calculus/).
+
 As we have learned, and will continue to see, *types* play a central role in
 programming and the design of programming languages.
 
