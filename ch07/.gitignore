@@ -1,0 +1,22 @@
+# Build artifacts produced by the per-section Makefiles and READMEs.
+# (The top-level .gitignore already covers *.o, *.out, *.dSYM, __pycache__, etc.;
+#  these are the extensionless binaries and generated files specific to ch07.)
+
+# 01_ir — ILOC pipeline build dir (program.iloc / .s / .bin)
+01_ir/iloc/build/
+
+# 02_tac — C demo binaries built next to their sources
+02_tac/demo/tac_generator
+02_tac/simple/tac
+
+# 03_cfg — tiny C compilers and their generated output
+03_cfg/compiler/tcc
+03_cfg/compiler/test*_output.c
+03_cfg/compiler/test*_prog
+03_cfg/demo/mini_cfg
+
+# 04_ssa — SSA compiler and its generated output
+04_ssa/compiler/ssac
+04_ssa/compiler/*.out.c
+04_ssa/compiler/*.bin
+04_ssa/compiler/examples_output/

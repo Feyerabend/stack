@@ -275,28 +275,42 @@ class DAGCompiler:
                 self.symbol_table[var_name] = self.current_address + var_count
                 var_count += 1
         
-        if var_count > 0:
-            self.code.append(Instruction(Operation.INT, 0, var_count))
-        
         # Build DAG from all assignments
         for line in lines:
             if '=' in line:
                 var_name, expr = [p.strip() for p in line.split('=', 1)]
                 self.dag.add_assignment(var_name, expr)
-        
-        # Generate code using DAG (compute each subexpression once!)
-        computed = {}  # node_id -> stack position when computed
-        
+
+        # A shared interior computation (ref_count > 1) is computed once and
+        # spilled to a temporary slot; later uses load it back. That is how a
+        # real compiler implements common-subexpression elimination -- the
+        # shared value lives in a register or memory cell, not recomputed.
+        # Leaves are cheap to re-materialise (a constant push, or an address
+        # push + load), so they get no temporary.
+        temp_slot = {}  # node_id -> stack address of its spill slot
+        slot = self.current_address + var_count
+        for node in self.dag.nodes.values():
+            if node.op in ('+', '-', '*') and node.ref_count > 1:
+                temp_slot[id(node)] = slot
+                slot += 1
+
+        total_slots = var_count + len(temp_slot)
+        if total_slots > 0:
+            self.code.append(Instruction(Operation.INT, 0, total_slots))
+
+        # Generate code using DAG (compute each shared subexpression once!)
+        spilled = set()  # node_ids whose value already sits in a temp slot
+
         def emit_code(node: DAGNode):
             """Emit code for a DAG node, reusing already-computed values."""
             node_id = id(node)
-            
-            # Already computed? Just reference it!
-            if node_id in computed:
-                # Push the already-computed value back onto stack
-                # (In a real compiler, we'd use registers here)
+
+            # Already computed and spilled? Load it back from its slot.
+            if node_id in spilled:
+                self.code.append(Instruction(Operation.LIT, 0, temp_slot[node_id]))
+                self.code.append(Instruction(Operation.OPR, 0, 1))  # load
                 return
-            
+
             if node.op == 'LIT':
                 self.code.append(Instruction(Operation.LIT, 0, node.value))
             elif node.op == 'VAR':
@@ -306,13 +320,19 @@ class DAGCompiler:
                 # Compute children first
                 emit_code(node.left)
                 emit_code(node.right)
-                
+
                 # Then apply operation
                 op_map = {'+': 2, '-': 3, '*': 4}
                 self.code.append(Instruction(Operation.OPR, 0, op_map[node.op]))
-            
-            computed[node_id] = True
-        
+
+                # Shared node: spill the result, then reload it for this use so
+                # the value is back on the stack for the current consumer.
+                if node_id in temp_slot:
+                    self.code.append(Instruction(Operation.STO, 0, temp_slot[node_id]))
+                    spilled.add(node_id)
+                    self.code.append(Instruction(Operation.LIT, 0, temp_slot[node_id]))
+                    self.code.append(Instruction(Operation.OPR, 0, 1))  # load
+
         # Emit code for each assignment
         for var_name, node in self.dag.assignments:
             emit_code(node)
@@ -380,15 +400,25 @@ def demo():
     for i, instr in enumerate(dag_code):
         print(f"  {i:2d}: {instr}")
     
-    # Show savings
+    # Show savings. The honest measure of CSE is how many *arithmetic*
+    # operations are performed: a shared subexpression is computed once
+    # instead of every time it appears. (Raw instruction count is a poor
+    # metric on this tiny stack VM, where spilling a value to a temporary
+    # and loading it back can cost as much as recomputing a trivial
+    # constant expression -- CSE pays off when the shared work is real.)
+    def arith_ops(code):
+        return sum(1 for ins in code if ins.f == Operation.OPR and ins.a in (2, 3, 4))
+
+    naive_ops = arith_ops(naive_code)
+    dag_ops = arith_ops(dag_code)
+    savings = naive_ops - dag_ops
+    percent = (savings / naive_ops * 100) if naive_ops > 0 else 0
     print("\n" + "="*70)
     print("OPTIMISATION RESULTS")
     print("="*70)
-    savings = len(naive_code) - len(dag_code)
-    percent = (savings / len(naive_code) * 100) if len(naive_code) > 0 else 0
-    print(f"Naive compiler:    {len(naive_code)} instructions")
-    print(f"DAG compiler:      {len(dag_code)} instructions")
-    print(f"Instructions saved: {savings} ({percent:.1f}%)")
+    print(f"Naive compiler:    {naive_ops} arithmetic operations  ({len(naive_code)} instructions)")
+    print(f"DAG compiler:      {dag_ops} arithmetic operations  ({len(dag_code)} instructions)")
+    print(f"Operations saved:  {savings} ({percent:.1f}%)")
     
     # Verify correctness
     print("\nVERIFICATION (both compilers produce same results)\n")
