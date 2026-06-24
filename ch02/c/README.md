@@ -3,7 +3,7 @@
 
 A C twin of `ch02/stack_vm.py`: the same fifteen-instruction stack machine, the
 same bytecode, the same results — built so the dispatch discussion of
-Section 2.x can be *measured*, and so the Python VM has a second
+Section 2.4 can be *measured*, and so the Python VM has a second
 implementation to check against.
 
 | File | What it contains |

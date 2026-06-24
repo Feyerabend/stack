@@ -12,7 +12,7 @@ verified script next to it.
 
 | Chapter | Solutions | Code solutions |
 |---------|-----------|----------------|
-| 1 — The Hardware Machine | [`ch01/solutions/`](../ch01/solutions/solutions.md) | `ex02_loop.py` (+ Ex.1 in `ch01/fde.py`) |
+| 1 — Instruction Sets and Memory | [`ch01/solutions/`](../ch01/solutions/solutions.md) | `ex02_loop.py` (+ Ex.1 in `ch01/fde.py`) |
 | 2 — A Virtual Machine in Software | [`ch02/solutions/`](../ch02/solutions/solutions.md) | `ex01_mod.py`, `ex02_trace.py`, `ex03_iterative_fact.py`, `ex04_callee_saved.py`, `ex05_dispatch.py` |
 | 3 — Lexical Analysis | [`ch03/solutions/`](../ch03/solutions/solutions.md) | `ex01_number_exponent.py`, `ex02_underscore_idents.py`, `ex03_cmp_dfa.py`, `ex04_line_comments.py` |
 | 4 — Parsing | [`ch04/solutions/`](../ch04/solutions/solutions.md) | `ex01_bool_rd.py`, `ex02_ll1_table.py`, `ex03_anbn.py`, `ex04_match_multi.py`, `ex05_sr_trace.py` |

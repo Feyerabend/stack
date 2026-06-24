@@ -29,10 +29,10 @@ TOKEN_SPECIFICATIONS = [
     ('SLASH', r'/'),             # Division
     ('EQUAL', r'='),             # Equal
     ('NEQUAL', r'#'),            # Not Equal
-    ('LT', r'<'),                # Less Than
     ('LE', r'<='),               # Less Than or Equal
-    ('GT', r'>'),                # Greater Than
+    ('LT', r'<'),                # Less Than
     ('GE', r'>='),               # Greater Than or Equal
+    ('GT', r'>'),                # Greater Than
     ('QUESTION', r'\?'),         # Question mark
     ('BANG', r'!'),              # Exclamation mark
     ('WHITESPACE', r'\s+'),      # Whitespace (ignored)

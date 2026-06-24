@@ -123,7 +123,7 @@ DFA create_divisible_by_3() {
     // State represents current remainder
     
     // State 0: remainder = 0 (accepting)
-    add_transition(&dfa, 0, 'a', 1);  // 0*2+0 = 0 mod 3 -> actually 'a'=0, 'b'=1
+    add_transition(&dfa, 0, 'a', 0);  // 0*2+0 = 0 mod 3
     add_transition(&dfa, 0, 'b', 1);  // 0*2+1 = 1 mod 3
     
     // State 1: remainder = 1

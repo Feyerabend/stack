@@ -2,7 +2,7 @@
  * stack_vm.c — a C parallel of ch02/stack_vm.py.
  *
  * The same fifteen-instruction stack machine, implemented THREE ways so the
- * dispatch discussion of Section 2.x (sec:vm-dispatch) can be measured rather
+ * dispatch discussion of Section 2.4 (sec:vm-dispatch) can be measured rather
  * than asserted:
  *
  *   run_cascade  — an if/else-if comparison chain   (the C analogue of Python's

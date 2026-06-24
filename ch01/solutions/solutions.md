@@ -1,7 +1,7 @@
 
 ## Chapter 1 — Solutions
 
-Solutions to the exercises in Chapter 1, *The Hardware Machine*, of
+Solutions to the exercises in Chapter 1, *Instruction Sets and Memory*, of
 *The Language Stack: From Silicon to Semantics*.
 
 Code-bearing solutions are runnable and verified:

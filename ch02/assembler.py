@@ -72,7 +72,7 @@ def assemble(program):
 # ── Demo ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Factorial in assembler source (from the book, Section 2.4).
+    # Factorial in assembler source (from the book, Section 2.5).
     # The assembler resolves 'fact' and 'base' to their byte addresses.
     factorial_src = [
         ('PUSH',  5),         # bootstrap: push the argument

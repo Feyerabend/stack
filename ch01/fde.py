@@ -71,31 +71,11 @@ if __name__ == "__main__":
     assert result == 7
     print(f"3 + 4 = {result}")
 
-    # Counted loop: sum 1..5 = 15
+    # Sum 1+2+3+4+5 = 15.
     #
-    # The loop body pushes the counter (n) and accumulates it.
-    # Memory layout:
-    #   0  PUSH 0     accumulator = 0
-    #   2  PUSH 1     counter n = 1
-    #   4  PUSH 5     loop bound
-    #   6  SUB        bound - n  (positive while n <= 5)
-    #   7  PUSH 0
-    #   9  SUB        -(bound - n)  (positive while n <= 5)  [negation trick]
-    # ...actually let's write it straightforwardly using ADD and SUB:
-    #
-    # Simpler: unroll manually via JMP to show that JMP works.
-    # sum = 1 + 2 + 3 + 4 + 5 using a hand-rolled loop:
-    #
-    #   acc = 0
-    #   n   = 1
-    #   loop (5 times): acc += n; n += 1; if n <= 5 jmp loop
-    #
-    # Encoding with our tiny ISA (no conditional branch - just JMP for now):
-    # We'll demonstrate a simple counted-down sum instead, terminating when
-    # the top of stack reaches 0 by building the total using straight-line code,
-    # then show JMP as an unconditional jump (Exercise 1 only asks for JMP).
-
-    # Straight-line sum 1+2+3+4+5 = 15
+    # This tiny ISA has no conditional branch (Exercise 1 adds only SUB and an
+    # unconditional JMP), so a counted loop would spin forever. We therefore
+    # show the sum as straight-line code, and demonstrate JMP separately below.
     straight = [
         PUSH, 1, PUSH, 2, ADD,
         PUSH, 3, ADD,

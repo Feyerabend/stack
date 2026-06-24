@@ -16,10 +16,10 @@ TOKEN_TYPES = [
     ("OPERATOR_ASSIGN", r':='),
     ("OPERATOR_EQUAL", r'='),
     ("OPERATOR_NOT_EQUAL", r'#'),
-    ("OPERATOR_LT", r'<'),
     ("OPERATOR_LE", r'<='),
-    ("OPERATOR_GT", r'>'),
+    ("OPERATOR_LT", r'<'),
     ("OPERATOR_GE", r'>='),
+    ("OPERATOR_GT", r'>'),
     ("OPERATOR_PLUS", r'\+'),
     ("OPERATOR_MINUS", r'-'),
     ("OPERATOR_STAR", r'\*'),
@@ -111,7 +111,7 @@ begin
 end.
 """
 
-source_code_with_unescaped_character = """
+source_code_with_unescaped_character = r"""
 const n = 13;
 var i, h;
 procedure sub;
