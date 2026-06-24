@@ -32,6 +32,7 @@ approaches with actual timing comparisons.
 | `strings.py`      | Python   | String operation performance               | `+` vs `join`, f-strings, built-in methods vs manual loops   |
 | `parallel.py`     | Python   | Parallelism & concurrency                  | `multiprocessing` vs `threading`, ProcessPool vs ThreadPool, shared state pitfalls |
 | `network.py`      | Python   | Network & API optimisation                 | Batching, connection pooling, compression, ETag caching, parallel requests, payload minimisation, GraphQL vs REST |
+| `database.sql`    | SQL      | Database query optimisation                | Indexing vs full scan, selective columns, JOIN vs N+1, subquery vs JOIN, WHERE vs HAVING, LIKE/wildcard, DISTINCT vs GROUP BY, UNION ALL (reference snippets, not executed) |
 
 ### Example Results (typical on a modern laptop)
 

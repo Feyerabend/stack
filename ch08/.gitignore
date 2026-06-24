@@ -1,0 +1,5 @@
+# Build artifacts. The top-level .gitignore already covers *.o, *.dSYM,
+# __pycache__, .DS_Store, etc.; these are the extensionless C benchmark
+# binaries the chapter Makefile builds next to their sources.
+06_measuring/compiler
+06_measuring/memory

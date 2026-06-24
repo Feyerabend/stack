@@ -189,11 +189,17 @@ ast = Program([
 ])
 
 propagator = ConstantPropagator()
-prop_ast = propagator.propagate(ast)
+folder = ConstantFolder()
 
-# Could chain with ConstantFolder for full effect
-folder = ConstantFolder()  # From previous example
-folded_ast = folder.fold(prop_ast)
+# Propagation and folding cooperate: folding turns 'z = 10 + 5' into 'z = 15',
+# which lets the next propagation pass substitute that constant into 'result = z'.
+# One pass each is not enough -- alternate the two until the program stops
+# changing (the fixed point of section 8.2). Here it settles after two rounds.
+folded_ast = ast
+previous = None
+while repr(folded_ast) != previous:
+    previous = repr(folded_ast)
+    folded_ast = folder.fold(propagator.propagate(folded_ast))
 
 print("\nCONSTANT PROPAGATION\n")
 print("Original: x=10; y=x; z=y+5; result=z")
