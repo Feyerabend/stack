@@ -63,3 +63,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Committed proof-kernel binaries, now untracked: platform-specific build
+# artifacts rebuilt by their Makefiles (and by ch12/bridge/run_bridge.sh, which
+# builds the lark/ kernel only if it is missing).
+ch12/kernel/code/core/lcore
+lark/formal/proof/code/core/lcore

@@ -39,4 +39,29 @@ The book targets technically literate programmers who want to understand what un
 
 It stops at a defined point on the type-theory ladder: Hindley-Milner inference plus affine types plus trait-bounded polymorphism. The next rung named is *dependent types*, where the type checker and the proof checker become the same thing--the territory of Idris, Agda, and Lean. The Conclusion points readers who want to go further toward that rung.
 
+### The companion code
+
+This repository holds the runnable companion to each chapter. Every chapter folder
+builds and runs on its own — see its `README.md`, and its `Makefile` where one
+applies (`make run`).
+
+| Chapter | Folder             | Title                                       |
+|---------|--------------------|---------------------------------------------|
+| 1       | [`ch01/`](./ch01/) | Instruction Sets and Memory                 |
+| 2       | [`ch02/`](./ch02/) | A Virtual Machine in Software               |
+| 3       | [`ch03/`](./ch03/) | Lexical Analysis                            |
+| 4       | [`ch04/`](./ch04/) | Parsing                                     |
+| 5       | [`ch05/`](./ch05/) | Names, Scope, and Types                     |
+| 6       | [`ch06/`](./ch06/) | A Working Interpreter                       |
+| 7       | [`ch07/`](./ch07/) | Intermediate Representations                |
+| 8       | [`ch08/`](./ch08/) | Optimization                                |
+| 9       | [`ch09/`](./ch09/) | Code Generation                             |
+| 10      | [`ch10/`](./ch10/) | Abstract Machines and Operational Semantics |
+| 11      | [`ch11/`](./ch11/) | Correctness                                 |
+| 12      | [`ch12/`](./ch12/) | Types as Proofs                             |
+
+[`lark/`](./lark/) is the Lark reference implementation — interpreter, compiler,
+and the machine-checked soundness proof in [`lark/formal/proof/`](./lark/formal/proof/).
+[`solutions/`](./solutions/) holds worked solutions to the chapter exercises.
+
 
