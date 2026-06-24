@@ -1,6 +1,10 @@
 
 ## Finite Automata: A Comprehensive Guide
 
+The runnable companions to this guide are `dfa.py` (DFA, NFA, and ε-NFA with a
+small test framework) and `dfa.c` (a DFA in C). Run them with
+`python3 dfa.py` and `cc -o dfa dfa.c && ./dfa`.
+
 A *Finite Automaton (FA)* is the simplest model of computation, consisting
 of a finite set of states and transitions between them. Despite their simplicity,
 finite automata are fundamental to computer science and have numerous practical

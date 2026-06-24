@@ -1,0 +1,7 @@
+# C demo binaries (built next to their sources by the Makefile)
+02_recursive/arith
+04_pushdown/pda
+07_ast/packrat_ast
+*.o
+*.dSYM/
+__pycache__/

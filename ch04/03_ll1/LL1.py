@@ -39,7 +39,7 @@ class LL1Parser:
         }
 
     def tokenize(self, input):
-        token_pattern = r'\d+\.\d+|\d+|[+\-*/%^()]'
+        token_pattern = r'\d+\.\d+|\d+|[+\-*/%()]'
         tokens = re.findall(token_pattern, input)
         print(f"Tokens: {tokens}")
         return tokens
@@ -53,8 +53,11 @@ class LL1Parser:
             token = self.lookahead()
 
             if top in self.table:  # non-terminal
-                if token in self.table[top]:
-                    production = self.table[top][token]
+                # The table is keyed by token *class*: a numeric literal such as
+                # "3" or "3.14" selects the 'num' column.
+                key = 'num' if (token is not None and self.is_number(token)) else token
+                if key in self.table[top]:
+                    production = self.table[top][key]
                     print(f"Applying production {top} → {' '.join(production)}")
                     self.stack.extend(reversed(production))  # push production onto stack
                 else:
@@ -71,7 +74,9 @@ class LL1Parser:
             else:
                 raise Exception(f"Error: Unexpected token {token}. Expected {top}")
 
-        if self.lookahead() == '$': # end parsing
+        # The stack is empty once the bottom '$' has matched the end-of-input
+        # marker; success means every token was consumed.
+        if self.pos == len(self.tokens):
             print("Input parsed successfully!")
         else:
             raise Exception(f"Error: Unexpected input at end. Found {self.lookahead()}")
@@ -90,7 +95,7 @@ input_string2 = "3.14 * ( 2 + 5.6 )"
 parser2 = LL1Parser(input_string2)
 parser2.parse()
 
-input_string3 = "5 + 3.5 ^ 2"
+input_string3 = "5 + 3.5 * 2"
 parser3 = LL1Parser(input_string3)
 parser3.parse()
 

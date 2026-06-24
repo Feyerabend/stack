@@ -8,6 +8,15 @@ recognise and categorise these units, it also plays an essential role in handlin
 
 Here we use regular expressions, which is easy and very compact way of handling tokens.
 
+### Files in this folder
+
+| File | What it is |
+|------|------------|
+| `regexp.py` | A minimal regexp-based tokenizer (identifiers, numbers, operators, whitespace). |
+| `state.py` | The same job done by a hand-written state machine — see [`STATE.md`](./STATE.md). |
+| `tokens.py` | A PL/0 token set: keywords, operators, and delimiters as named patterns. |
+| `tokenerrors.py` | A tokenizer that tracks line/column and reports unexpected characters (the subject of the rest of this document). |
+
 
 ### How a Tokeniser Handles Syntax Errors
 

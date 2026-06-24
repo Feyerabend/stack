@@ -1,7 +1,7 @@
 
-## §4.6 — Parser Combinators
+## §4.5 — Parser Combinators
 
-Companion code for §4.6 of *The Language Stack* (alternative strategies).
+Companion code for §4.5 of *The Language Stack* (alternative strategies).
 
 | File | Description |
 |------|-------------|
