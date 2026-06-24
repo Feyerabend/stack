@@ -1,0 +1,11 @@
+# Build artifacts. The top-level .gitignore already covers *.o, *.dSYM,
+# __pycache__, .DS_Store, etc.; these are the kernel binaries the core/ and
+# lang/ Makefiles build.
+#
+# NOTE: kernel/code/core/lcore is currently tracked (committed). If you would
+# rather not version a platform-specific binary, untrack it with
+#   git rm --cached ch12/kernel/code/core/lcore
+# and this rule will keep it ignored thereafter.
+kernel/code/core/lcore
+kernel/code/lang/llang
+kernel/code/lang/llang-rl

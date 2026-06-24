@@ -31,6 +31,22 @@ code/
                           and type checker. REPL: llang.
 ```
 
+**`lcore` vs `llang`** — they share the same front end (parser, de Bruijn
+conversion, bidirectional type checker; `lang/` links `core/`'s `term.c`,
+`eval.c`, `check.c`, …) and differ only in the *back end* and what each is for:
+
+- **`lcore`** is the **proof kernel**. Its evaluator is *normalisation by
+  evaluation* (NbE): it reduces terms to a normal form so the conversion check can
+  decide when two types are definitionally equal. This is the machinery that makes
+  it a type-checker-that-is-a-proof-checker (§12.3). Its REPL infers types (`:i`),
+  defines globals (`:let`), and runs the test suite (`:t`).
+- **`llang`** is a **program runner**. Its evaluator is a *call-by-need graph
+  reducer* — it shares subterms and evaluates lazily, the way a practical
+  functional language runs — and it adds the conveniences that running programs
+  wants: `:load` for files, `:conv` to test convertibility, `let rec`/`fix` for
+  self-reference (see `samples/factorial.lam`, `samples/fibonacci.lam`). Same types,
+  same checker; a different reduction strategy aimed at execution rather than proof.
+
 
 
 ### Building and running
@@ -40,26 +56,36 @@ cd code/core && make
 ./lcore
 ```
 
-The REPL accepts one expression per line:
+The `lcore` REPL takes one expression per line. A bare term is normalised and its
+type inferred; commands start with a colon:
 
 ```
 > succ (succ zero)
   normal : succ (succ zero)
-> :type Π(A : Type). A → A
-  type : Type_1
-> :let id : Π(A : Type). A → A = \A x. x
-> :type id _ zero
-  type : Nat
+> :i Π(A : Type). A → A
+  type   : Type_1
+> :let id = (\A x. x : Π(A : Type). A → A)
+  id : Π(A : Type). Π(_ : A). A
+> :i id _ zero
+  type   : Nat
+  normal : zero
 ```
 
-Commands: `:type e` infers and prints the type of `e`. `:conv a b` tests
-definitional equality. `:let name : type = term` adds a global definition.
+Commands: `:i e` infers (and normalises) `e`; `:let name = expr` adds a global;
+`:t` runs the built-in test suite (`./lcore --test` does the same
+non-interactively); `:q` quits. A `:let` term must be *inferrable*, so a bare
+lambda needs an annotation — `(\x. … : T)` — because in bidirectional checking a
+lambda is checked against an expected type, not inferred. Inferrable terms
+(`succ (succ zero)`, a fully applied function) need none.
 
-For the graph-reducer layer:
+For the graph-reducer layer, whose REPL adds `:load`, `:type`, and `:conv` and
+lets the annotation sit on the binding (`let name : type = expr`):
 
 ```
 cd code/lang && make && ./llang
 :load "lib/prelude.lam"
+let id : Π(A : Type). A → A = \A x. x
+:type id
 ```
 
 
@@ -87,12 +113,13 @@ reduce. `plus_comm (succ (succ zero)) (succ (succ (succ zero)))` normalises
 to `refl (succ (succ (succ (succ (succ zero)))))`.
 
 *Universe polymorphism.* Definitions can be quantified over universe
-levels so they work at `Type_0`, `Type_1`, or any `Type_ℓ`:
+levels so they work at `Type_0`, `Type_1`, or any `Type_ℓ`. The level is an
+explicit argument (`lzero`, `lsuc lzero`, …):
 
 ```
-:let id : Π(ℓ : Level). Π(A : Type_ℓ). A → A = \ℓ A x. x
-id _ Nat zero       -- level inferred as 0
-id _ Type Nat       -- level inferred as 1
+:let lid = (\l A x. x : Π(l : Level). Π(A : Type_l). A → A)
+lid lzero Nat zero         -- at level 0:  normal : zero,  type : Nat
+lid (lsuc lzero) Type Nat  -- at level 1:  normal : Nat,   type : Type
 ```
 
 *Implicit arguments.* Underscores `_` are holes the elaborator fills by
