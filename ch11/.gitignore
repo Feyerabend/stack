@@ -1,0 +1,5 @@
+# Build artifacts. The top-level .gitignore already covers __pycache__,
+# .DS_Store, *.dSYM, etc.; these are the extensionless C binaries the chapter
+# Makefile builds next to their sources.
+verification/presburger/presburger
+verification/model/vmmodel

@@ -11,8 +11,9 @@ Companion code for Chapter 11 of *The Language Stack: From Silicon to Semantics*
 `verification/` (supplementary, no dedicated chapter section) holds the
 automated-reasoning middle of the spectrum between §11.5's testing and §11.3's
 proof: `z3/` symbolic execution with the Z3 SMT solver — the engine that
-*discharges* the verification conditions `02_hoare/` generates; `model/` model
-checking; `presburger/` a decision procedure for Presburger arithmetic.
+*discharges* the verification conditions `02_hoare/` generates (needs
+`pip install z3-solver`); `model/` model checking; `presburger/` a decision
+procedure for Presburger arithmetic.
 
 **Lark's own correctness results are referenced by path, not duplicated here.**
 The machine-checked type-soundness proof is `lark/formal/proof/`
@@ -21,7 +22,9 @@ The machine-checked type-soundness proof is `lark/formal/proof/`
 §11.3–§11.4. The tests that guard the compiler are `lark/06/tests/`
 (`diff_test.py`, `gen.py`), discussed in §11.5.
 
-§11.1 (the three meanings of "correct") and the type-safety *argument* of §11.3
-are conceptual. The dependent-types material that §11.6 only glimpses — the proof
-kernels, MLTT/HoTT, linear logic — now lives with Chapter 12, which teaches that
-rung in full: see `ch12/`.
+§11.1 (the three meanings of "correct"), the type-safety *argument* of §11.3,
+§11.4 (formal specification), and §11.6 (trusting code you did not write) are
+conceptual — argued in prose, or referenced by path above. The dependent-types
+material that §11.7 (affine types) only glimpses — the proof kernels, MLTT/HoTT,
+linear logic — now lives with Chapter 12, which teaches that rung in full: see
+`ch12/`.
