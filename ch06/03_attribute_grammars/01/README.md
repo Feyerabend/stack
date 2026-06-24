@@ -1,6 +1,9 @@
 
 ## Attribute Grammar Concepts
 
+Companion code for §6.3 (Attribute Grammars) of *The Language Stack* — step 1 of
+3 (see [`../README.md`](./../README.md)). Runnable demo: `attribute.py`.
+
 This code qualifies as an implementation of an attribute grammar, or to be more precisely,
 a parser that evaluates attributes in a manner consistent with attribute grammar principles.
 

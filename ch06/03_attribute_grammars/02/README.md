@@ -1,6 +1,9 @@
 
 ## Attribute Grammar Parser
 
+Companion code for §6.3 (Attribute Grammars) of *The Language Stack* — step 2 of
+3 (see [`../README.md`](./../README.md)). Demo driver: `test_attribute.py`.
+
 This project implements a recursive descent parser in Python based on an
 attribute grammar for a simple expression language.
 
