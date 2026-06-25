@@ -47,3 +47,5 @@ screen /dev/tty.usbmodem* 115200   # Ctrl-A K to quit
 
 To rebuild any of these from source: from `../`, run `make pico FILE=samples/03_primes.lark`
 (needs the Pico SDK + RISC-V toolchain under `~/.pico-sdk`).
+
+![Lark on Pico2W running the parser](./pico2parser.png)
