@@ -1,0 +1,148 @@
+(*
+   Lark — Surface Grammar
+   Phase 8. Delimiter-based syntax. Affine ownership.
+   Copy trait. Result type. File-level modules. No mutation.
+   "total" is a contextual modifier (not a keyword): it marks a function
+   for the structural termination check.
+*)
+
+
+(* -- Program structure -- *)
+
+program      = module_decl { import_decl } { top_decl } ;
+
+module_decl  = "module" Name ;
+
+import_decl  = "import" Name [ "exposing" "(" name_list ")" ] ;
+name_list    = export_name { "," export_name } ;
+export_name  = name | Name ;
+
+top_decl     = [ "export" ] decl ;
+
+decl         = fn_decl
+             | let_decl
+             | type_decl
+             | trait_decl
+             | impl_decl
+             ;
+
+
+(* -- Declarations -- *)
+
+fn_decl      = "fn" [ "total" ] name [ "[" bounds "]" ] "(" [ params ] ")" [ ":" type ] "=" expr ;
+let_decl     = "let" name [ ":" type ] "=" expr ;
+type_decl    = "type" Name { name } "=" type_body ;
+trait_decl   = "trait" Name { name } "=" "{" { trait_method } "}" ;
+impl_decl    = "impl" Name { atom_type } "for" atom_type "=" "{" { impl_method } "}" ;
+
+params       = param { "," param } ;
+param        = name [ ":" type ] ;
+
+bounds       = bound { "," bound } ;
+bound        = Name name ;          (* e.g.  Copy a,  Show a *)
+
+trait_method = "fn" name ":" type ;
+impl_method  = "fn" name "(" [ params ] ")" "=" expr ;
+
+
+(* -- Expressions -- *)
+
+expr         = let_expr
+             | if_expr
+             | match_expr
+             | lambda_expr
+             | infix_expr
+             ;
+
+let_expr     = "let" name [ ":" type ] "=" expr "in" expr ;
+if_expr      = "if" expr "then" expr "else" expr ;
+match_expr   = "match" expr "with" { "|" pattern "=>" expr } "end" ;
+lambda_expr  = "fn" "(" [ params ] ")" "=>" expr ;
+
+infix_expr   = unary_expr { op unary_expr } ;
+unary_expr   = unary_op unary_expr | apply_expr ;
+unary_op     = "-" | "not" ;
+apply_expr   = atom { "(" [ args ] ")" } ;
+args         = expr { "," expr } ;
+
+atom         = literal
+             | name
+             | Name
+             | "(" expr ")"
+             | "(" expr "," expr { "," expr } ")"  (* tuple *)
+             ;
+
+
+(* -- Types -- *)
+
+type         = fn_type ;
+
+fn_type      = atom_type "->" fn_type     (* right-associative *)
+             | atom_type
+             ;
+
+atom_type    = Name                                     (* Int, Bool, IO    *)
+             | Name "(" type { "," type } ")"           (* Result(a, b)     *)
+             | name                                     (* a, b             *)
+             | "()"                                     (* Unit             *)
+             | "(" type ")"                             (* parenthesised    *)
+             | "(" type "," type { "," type } ")"       (* tuple type       *)
+             ;
+
+type_body    = type
+             | "|" Name [ "of" type ] { "|" Name [ "of" type ] }
+             ;
+
+
+(* -- Patterns -- *)
+
+pattern      = "_"
+             | literal
+             | name
+             | Name [ "(" pattern { "," pattern } ")" ]
+             | "(" pattern "," pattern { "," pattern } ")"   (* tuple *)
+             ;
+
+
+(* -- Trait bounds (in fn signatures) -- *)
+
+(* bound  ::=  Name name
+   e.g.   fn identity[Copy a](x : a) : a = x
+          fn show_both[Show a, Show b](x : a, y : b) : String = ...  *)
+
+
+(* -- Operators -- *)
+
+op           = "+"  | "-"  | "*"  | "/"
+             | "==" | "!=" | "<"  | "<=" | ">"  | ">="
+             | "and" | "or"
+             ;
+
+
+(* -- Literals -- *)
+
+literal      = integer | float | string | "true" | "false" | "()" ;
+integer      = digit { digit } ;
+float        = digit { digit } "." digit { digit } ;
+string       = '"' { str_char } '"' ;
+str_char     = (* any character except '"' and '\' *)
+             | "\\" escape ;
+escape       = '"' | "\\" | "n" | "t" | "r" ;
+
+
+(* -- Lexical -- *)
+
+name         = lowercase { letter | digit | "_" } ;   (* variables, fn names *)
+Name         = uppercase { letter | digit | "_" } ;   (* types, constructors *)
+digit        = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+lowercase    = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j"
+             | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t"
+             | "u" | "v" | "w" | "x" | "y" | "z" ;
+uppercase    = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J"
+             | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T"
+             | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+letter       = lowercase | uppercase ;
+
+(* keywords — not valid as name or Name:
+   and else end export false fn if impl import in let match
+   module not of or then trait true type where with *)

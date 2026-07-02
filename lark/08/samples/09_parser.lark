@@ -1,0 +1,261 @@
+(* Sample 09 — Recursive-descent expression parser with combinator style
+
+   A small LL(1) arithmetic parser written in pure Lark.  It demonstrates:
+     - Parser functions as first-class values (parsers that return parsers)
+     - The pand / por combinator interface for sequencing and choice
+     - Mutual recursion between grammar rules
+     - ADTs for both the token stream and the resulting AST
+
+   Grammar (left-recursion eliminated for LL parsing):
+     expr      ::= term expr_tail
+     expr_tail ::= ('+' | '-') term expr_tail  |  ε
+     term      ::= factor term_tail
+     term_tail ::= ('*' | '/') factor term_tail  |  ε
+     factor    ::= NUM  |  '(' expr ')'
+
+   Precedence falls out of the nesting (star inside term, plus inside expr).
+   Left-associativity falls out of the tail accumulators.
+
+   Expected output:
+     1 + 2 * 3  =>  (1+(2*3))  =  7
+     ( 1 + 2 ) * 3  =>  ((1+2)*3)  =  9
+     10 - 3 - 2  =>  ((10-3)-2)  =  5
+     2 * ( 3 + 4 ) / 7  =>  ((2*(3+4))/7)  =  2
+     ( 1 +  =>  ERROR: expected number or '('
+*)
+
+module Parser
+
+
+(* -- Token type -- *)
+
+type Token =
+  | TNum    of Int
+  | TPlus
+  | TMinus
+  | TStar
+  | TSlash
+  | TLParen
+  | TRParen
+
+impl Copy for Token = {}
+
+
+(* -- Linked list -- *)
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Token) = {}
+
+
+(* -- Abstract syntax tree -- *)
+
+type Expr =
+  | Lit of Int
+  | Add of Expr, Expr
+  | Sub of Expr, Expr
+  | Mul of Expr, Expr
+  | Div of Expr, Expr
+
+impl Copy for Expr = {}
+
+
+(* -- Parse result -- *)
+
+type Result a b =
+  | Ok  of a
+  | Err of b
+
+
+(* -- Parser combinators -- *)
+
+(* A "parser" is a function  List(Token) -> Result((Expr, List(Token)), String).
+   pand and por are higher-order functions that combine two parsers into one.
+
+   Usage: pass lambdas (not bare top-level names) as arguments, because Lark
+   calls parser arguments through a closure dispatch path. *)
+
+(* pand — sequence (monadic bind).
+   Run p; on success feed the Expr and remaining tokens to f. *)
+fn pand(
+  p : List(Token) -> Result((Expr, List(Token)), String),
+  f : Expr -> List(Token) -> Result((Expr, List(Token)), String)
+) : List(Token) -> Result((Expr, List(Token)), String) =
+  fn(tokens : List(Token)) =>
+    match p(tokens) with
+    | Err(msg)       => Err(msg)
+    | Ok((e, rest))  => f(e)(rest)
+    end
+
+(* por — ordered choice.
+   Try p; if it fails try q on the same input (no token consumed on failure). *)
+fn por(
+  p : List(Token) -> Result((Expr, List(Token)), String),
+  q : List(Token) -> Result((Expr, List(Token)), String)
+) : List(Token) -> Result((Expr, List(Token)), String) =
+  fn(tokens : List(Token)) =>
+    match p(tokens) with
+    | Ok(r)  => Ok(r)
+    | Err(_) => q(tokens)
+    end
+
+
+(* -- Grammar rules -- *)
+
+(* All five parsing functions are mutually recursive (p_factor ↔ p_expr via
+   the parenthesised sub-expression case), so every one carries a full type
+   annotation for the mutual-recursion pre-pass. *)
+
+(* factor ::= NUM | '(' expr ')' *)
+fn p_factor(tokens : List(Token)) : Result((Expr, List(Token)), String) =
+  match tokens with
+  | Cons(TNum(n), rest) => Ok((Lit(n), rest))
+  | Cons(TLParen, rest) =>
+    match p_expr(rest) with
+    | Err(msg)       => Err(msg)
+    | Ok((e, rest2)) =>
+      match rest2 with
+      | Cons(TRParen, rest3) => Ok((e, rest3))
+      | _                    => Err("expected ')'")
+      end
+    end
+  | _ => Err("expected number or '('")
+  end
+
+(* term_tail ::= ('*' | '/') factor term_tail | ε
+   Returns a parser that closes over the accumulated left-hand side. *)
+fn p_term_tail(lhs : Expr) : List(Token) -> Result((Expr, List(Token)), String) =
+  fn(tokens : List(Token)) =>
+    match tokens with
+    | Cons(TStar, rest) =>
+      match p_factor(rest) with
+      | Err(msg)         => Err(msg)
+      | Ok((rhs, rest2)) => p_term_tail(Mul(lhs, rhs))(rest2)
+      end
+    | Cons(TSlash, rest) =>
+      match p_factor(rest) with
+      | Err(msg)         => Err(msg)
+      | Ok((rhs, rest2)) => p_term_tail(Div(lhs, rhs))(rest2)
+      end
+    | _ => Ok((lhs, tokens))
+    end
+
+(* term ::= factor term_tail *)
+fn p_term(tokens : List(Token)) : Result((Expr, List(Token)), String) =
+  match p_factor(tokens) with
+  | Err(msg)        => Err(msg)
+  | Ok((lhs, rest)) => p_term_tail(lhs)(rest)
+  end
+
+(* expr_tail ::= ('+' | '-') term expr_tail | ε *)
+fn p_expr_tail(lhs : Expr) : List(Token) -> Result((Expr, List(Token)), String) =
+  fn(tokens : List(Token)) =>
+    match tokens with
+    | Cons(TPlus, rest) =>
+      match p_term(rest) with
+      | Err(msg)         => Err(msg)
+      | Ok((rhs, rest2)) => p_expr_tail(Add(lhs, rhs))(rest2)
+      end
+    | Cons(TMinus, rest) =>
+      match p_term(rest) with
+      | Err(msg)         => Err(msg)
+      | Ok((rhs, rest2)) => p_expr_tail(Sub(lhs, rhs))(rest2)
+      end
+    | _ => Ok((lhs, tokens))
+    end
+
+(* expr ::= term expr_tail
+
+   Demonstrating pand with explicit lambdas — wrapping global functions
+   avoids the closure-stub calling convention issue and shows the combinator
+   interface as it is meant to be used with user-supplied parsers. *)
+fn p_expr(tokens : List(Token)) : Result((Expr, List(Token)), String) =
+  pand(
+    fn(t : List(Token)) => p_term(t),
+    fn(e : Expr)        => fn(t : List(Token)) => p_expr_tail(e)(t)
+  )(tokens)
+
+
+(* -- Evaluator -- *)
+
+fn eval(e : Expr) : Int =
+  match e with
+  | Lit(n)    => n
+  | Add(a, b) => eval(a) + eval(b)
+  | Sub(a, b) => eval(a) - eval(b)
+  | Mul(a, b) => eval(a) * eval(b)
+  | Div(a, b) => eval(a) / eval(b)
+  end
+
+
+(* -- Pretty-printer -- *)
+
+fn pretty(e : Expr) : String =
+  match e with
+  | Lit(n)    => show(n)
+  | Add(a, b) => "(" + pretty(a) + "+" + pretty(b) + ")"
+  | Sub(a, b) => "(" + pretty(a) + "-" + pretty(b) + ")"
+  | Mul(a, b) => "(" + pretty(a) + "*" + pretty(b) + ")"
+  | Div(a, b) => "(" + pretty(a) + "/" + pretty(b) + ")"
+  end
+
+
+(* -- Token display -- *)
+
+fn show_tok(t : Token) : String =
+  match t with
+  | TNum(n) => show(n)
+  | TPlus   => "+"
+  | TMinus  => "-"
+  | TStar   => "*"
+  | TSlash  => "/"
+  | TLParen => "("
+  | TRParen => ")"
+  end
+
+fn show_toks(ts : List(Token)) : String =
+  match ts with
+  | Nil           => ""
+  | Cons(t, Nil)  => show_tok(t)
+  | Cons(t, rest) => show_tok(t) + " " + show_toks(rest)
+  end
+
+
+(* -- Runner -- *)
+
+fn run(tokens : List(Token)) : String =
+  let src = show_toks(tokens) in
+  match p_expr(tokens) with
+  | Err(msg)   => src + "  =>  ERROR: " + msg
+  | Ok((e, _)) => src + "  =>  " + pretty(e) + "  =  " + show(eval(e))
+  end
+
+
+(* -- Main -- *)
+
+fn main(io : IO) : IO =
+
+  (* 1 + 2 * 3  — * binds tighter than +, so (1+(2*3))=7 *)
+  let t1 = Cons(TNum(1), Cons(TPlus, Cons(TNum(2), Cons(TStar, Cons(TNum(3), Nil))))) in
+
+  (* (1 + 2) * 3  — parentheses override precedence, so ((1+2)*3)=9 *)
+  let t2 = Cons(TLParen, Cons(TNum(1), Cons(TPlus, Cons(TNum(2),
+             Cons(TRParen, Cons(TStar, Cons(TNum(3), Nil))))))) in
+
+  (* 10 - 3 - 2  — left-associative, so ((10-3)-2)=5, not (10-(3-2))=9 *)
+  let t3 = Cons(TNum(10), Cons(TMinus, Cons(TNum(3), Cons(TMinus, Cons(TNum(2), Nil))))) in
+
+  (* 2 * (3 + 4) / 7  — mixed precedence with grouping, so ((2*(3+4))/7)=2 *)
+  let t4 = Cons(TNum(2), Cons(TStar, Cons(TLParen, Cons(TNum(3), Cons(TPlus,
+             Cons(TNum(4), Cons(TRParen, Cons(TSlash, Cons(TNum(7), Nil))))))))) in
+
+  (* ( 1 +  — unclosed paren + missing right operand → parse error *)
+  let t5 = Cons(TLParen, Cons(TNum(1), Cons(TPlus, Nil))) in
+
+  let io = print(io, run(t1)) in
+  let io = print(io, run(t2)) in
+  let io = print(io, run(t3)) in
+  let io = print(io, run(t4)) in
+  print(io, run(t5))

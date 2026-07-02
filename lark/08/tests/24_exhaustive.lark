@@ -1,0 +1,59 @@
+(* Test 24 — Exhaustiveness checker accepts complete matches (Phase 8)
+   Covers: complete ADT signatures without wildcards, Bool via the two
+   literals, nested constructor patterns completed arm by arm, tuple
+   patterns, and literal matches closed by a variable arm.
+   Expected output:
+     red
+     yes
+     7
+     0
+     origin
+     one *)
+
+module Exhaustive
+
+type Color = | Red | Green | Blue
+
+fn name(c : Color) : String =
+  match c with
+  | Red   => "red"
+  | Green => "green"
+  | Blue  => "blue"
+  end
+
+fn yesno(b : Bool) : String =
+  match b with
+  | true  => "yes"
+  | false => "no"
+  end
+
+fn first_or(xs : List(Result(Int, String)), d : Int) : Int =
+  match xs with
+  | Nil            => d
+  | Cons(Ok(n), _) => n
+  | Cons(Err(_), rest) => first_or(rest, d)
+  end
+
+fn quadrant(p : (Int, Int)) : String =
+  match p with
+  | (0, 0) => "origin"
+  | (x, y) => "elsewhere"
+  end
+
+fn describe(n : Int) : String =
+  match n with
+  | 0 => "zero"
+  | 1 => "one"
+  | k => "many"
+  end
+
+fn lines(u : ()) : String =
+  name(Red) + "\n" +
+  yesno(True) + "\n" +
+  show(first_or(Cons(Err("bad"), Cons(Ok(7), Nil)), -1)) + "\n" +
+  show(first_or(Nil, 0)) + "\n" +
+  quadrant((0, 0)) + "\n" +
+  describe(1)
+
+fn main(io : IO) : IO =
+  print(io, lines(()))

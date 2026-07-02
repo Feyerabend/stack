@@ -1,0 +1,16 @@
+(* Error test 11 — Non-exhaustive literal patterns (Phase 8)
+   Int has no finite constructor signature, so a match on Int literals is
+   only exhaustive with a wildcard or variable arm.  The witness is a
+   concrete unmatched value.
+   Expected: ExhaustivenessError: pattern '2' not covered *)
+
+module NonExhLiteral
+
+fn describe(n : Int) : String =
+  match n with
+  | 0 => "zero"
+  | 1 => "one"
+  end
+
+fn main(io : IO) : IO =
+  print(io, describe(1))

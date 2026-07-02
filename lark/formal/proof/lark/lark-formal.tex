@@ -1,4 +1,4 @@
-% lark-formal.tex — Lark (Lambda Affine Resource Kernel): Language Specification
+% lark-formal.tex --- Lark (Lambda Affine Resource Kernel): Language Specification
 %
 % Part I: machine-checked STLC core (lcore proof files)
 % Part II: full surface language (paper rules)
@@ -94,6 +94,15 @@ with NbE.  Every formula has a counterpart in \texttt{proof/lark/}.
 extends to the complete language: algebraic data types, pattern matching, affine
 ownership, traits, modules, and the full surface grammar.  These sections are
 paper rules derived from the implementation; they are not machine-checked.
+
+\smallskip
+\noindent\textbf{Part\,III} (\S\S\,\ref{sec:int-defined}--\ref{sec:totality})
+is an \emph{addendum}: the Phase\,8 rigor extensions (repository snapshot
+\texttt{08/}).  Parts\,I--II specify the language as built through Phase\,7;
+Part\,III records where Phase\,8 \emph{strengthens} or \emph{redefines} those
+rules --- defined integer overflow, static exhaustiveness, and opt-in totality.
+A reader following the build chronologically should read it as a delta,
+exactly as the snapshots are.
 
 \medskip\noindent\rule{\linewidth}{0.4pt}
 {\centering\normalsize\bfseries Part\,I\quad Machine-Checked STLC Core\par}
@@ -862,5 +871,170 @@ Name = uppercase \{ letter | digit | "_" \} ;
 \noindent Keywords (not valid as \texttt{name} or \texttt{Name}):
 \texttt{and else end export false fn if impl import in let match
 module not of or then trait true type where with}.
+
+\bigskip
+\noindent\rule{\linewidth}{0.4pt}
+{\centering\normalsize\bfseries Part\,III\quad Addendum: Phase\,8 Rigor Extensions\par}
+\noindent\rule{\linewidth}{0.4pt}\medskip
+
+\noindent
+This part specifies the Phase\,8 extensions (snapshot \texttt{08/}).  Like
+Part\,II these are paper rules; unlike Part\,II each rule here is enforced by
+an executable check in \texttt{08/src/} and exercised by the differential
+test suite across all four backends.  Machine-checking them in the MLTT
+kernel is future work.
+
+% -----------------------------------------------------------------------------
+\section{Defined Integer Semantics}
+\label{sec:int-defined}
+
+Through Phase\,7 the behaviour of $\TInt$ arithmetic outside
+$[-2^{31},\,2^{31})$ was backend-dependent (the Python evaluators used
+unbounded integers; the RV32 backend wrapped).  Phase\,8 \emph{defines} it:
+
+\begin{definition}[Int values]
+$\TInt$ values are the two's-complement 32-bit integers
+$\mathbb{Z}_{32}=\{-2^{31},\ldots,2^{31}-1\}$.  The wrap function
+$\mathsf{w}:\mathbb{Z}\to\mathbb{Z}_{32}$ is
+\[
+\mathsf{w}(n) \;=\; \bigl((n + 2^{31}) \bmod 2^{32}\bigr) - 2^{31}.
+\]
+\end{definition}
+
+\paragraph{Arithmetic.}
+For $n_1,n_2\in\mathbb{Z}_{32}$ and $\oplus\in\{+,-,\times\}$, the reduction
+rule for primitive application computes in $\mathbb{Z}$ and wraps:
+\[
+n_1 \oplus n_2 \;\step\; \mathsf{w}(n_1 \oplus_{\mathbb{Z}} n_2).
+\]
+
+\paragraph{Division and remainder.}
+Division truncates toward zero and follows the RISC-V M-extension
+conventions, so no arithmetic operation is a stuck term:
+\begin{align*}
+n_1 \,/\, n_2 &\;\step\;
+  \begin{cases}
+    -1                & n_2 = 0\\
+    -2^{31}           & n_1 = -2^{31},\; n_2 = -1\\
+    \mathsf{trunc}(n_1/n_2) & \text{otherwise}
+  \end{cases}
+&
+n_1 \,\%\, n_2 &\;\step\;
+  \begin{cases}
+    n_1               & n_2 = 0\\
+    0                 & n_1 = -2^{31},\; n_2 = -1\\
+    n_1 - n_2\cdot\mathsf{trunc}(n_1/n_2) & \text{otherwise}
+  \end{cases}
+\end{align*}
+
+\begin{remark}
+Wrap was chosen over trap because the compilation target decides: RV32
+hardware wraps for free, so wrapping is the only semantics every backend can
+implement at zero cost.  The consequence is visible in
+\S\ref{sec:totality}: integer descent is not well-founded under wrapping,
+and the totality judgment must refuse it.
+\end{remark}
+
+% -----------------------------------------------------------------------------
+\section{Exhaustiveness}
+\label{sec:exhaust}
+
+Phase\,8 strengthens the \textsc{Match} typing rule of \S\ref{sec:typing-ext}
+with a coverage side condition, checked by Maranget's usefulness algorithm
+(\texttt{08/src/exhaust.py}).
+
+\begin{definition}[Pattern matrix, specialisation, default]
+Let $P$ be an $m\times n$ matrix of patterns.  For a constructor $c$ of
+arity $k$, the \emph{specialisation} $\mathcal{S}(c,P)$ keeps each row whose
+first pattern is $c(p_1,\ldots,p_k)$ (replacing it by
+$p_1,\ldots,p_k$) or a wildcard/variable (replacing it by $k$ wildcards),
+and drops the rest.  The \emph{default} $\mathcal{D}(P)$ keeps the rows
+whose first pattern is a wildcard/variable, minus their first column.
+\end{definition}
+
+\begin{definition}[Usefulness, coverage]
+$\mathcal{U}(P,\vec q)$ holds iff some value vector matches $\vec q$ but no
+row of $P$.  A match on scrutinee type $\tau$ with arm patterns
+$p_1,\ldots,p_m$ is \emph{exhaustive} iff
+$\neg\,\mathcal{U}\bigl((p_1)\cdots(p_m)^{T},\;(\_)\bigr)$,
+decided by structural recursion on $\mathcal{S}$ and $\mathcal{D}$,
+driven by the column type's \emph{complete signature}: the declared
+constructors for an ADT, $\{(),\}$ for $\TUnit$,
+$\{\mathtt{true},\mathtt{false}\}$ for $\TBool$, the single $n$-tuple
+constructor for products, and \emph{no} finite signature for $\TInt$,
+$\TFlt$, $\TStr$, $\TIO$, functions, and type variables (these require a
+wildcard or variable arm).
+\end{definition}
+
+\paragraph{Strengthened rule.}
+\begin{mathpar}
+\inferrule{
+  \hasty{\Gamma}{e}{\tau} \\
+  \hasty{\Gamma,\;\mathsf{binds}(p_i:\tau)}{e_i}{\sigma}\;\text{for each }i \\
+  \mathsf{exhaustive}(\tau;\;p_1,\ldots,p_m)
+}{
+  \hasty{\Gamma}{\mathtt{match}\;e\;\mathtt{with}\;\overline{|\;p_i\Rightarrow e_i}\;\mathtt{end}}{\sigma}
+}\;\textsc{Match$^{+}$}
+\end{mathpar}
+
+\begin{theorem}[Match progress, paper]
+If a match expression is well typed under \textsc{Match$^{+}$} and its
+scrutinee is a value $v$, then $\mathsf{match}(v,p_j)$ succeeds for some
+arm $j$: the \textsc{MatchArm} rule of \S\ref{sec:step-ext} always applies,
+and the match-failure trap emitted by the compiler is unreachable.
+\end{theorem}
+
+\begin{remark}
+When the check fails, the usefulness recursion has \emph{constructed} a
+value vector no arm matches; it is reported as a witness pattern
+(e.g.\ \texttt{Cons(Err(\_), Nil)}), turning the rejection into a
+diagnosis.
+\end{remark}
+
+% -----------------------------------------------------------------------------
+\section{Totality}
+\label{sec:totality}
+
+A function may opt into a termination check:
+\texttt{fn total} $f(x_1{:}\tau_1,\ldots,x_n{:}\tau_n) = e$.
+The modifier is contextual --- \texttt{total} remains a valid identifier.
+
+\begin{definition}[Structural order]
+Write $y \prec x$ when $y$ is bound at depth ${\ge}1$ inside a constructor
+or tuple pattern matched against $x$, or against some $z \prec x$.  The
+relation is well-founded: every Lark value is a finite tree.
+\end{definition}
+
+\begin{definition}[Totality judgment]
+$\mathsf{total}(f)$ holds iff
+\begin{enumerate}
+\item some fixed argument position $i$ decreases at \emph{every} recursive
+      call $f(a_1,\ldots,a_n)$ in $e$: the argument $a_i$ is a variable
+      with $a_i \prec x_i$;
+\item every other name referenced in $e$ is known to terminate: a builtin,
+      a constructor, a parameter of $f$ (totality is \emph{relative} --- the
+      caller supplies total arguments), another \texttt{total} function, or
+      a function whose call graph reaches no cycle;
+\item $f$ itself appears only in call position, and $f$ is not part of a
+      mutual-recursion cycle (a v1 restriction; lexicographic and
+      size-change measures are future work).
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[Relative termination, paper]
+If $\mathsf{total}(f)$ and $f$ is applied to values whose function-typed
+components are themselves terminating, evaluation of the application
+terminates.
+\end{theorem}
+
+\begin{remark}
+$f(n-1)$ on $\TInt$ is \emph{not} accepted as decreasing, and this is
+soundness rather than incompleteness: under the wrapping semantics of
+\S\ref{sec:int-defined}, descent from a negative $n$ never reaches a base
+case at $0$ --- it wraps through $-2^{31}$.  The two Phase\,8 semantic
+decisions are mutually constraining: defined overflow is what makes
+integer descent genuinely ill-founded, and structural descent on data is
+the discipline that remains.
+\end{remark}
 
 \end{document}

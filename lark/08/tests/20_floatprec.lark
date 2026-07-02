@@ -1,0 +1,16 @@
+(* Test 20 — Float precision at 7-significant-figure boundary
+   Covers: float division producing values that are inexact in both float32
+           and float64, where the float32 representation differs from float64
+           at the 7th significant figure. All three backends round to float32
+           precision and format with :.7g — they must produce identical output.
+   Expected output:
+     0.3333333
+     0.6666667
+     0.1428571 *)
+
+module FloatPrec
+
+fn main(io : IO) : IO =
+  let io = print(io, show(1.0 / 3.0)) in
+  let io = print(io, show(2.0 / 3.0)) in
+  print(io, show(1.0 / 7.0))

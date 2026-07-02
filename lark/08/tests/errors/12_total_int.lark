@@ -1,0 +1,13 @@
+(* Error test 12 — `fn total` with integer descent (Phase 8)
+   `n - 1` is not structural descent, and under wrapping-i32 semantics it
+   is genuinely unsound: from a negative n the countdown never reaches 0.
+   Expected: TotalityError: no argument position decreases structurally *)
+
+module TotalInt
+
+fn total countdown(n : Int, acc : Int) : Int =
+  if n == 0 then acc
+  else countdown(n - 1, acc + n)
+
+fn main(io : IO) : IO =
+  print(io, show(countdown(10, 0)))

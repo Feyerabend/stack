@@ -1,0 +1,18 @@
+(* Error test 14 — `fn total` calling a possibly-nonterminating function (Phase 8)
+   loop/1 is recursive without being declared total, so it is not known to
+   terminate; a total function may not depend on it.
+   Expected: TotalityError: calls 'loop', which is not known to terminate *)
+
+module TotalCallsPartial
+
+fn loop(n : Int) : Int =
+  loop(n)
+
+fn total use_loop(xs : List(Int)) : Int =
+  match xs with
+  | Nil          => 0
+  | Cons(x, rest) => loop(x) + use_loop(rest)
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(use_loop(Nil)))

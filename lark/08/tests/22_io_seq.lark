@@ -1,0 +1,19 @@
+(* Test 22 — IO sequencing
+   Covers: multiple IO-threaded print operations in a fixed order.  The IO
+           token is passed sequentially through each print; the output order
+           must match the source order on all three backends.
+   Expected output:
+     first
+     second
+     third
+     fourth
+     fifth *)
+
+module IoSeq
+
+fn main(io : IO) : IO =
+  let io = print(io, "first") in
+  let io = print(io, "second") in
+  let io = print(io, "third") in
+  let io = print(io, "fourth") in
+  print(io, "fifth")

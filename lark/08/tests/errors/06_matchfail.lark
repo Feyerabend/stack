@@ -1,0 +1,18 @@
+(* Error test 06 — Non-exhaustive match with ADT (static, Phase 8)
+   The match only handles Circle.  Through Phase 7 this failed at runtime;
+   the exhaustiveness checker now rejects it at compile time with a witness.
+   Expected: ExhaustivenessError: pattern 'Square(_)' not covered *)
+
+module MatchFail2
+
+type Shape =
+  | Circle of Float
+  | Square of Float
+
+fn area(s : Shape) : Float =
+  match s with
+  | Circle(r) => 3.14159 * r * r
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(area(Square(2.0))))

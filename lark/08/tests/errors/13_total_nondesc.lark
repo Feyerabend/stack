@@ -1,0 +1,15 @@
+(* Error test 13 — `fn total` recursing on the same value (Phase 8)
+   The recursive call passes the whole parameter back, not a strict
+   subterm of it: the classic infinite loop, rejected statically.
+   Expected: TotalityError: no argument position decreases structurally *)
+
+module TotalNonDesc
+
+fn total spin(xs : List(Int)) : Int =
+  match xs with
+  | Nil        => 0
+  | Cons(x, _) => spin(xs)
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(spin(Cons(1, Nil))))

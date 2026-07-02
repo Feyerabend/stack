@@ -1,0 +1,13 @@
+(* Test 19 — Integer overflow (defined semantics)
+   Covers: multiplication that exceeds 32-bit signed int range.
+           Int is a wrapping i32 in every backend (RISC-V semantics), so
+           100000 * 100001 = 10000100000 mod 2^32 = 1410165408 — everywhere.
+   Expected output:
+     1410165408 *)
+
+module IntOverflow
+
+fn main(io : IO) : IO =
+  let x = 100000 in
+  let y = 100001 in
+  print(io, show(x * y))
