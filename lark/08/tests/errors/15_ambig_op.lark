@@ -1,0 +1,13 @@
+(* Error test 15 — ambiguous operator type (backported from Phase 9).
+   Expected: type error — inside the generalised lambda, `+` is applied at
+   an unresolved type variable.  The CEK and TAC VM would dispatch on the
+   runtime value (string concat here), but the RV32 backend commits to
+   integer arithmetic at compile time and would add the string *pointers*,
+   printing garbage.  Found by differential fuzzing (09/tests/gen_prog.py);
+   the checker rejects operators whose operand type is not concrete when
+   the enclosing declaration is generalised. *)
+
+module AmbigOp
+
+fn main(io : IO) : IO =
+  print(io, (let f = (fn(x) => (x + x)) in f("uh oh")))

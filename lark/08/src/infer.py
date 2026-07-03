@@ -498,6 +498,69 @@ def _apply_texpr(s: Subst, expr: TExpr) -> TExpr:
             return expr
 
 
+# -- Ambiguous-operator check --
+#
+# Operators are ad-hoc polymorphic (+ : a -> a -> a), and the lowerer picks
+# the implementation from the *static* operand type: __str_concat for String,
+# __float_add for Float, the integer instruction otherwise.  If an operand
+# type is still a type variable when the enclosing declaration is generalised
+# (e.g. `let f = fn(x) => x + x`), the CEK and TAC VM would dispatch on the
+# runtime value while the RV32 backend has already committed to integer
+# arithmetic — adding string *pointers*.  Found by differential fuzzing in
+# Phase 9 and backported; rejected here so no backend ever sees such a
+# program.
+
+def _op_operand_type(expr: TExpr) -> "Mono | None":
+    """The type an operator dispatches on, or None for type-fixed operators."""
+    match expr:
+        case TBinOp(op=op, left=l) if op not in ("and", "or"):
+            return l.typ            # arith: == result; cmp: sides unified
+        case TUnaryOp(op="-", operand=o):
+            return o.typ
+    return None
+
+
+def _check_op_ambiguity(expr: TExpr) -> None:
+    """Walk a substitution-applied typed expression and reject any operator
+    whose dispatch type is not concrete."""
+    t = _op_operand_type(expr)
+    if t is not None and free_vars(t):
+        op = expr.op   # only TBinOp/TUnaryOp reach here
+        raise TypeError(
+            f"ambiguous operator type: {op!r} applied at unresolved type "
+            f"{pretty(t)}; add a type annotation so the operand type is "
+            f"concrete"
+        )
+    match expr:
+        case TTupleExpr(elems=elems):
+            for e in elems:
+                _check_op_ambiguity(e)
+        case XApply(fn=fn_expr, args=args):
+            _check_op_ambiguity(fn_expr)
+            for a in args:
+                _check_op_ambiguity(a)
+        case TBinOp(left=l, right=r):
+            _check_op_ambiguity(l)
+            _check_op_ambiguity(r)
+        case TUnaryOp(operand=o):
+            _check_op_ambiguity(o)
+        case TLetExpr(value=v, body=b):
+            _check_op_ambiguity(v)
+            _check_op_ambiguity(b)
+        case TIfExpr(cond=c, then_=th, else_=el):
+            _check_op_ambiguity(c)
+            _check_op_ambiguity(th)
+            _check_op_ambiguity(el)
+        case TMatchExpr(scrutinee=s, arms=arms):
+            _check_op_ambiguity(s)
+            for _, body in arms:
+                _check_op_ambiguity(body)
+        case TLambda(body=b):
+            _check_op_ambiguity(b)
+        case _:
+            pass  # TLit, TVar, TCon — no sub-expressions
+
+
 # -- Show-bound check --
 
 def _show_satisfies(typ: ty.Mono, show_types: frozenset[str]) -> bool:
@@ -605,6 +668,7 @@ def check_fn_decl(
     sc = generalise(_apply_env(s, env), fn_t)
     typed_params = tuple((nm, apply(s, pt)) for nm, pt in param_types)
     tbody = _apply_texpr(s, tbody)
+    _check_op_ambiguity(tbody)
     if show_types:
         _check_show_bounds(tbody, show_types)
     return TFnDecl(decl.name, typed_params, tbody, sc, decl.exported), sc
@@ -628,6 +692,7 @@ def check_let_decl(
         t  = apply(s, ann_t)
     sc = generalise(_apply_env(s, env), t)
     tv = _apply_texpr(s, tv)
+    _check_op_ambiguity(tv)
     if show_types:
         _check_show_bounds(tv, show_types)
     return TLetDecl(decl.name, tv, sc, decl.exported), sc
