@@ -9,7 +9,7 @@ The book is not built around *how do I build a compiler?* but around a different
 
 ### Why the existing books don't fill the gap
 
-The foreword surveys four well-regarded texts and explains what each leaves unaddressed:
+The books surveys four well-regarded texts and explains what each leaves unaddressed:
 
 - *The Dragon Book* (Aho, Lam, Sethi, Ullman)--comprehensive and authoritative, but a dense reference text organized for lookup and oriented toward production compilers. Learning from it is likened to understanding a cathedral by reading its maintenance manual.
 - *Modern Compiler Implementation* (Appel)--has the right instinct of building one language (Tiger) from chapter one, but is now a quarter-century old, and its three editions feel like incomplete versions of the same idea. Its type system isn't the kind interesting languages now have.
@@ -43,7 +43,7 @@ Four commitments distinguish it:
 
 ### The LLM question
 
-The foreword confronts a 2026-specific objection: if large language models can generate parsers, type checkers, and compilers on demand, why learn how they work? One reply is that the objection proves too much--a surgeon who understands anatomy still reasons differently from one who doesn't, even when a robot makes the incision. Language implementation is where system-level reasoning lives in its most concentrated form: a type system is a formal claim about what programs mean, a register allocator is a constraint-satisfaction problem with a cost model, a calling convention is a contract between modules. None can be safely outsourced without the practitioner understanding what the tool does. LLMs are strong at reproducing seen patterns but weak at the *propagative reasoning* needed when a pattern doesn't fit--exactly the skill building a language cultivates. Lark itself was built with LLM assistance, but the reasoning behind each decision lives in the book and repository, not hidden inside a generation process--the intended model being tool-assisted construction with human-owned understanding.
+The book confronts a 2026-specific objection: if large language models can generate parsers, type checkers, and compilers on demand, why learn how they work? One reply is that the objection proves too much--a surgeon who understands anatomy still reasons differently from one who doesn't, even when a robot makes the incision. Language implementation is where system-level reasoning lives in its most concentrated form: a type system is a formal claim about what programs mean, a register allocator is a constraint-satisfaction problem with a cost model, a calling convention is a contract between modules. None can be safely outsourced without the practitioner understanding what the tool does. LLMs are strong at reproducing seen patterns but weak at the *propagative reasoning* needed when a pattern doesn't fit--exactly the skill building a language cultivates. Lark itself was built with LLM assistance, but the reasoning behind each decision lives in the book and repository, not hidden inside a generation process--the intended model being tool-assisted construction with human-owned understanding.
 
 ### Who it's for, and where it ends
 
