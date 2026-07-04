@@ -336,9 +336,19 @@ static Val *shift_var_val(Arena *a, Val *v, Val *a_ty, int d) {
         Val *g = v->indcon.args[0];
         Val *t = v->indcon.args[1];
         if (d == 0) {
-            /* there g t a_ty (here g t) : Var (ext a_ty (ext t g)) t */
+            /* there (ext t g) t a_ty (here g t) : Var (ext a_ty (ext t g)) t
+             * `there`'s first argument is the context of the INNER variable,
+             * ext t g — not g.  Passing g here produced an ill-typed value:
+             * found in Phase 9 by discharging this primitive as weaken_l
+             * (lark-weaken.lcore); the there-case below always had it right.
+             * Primitive outputs are never re-checked by the kernel, so the
+             * bug was invisible until an independent, fully-checked
+             * implementation disagreed. */
+            Val **etg = (Val **)arena_alloc(a, 2 * sizeof(Val *));
+            etg[0] = t; etg[1] = g;
+            Val *ext_t_g = vl_indcon(a, wk_ctx_fam, wk_ext_ctor, 2, etg);
             Val **args = (Val **)arena_alloc(a, 4 * sizeof(Val *));
-            args[0] = g; args[1] = t; args[2] = a_ty; args[3] = v;
+            args[0] = ext_t_g; args[1] = t; args[2] = a_ty; args[3] = v;
             return vl_indcon(a, wk_var_fam, wk_there_ctor, 4, args);
         } else {
             /* here (weaken_ctx g (d-1)) t */

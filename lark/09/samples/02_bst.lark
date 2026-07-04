@@ -1,0 +1,68 @@
+(* Sample 02 — Binary search tree
+   Insert elements in arbitrary order; in-order traversal gives them sorted.
+   Expected output:
+     1 3 4 5 7 9
+     true
+     false *)
+
+module BST
+
+type Tree =
+  | Leaf
+  | Node of Tree, Int, Tree
+
+impl Copy for Tree = {}
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Int) = {}
+
+fn insert(t : Tree, x : Int) : Tree =
+  match t with
+  | Leaf                  => Node(Leaf, x, Leaf)
+  | Node(left, v, right)  =>
+    if x < v      then Node(insert(left, x), v, right)
+    else if x > v then Node(left, v, insert(right, x))
+    else               Node(left, v, right)
+  end
+
+fn member(t : Tree, x : Int) : Bool =
+  match t with
+  | Leaf                  => false
+  | Node(left, v, right)  =>
+    if x == v     then true
+    else if x < v then member(left, x)
+    else               member(right, x)
+  end
+
+fn height(t : Tree) : Int =
+  match t with
+  | Leaf                  => 0
+  | Node(left, _, right)  =>
+    let hl = height(left) in
+    let hr = height(right) in
+    if hl > hr then hl + 1 else hr + 1
+  end
+
+fn to_list(t : Tree, acc : List(Int)) : List(Int) =
+  match t with
+  | Leaf                  => acc
+  | Node(left, v, right)  => to_list(left, Cons(v, to_list(right, acc)))
+  end
+
+fn join(sep : String, xs : List(Int)) : String =
+  match xs with
+  | Nil            => ""
+  | Cons(x, Nil)   => show(x)
+  | Cons(x, rest)  => show(x) + sep + join(sep, rest)
+  end
+
+fn main(io : IO) : IO =
+  let t = insert(insert(insert(insert(insert(insert(Leaf,
+            5), 3), 7), 1), 9), 4) in
+  let io = print(io, join(" ", to_list(t, Nil))) in
+  let io = print(io, show(member(t, 4))) in
+  let io = print(io, show(member(t, 6))) in
+  print(io, "height: " + show(height(t)))

@@ -93,11 +93,15 @@
 :let sem_lookup_d = (\d. \g. \t. \v. indrec Var (\g1. \t1. \_. SemCtx_d d g1 → Expr d t1 : Π(g1 : Ctx). Π(t1 : Ty). Var g1 t1 → Type) (\g1. \t1. \env. fst env : Π(g1 : Ctx). Π(t1 : Ty). SemCtx_d d (ext t1 g1) → Expr d t1) (\g1. \t1. \s. \v1. \ih. \env. ih (snd env) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Var g1 t1 → (SemCtx_d d g1 → Expr d t1) → SemCtx_d d (ext s g1) → Expr d t1) v : Π(d : Ctx). Π(g : Ctx). Π(t : Ty). Var g t → SemCtx_d d g → Expr d t)
 
 -- ── weaken_semctx_d : lift all SemCtx_d entries by inserting a new binding ────
--- weaken_semctx_d a d g env_d  applies  weaken a d t  to each Expr d t entry,
+-- weaken_semctx_d a d g env_d  applies  weaken_l a d t  to each Expr d t entry,
 -- producing  SemCtx_d (ext a d) g.
--- Uses the kernel-level weaken primitive: weaken a d t : Expr d t → Expr (ext a d) t.
+-- PHASE 9 (Track C): uses weaken_l from lark-weaken.lcore — the *discharged*,
+-- fully-checked weakening — instead of the TM_WEAKEN kernel primitive.  The
+-- discharge exposed a real bug in the primitive: on variables it produced
+-- ill-typed terms (the Ctx argument of `there` was not shifted), which the
+-- kernel never re-checks.  Requires lark-weaken.lcore to be loaded first.
 
-:let weaken_semctx_d = (\a. \d. \g. indrec Ctx (\g1. SemCtx_d d g1 → SemCtx_d (ext a d) g1 : Ctx → Type) (\e. star : SemCtx_d d empty → SemCtx_d (ext a d) empty) (\t. \g1. \ih. \e. (weaken a d t (fst e), ih (snd e)) : Π(t : Ty). Π(g1 : Ctx). (SemCtx_d d g1 → SemCtx_d (ext a d) g1) → SemCtx_d d (ext t g1) → SemCtx_d (ext a d) (ext t g1)) g : Π(a : Ty). Π(d : Ctx). Π(g : Ctx). SemCtx_d d g → SemCtx_d (ext a d) g)
+:let weaken_semctx_d = (\a. \d. \g. indrec Ctx (\g1. SemCtx_d d g1 → SemCtx_d (ext a d) g1 : Ctx → Type) (\e. star : SemCtx_d d empty → SemCtx_d (ext a d) empty) (\t. \g1. \ih. \e. (weaken_l a d t (fst e), ih (snd e)) : Π(t : Ty). Π(g1 : Ctx). (SemCtx_d d g1 → SemCtx_d (ext a d) g1) → SemCtx_d d (ext t g1) → SemCtx_d (ext a d) (ext t g1)) g : Π(a : Ty). Π(d : Ctx). Π(g : Ctx). SemCtx_d d g → SemCtx_d (ext a d) g)
 
 -- ── sub_open : generalised substitution into any output context ────────────────
 -- sub_open g t e d env_d : Expr d t
@@ -193,12 +197,12 @@ data IsVal : Π(t : Ty). Expr empty t → Type where ValInt : IsVal TInt (ELitIn
 :let elam_id = (ELam (ext TInt empty) TBool TBool (EVar (ext TBool (ext TInt empty)) TBool (here (ext TInt empty) TBool)) : Expr (ext TInt empty) (TFn TBool TBool))
 (sub_ground (ext TInt empty) (TFn TBool TBool) elam_id env_i)
 
--- weaken smoke tests (kernel primitive)
--- weaken TBool empty TInt (ELitInt empty) = ELitInt (ext TBool empty)
-:let wk1 = (weaken TBool empty TInt (ELitInt empty) : Expr (ext TBool empty) TInt)
+-- weaken smoke tests (discharged weakening, lark-weaken.lcore)
+-- weaken_l TBool empty TInt (ELitInt empty) = ELitInt (ext TBool empty)
+:let wk1 = (weaken_l TBool empty TInt (ELitInt empty) : Expr (ext TBool empty) TInt)
 :i wk1
--- weaken TInt (ext TBool empty) TBool (EVar ...) shifts the variable
-:let wk2 = (weaken TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool)) : Expr (ext TInt (ext TBool empty)) TBool)
+-- weaken_l TInt (ext TBool empty) TBool (EVar ...) shifts the variable
+:let wk2 = (weaken_l TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool)) : Expr (ext TInt (ext TBool empty)) TBool)
 :i wk2
 
 -- IsVal witnesses — all 6 constructors

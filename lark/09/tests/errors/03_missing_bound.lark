@@ -1,0 +1,6 @@
+(* Error test 03 — Return type mismatch (unification failure)
+   Expected: TypeError — cannot unify Int with String *)
+
+module TypeMismatch
+
+fn stringify(x : Int) : String = x

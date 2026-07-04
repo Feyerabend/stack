@@ -1,0 +1,134 @@
+-- lark-erase.lcore
+--
+-- Phase 9 (Track C): The dynamic half of the affine layer — erasure from
+-- graded typing to STLC, and inheritance of the operational semantics.
+-- Checked by lcore (proof/code/core/).
+--
+-- Run: cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-affine.lcore ../../lark/lark-weaken.lcore ../../lark/lark-subst.lcore ../../lark/lark-step.lcore ../../lark/lark-preservation.lcore ../../lark/lark-erase.lcore | grep -v '^--' | grep -v '^[[:space:]]*$' | ./lcore
+--
+-- THE THEOREM SHAPE
+-- =================
+-- The affine layer (lark-affine.lcore) is a *refinement* of the STLC:
+-- grades constrain which programs exist, they do not change what programs
+-- mean.  This file makes that precise with an erasure functor
+--
+--   erase : GExpr g t g' → Expr (strip g) t
+--
+-- mapping every graded derivation to the well-typed STLC expression it
+-- refines.  Consequences, all machine-checked:
+--
+--   · every graded program IS a well-typed STLC program (type safety of
+--     the affine fragment reduces to the STLC's, which lark-subst /
+--     lark-step / lark-preservation already cover);
+--   · a closed graded program evaluates through the STLC dynamics, and
+--     evaluation produces values (graded_eval_sound below, inherited
+--     from eval_produces_val);
+--   · type preservation for graded programs is intrinsic on both sides
+--     of the erasure (Step's endpoints share a type by construction).
+--
+-- Affine soundness itself — no duplication of consumed resources — is
+-- the *static* half (no_use_in_erased, capture_rejected, no_second_use
+-- in lark-affine.lcore): the graded programs that would duplicate simply
+-- do not exist to be erased.
+--
+-- THE PROOF DEBT THIS PAYS
+-- ========================
+-- The erasure's lambda case needs  strip (demote g) ≡ strip g  — demotion
+-- changes grades, never types — which is *propositional* (both sides are
+-- stuck when g is neutral).  This was the identified blocker; it falls to
+-- a ~10-line Id-toolkit (sym / trans / ap / transport, all instances of
+-- the kernel's J) and one induction (strip_demote).  The leftover-context
+-- equalities in the application, let, and if cases fall to the companion
+-- lemma gexpr_preserves_types: grading consumes grades, never bindings.
+--
+-- WHAT IS PROVED HERE:
+--   1. sym, trans, ap, transport — the Id-toolkit, via J. COMPLETE.
+--   2. strip, ctx_tail — grade erasure on contexts; tail projection. COMPLETE.
+--   3. strip_demote — strip (demote g) ≡ strip g (indrec GCtx + ap). COMPLETE.
+--   4. erase_var, gvar_preserves_types — variables. COMPLETE.
+--   5. gexpr_preserves_types — GExpr g t g' → strip g ≡ strip g'. COMPLETE.
+--   6. erase — the erasure functor (indrec GExpr; transports where the
+--      leftover contexts differ). COMPLETE.
+--   7. erase_aff_id — the affine identity erases to the STLC identity,
+--      definitionally. COMPLETE.
+--   8. graded_eval_sound — closed graded programs inherit evaluation
+--      soundness from the STLC stack. COMPLETE.
+
+-- ── The Id-toolkit (instances of J) ───────────────────────────────────────────
+-- J's convention here is based path induction:
+--   J A x (motive : Π(y : A). Id A x y → Type) (base : motive x (refl x)) y p
+
+:let sym = (\A. \x. \y. \p. J A x (\y1. \q. Id A y1 x : Π(y1 : A). Id A x y1 → Type) (refl x) y p : Π(A : Type). Π(x : A). Π(y : A). Id A x y → Id A y x)
+
+:let trans = (\A. \x. \y. \z. \p. \q. J A y (\z1. \r. Id A x z1 : Π(z1 : A). Id A y z1 → Type) p z q : Π(A : Type). Π(x : A). Π(y : A). Π(z : A). Id A x y → Id A y z → Id A x z)
+
+:let ap = (\A. \B. \f. \x. \y. \p. J A x (\y1. \q. Id B (f x) (f y1) : Π(y1 : A). Id A x y1 → Type) (refl (f x)) y p : Π(A : Type). Π(B : Type). Π(f : A → B). Π(x : A). Π(y : A). Id A x y → Id B (f x) (f y))
+
+:let transport = (\A. \P. \x. \y. \p. \px. J A x (\y1. \q. P y1 : Π(y1 : A). Id A x y1 → Type) px y p : Π(A : Type). Π(P : A → Type). Π(x : A). Π(y : A). Id A x y → P x → P y)
+
+-- Toolkit smoke tests (J computes on refl):
+:let tk_sym = (refl true : Id Bool true true)
+:let tk_sym2 = (sym Bool true true tk_sym : Id Bool true true)
+:let tk_ap = (ap Ty Ty (\t. TFn t TInt) TBool TBool (refl TBool) : Id Ty (TFn TBool TInt) (TFn TBool TInt))
+
+-- ── strip : erase grades from a context ───────────────────────────────────────
+-- Demotion changes grades; strip forgets them.  ctx_tail projects the
+-- tail of a Ctx (used to invert ext-congruence in gexpr_preserves_types).
+
+:let strip = (\g. indrec GCtx (\_. Ctx : GCtx → Type) empty (\t. \q. \g1. \ih. ext t ih : Π(t : Ty). Π(q : Grade). Π(g1 : GCtx). Ctx → Ctx) g : GCtx → Ctx)
+
+:let ctx_tail = (\g. indrec Ctx (\_. Ctx : Ctx → Type) empty (\t. \g1. \ih. g1 : Π(t : Ty). Π(g1 : Ctx). Ctx → Ctx) g : Ctx → Ctx)
+
+-- ── strip_demote : demotion is invisible after erasure ────────────────────────
+-- strip (demote g) ≡ strip g.  Propositional: for neutral g both sides
+-- are stuck.  By indrec GCtx; the cons case is ext-congruence on the IH
+-- (the head type survives demote and strip definitionally).
+
+:let strip_demote = (\g. indrec GCtx (\g1. Id Ctx (strip (demote g1)) (strip g1) : GCtx → Type) (refl empty) (\t. \q. \g1. \ih. ap Ctx Ctx (\c. ext t c) (strip (demote g1)) (strip g1) ih : Π(t : Ty). Π(q : Grade). Π(g1 : GCtx). Id Ctx (strip (demote g1)) (strip g1) → Id Ctx (strip (demote (gext t q g1))) (strip (gext t q g1))) g : Π(g : GCtx). Id Ctx (strip (demote g)) (strip g))
+
+-- ── erase_var : graded variables erase to STLC variables ─────────────────────
+-- All three cases are definitional: strip (gext t q g) = ext t (strip g)
+-- regardless of the grade, consumed or not.
+
+:let erase_var = (\g. \t. \g2. \v. indrec GVar (\ga. \ta. \g2a. \_. Var (strip ga) ta : Π(ga : GCtx). Π(ta : Ty). Π(g2a : GCtx). GVar ga ta g2a → Type) (\ga. \ta. here (strip ga) ta : Π(ga : GCtx). Π(ta : Ty). Var (strip (gext ta G1 ga)) ta) (\ga. \ta. here (strip ga) ta : Π(ga : GCtx). Π(ta : Ty). Var (strip (gext ta GW ga)) ta) (\ga. \g2a. \ta. \sa. \qa. \va. \ih. there (strip ga) ta sa ih : Π(ga : GCtx). Π(g2a : GCtx). Π(ta : Ty). Π(sa : Ty). Π(qa : Grade). Π(va : GVar ga ta g2a). Var (strip ga) ta → Var (strip (gext sa qa ga)) ta) v : Π(g : GCtx). Π(t : Ty). Π(g2 : GCtx). GVar g t g2 → Var (strip g) t)
+
+-- ── gvar_preserves_types : lookup changes grades, never bindings ─────────────
+:let gvar_preserves_types = (\g. \t. \g2. \v. indrec GVar (\ga. \ta. \g2a. \_. Id Ctx (strip ga) (strip g2a) : Π(ga : GCtx). Π(ta : Ty). Π(g2a : GCtx). GVar ga ta g2a → Type) (\ga. \ta. refl (ext ta (strip ga)) : Π(ga : GCtx). Π(ta : Ty). Id Ctx (strip (gext ta G1 ga)) (strip (gext ta G0 ga))) (\ga. \ta. refl (ext ta (strip ga)) : Π(ga : GCtx). Π(ta : Ty). Id Ctx (strip (gext ta GW ga)) (strip (gext ta GW ga))) (\ga. \g2a. \ta. \sa. \qa. \va. \ih. ap Ctx Ctx (\c. ext sa c) (strip ga) (strip g2a) ih : Π(ga : GCtx). Π(g2a : GCtx). Π(ta : Ty). Π(sa : Ty). Π(qa : Grade). Π(va : GVar ga ta g2a). Id Ctx (strip ga) (strip g2a) → Id Ctx (strip (gext sa qa ga)) (strip (gext sa qa g2a))) v : Π(g : GCtx). Π(t : Ty). Π(g2 : GCtx). GVar g t g2 → Id Ctx (strip g) (strip g2))
+
+-- ── gexpr_preserves_types : evaluation budgets change grades, not types ──────
+-- GExpr g t g' → strip g ≡ strip g'.  Literals and lambdas: refl.
+-- Variables: the lemma above.  Sequencing (app, if): trans.  Let: the
+-- body's equation is under an ext, inverted with ap ctx_tail.
+
+:let gexpr_preserves_types = (\g. \t. \g2. \e. indrec GExpr (\ga. \ta. \g2a. \_. Id Ctx (strip ga) (strip g2a) : Π(ga : GCtx). Π(ta : Ty). Π(g2a : GCtx). GExpr ga ta g2a → Type) (\ga. refl (strip ga) : Π(ga : GCtx). Id Ctx (strip ga) (strip ga)) (\ga. refl (strip ga) : Π(ga : GCtx). Id Ctx (strip ga) (strip ga)) (\ga. \b. refl (strip ga) : Π(ga : GCtx). Π(b : Bool). Id Ctx (strip ga) (strip ga)) (\ga. refl (strip ga) : Π(ga : GCtx). Id Ctx (strip ga) (strip ga)) (\ga. refl (strip ga) : Π(ga : GCtx). Id Ctx (strip ga) (strip ga)) (\ga. \g2a. \ta. \va. gvar_preserves_types ga ta g2a va : Π(ga : GCtx). Π(g2a : GCtx). Π(ta : Ty). Π(va : GVar ga ta g2a). Id Ctx (strip ga) (strip g2a)) (\ga. \qa. \qoa. \aa. \ba. \body. \ihb. refl (strip ga) : Π(ga : GCtx). Π(qa : Grade). Π(qoa : Grade). Π(aa : Ty). Π(ba : Ty). Π(body : GExpr (gext aa qa (demote ga)) ba (gext aa qoa (demote ga))). Id Ctx (strip (gext aa qa (demote ga))) (strip (gext aa qoa (demote ga))) → Id Ctx (strip ga) (strip ga)) (\g0. \g1. \g2a. \aa. \ba. \f. \ihf. \x. \ihx. trans Ctx (strip g0) (strip g1) (strip g2a) ihf ihx : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(aa : Ty). Π(ba : Ty). Π(f : GExpr g0 (TFn aa ba) g1). Id Ctx (strip g0) (strip g1) → Π(x : GExpr g1 aa g2a). Id Ctx (strip g1) (strip g2a) → Id Ctx (strip g0) (strip g2a)) (\g0. \g1. \g2a. \qa. \qoa. \aa. \ba. \val. \ihv. \body. \ihb. trans Ctx (strip g0) (strip g1) (strip g2a) ihv (ap Ctx Ctx ctx_tail (ext aa (strip g1)) (ext aa (strip g2a)) ihb) : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(qa : Grade). Π(qoa : Grade). Π(aa : Ty). Π(ba : Ty). Π(val : GExpr g0 aa g1). Id Ctx (strip g0) (strip g1) → Π(body : GExpr (gext aa qa g1) ba (gext aa qoa g2a)). Id Ctx (strip (gext aa qa g1)) (strip (gext aa qoa g2a)) → Id Ctx (strip g0) (strip g2a)) (\g0. \g1. \g2a. \g3. \ta. \c. \ihc. \th. \ihth. \el. \ihel. trans Ctx (strip g0) (strip g2a) (strip g3) (trans Ctx (strip g0) (strip g1) (strip g2a) ihc ihth) ihel : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(g3 : GCtx). Π(ta : Ty). Π(c : GExpr g0 TBool g1). Id Ctx (strip g0) (strip g1) → Π(th : GExpr g1 ta g2a). Id Ctx (strip g1) (strip g2a) → Π(el : GExpr g2a ta g3). Id Ctx (strip g2a) (strip g3) → Id Ctx (strip g0) (strip g3)) e : Π(g : GCtx). Π(t : Ty). Π(g2 : GCtx). GExpr g t g2 → Id Ctx (strip g) (strip g2))
+
+-- ── erase : the erasure functor ───────────────────────────────────────────────
+-- Every graded derivation erases to the STLC expression it refines.
+-- Where the graded rule threads leftover contexts (app, let, if), the
+-- sub-results live in strip of different (propositionally equal) budgets
+-- and are transported back; the lambda case transports along strip_demote.
+
+:let erase = (\g. \t. \g2. \e. indrec GExpr (\ga. \ta. \g2a. \_. Expr (strip ga) ta : Π(ga : GCtx). Π(ta : Ty). Π(g2a : GCtx). GExpr ga ta g2a → Type) (\ga. ELitInt (strip ga) : Π(ga : GCtx). Expr (strip ga) TInt) (\ga. ELitFlt (strip ga) : Π(ga : GCtx). Expr (strip ga) TFloat) (\ga. \b. ELitBool (strip ga) b : Π(ga : GCtx). Π(b : Bool). Expr (strip ga) TBool) (\ga. ELitStr (strip ga) : Π(ga : GCtx). Expr (strip ga) TStr) (\ga. EUnit (strip ga) : Π(ga : GCtx). Expr (strip ga) TUnit) (\ga. \g2a. \ta. \va. EVar (strip ga) ta (erase_var ga ta g2a va) : Π(ga : GCtx). Π(g2a : GCtx). Π(ta : Ty). Π(va : GVar ga ta g2a). Expr (strip ga) ta) (\ga. \qa. \qoa. \aa. \ba. \body. \ihb. ELam (strip ga) aa ba (transport Ctx (\d. Expr (ext aa d) ba) (strip (demote ga)) (strip ga) (strip_demote ga) ihb) : Π(ga : GCtx). Π(qa : Grade). Π(qoa : Grade). Π(aa : Ty). Π(ba : Ty). Π(body : GExpr (gext aa qa (demote ga)) ba (gext aa qoa (demote ga))). Expr (strip (gext aa qa (demote ga))) ba → Expr (strip ga) (TFn aa ba)) (\g0. \g1. \g2a. \aa. \ba. \f. \ihf. \x. \ihx. EApp (strip g0) aa ba ihf (transport Ctx (\d. Expr d aa) (strip g1) (strip g0) (sym Ctx (strip g0) (strip g1) (gexpr_preserves_types g0 (TFn aa ba) g1 f)) ihx) : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(aa : Ty). Π(ba : Ty). Π(f : GExpr g0 (TFn aa ba) g1). Expr (strip g0) (TFn aa ba) → Π(x : GExpr g1 aa g2a). Expr (strip g1) aa → Expr (strip g0) ba) (\g0. \g1. \g2a. \qa. \qoa. \aa. \ba. \val. \ihv. \body. \ihb. ELet (strip g0) aa ba ihv (transport Ctx (\d. Expr (ext aa d) ba) (strip g1) (strip g0) (sym Ctx (strip g0) (strip g1) (gexpr_preserves_types g0 aa g1 val)) ihb) : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(qa : Grade). Π(qoa : Grade). Π(aa : Ty). Π(ba : Ty). Π(val : GExpr g0 aa g1). Expr (strip g0) aa → Π(body : GExpr (gext aa qa g1) ba (gext aa qoa g2a)). Expr (strip (gext aa qa g1)) ba → Expr (strip g0) ba) (\g0. \g1. \g2a. \g3. \ta. \c. \ihc. \th. \ihth. \el. \ihel. EIf (strip g0) ta ihc (transport Ctx (\d. Expr d ta) (strip g1) (strip g0) (sym Ctx (strip g0) (strip g1) (gexpr_preserves_types g0 TBool g1 c)) ihth) (transport Ctx (\d. Expr d ta) (strip g2a) (strip g0) (sym Ctx (strip g0) (strip g2a) (trans Ctx (strip g0) (strip g1) (strip g2a) (gexpr_preserves_types g0 TBool g1 c) (gexpr_preserves_types g1 ta g2a th))) ihel) : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2a : GCtx). Π(g3 : GCtx). Π(ta : Ty). Π(c : GExpr g0 TBool g1). Expr (strip g0) TBool → Π(th : GExpr g1 ta g2a). Expr (strip g1) ta → Π(el : GExpr g2a ta g3). Expr (strip g2a) ta → Expr (strip g0) ta) e : Π(g : GCtx). Π(t : Ty). Π(g2 : GCtx). GExpr g t g2 → Expr (strip g) t)
+
+-- ── Adequacy: the affine identity erases to the STLC identity ─────────────────
+-- erase gempty ... aff_id computes (strip gempty = empty, J on refl) to
+-- exactly the id_bool-shaped STLC lambda — checked definitionally.
+
+:let erase_aff_id = (refl (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt))) : Id (Expr empty (TFn TInt TInt)) (erase gempty (TFn TInt TInt) gempty aff_id) (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt))))
+
+-- ── Inheritance: closed graded programs evaluate soundly ──────────────────────
+-- strip gempty = empty definitionally, so a closed graded program erases
+-- to a closed STLC program and the whole dynamic stack applies to it:
+-- Step (intrinsically type-preserving), Steps, Eval — and evaluation
+-- produces values, by eval_produces_val from lark-preservation.lcore.
+
+:let graded_eval_sound = (\t. \g2. \ge. \v. \ev. eval_produces_val t (erase gempty t g2 ge) v ev : Π(t : Ty). Π(g2 : GCtx). Π(ge : GExpr gempty t g2). Π(v : Expr empty t). Π(ev : Eval t (erase gempty t g2 ge) v). IsVal t v)
+
+-- Concrete end-to-end witness: (erase aff_id) applied to an Int literal
+-- beta-steps to the literal (the erased lambda IS an ELam, so StepBeta
+-- fires and sub_ground computes), and graded_eval_sound certifies the
+-- result is a value.
+:let aff_id_app_g = (GEApp gempty gempty gempty TInt TInt aff_id (GLitInt gempty) : GExpr gempty TInt gempty)
+:let aff_id_app = (erase gempty TInt gempty aff_id_app_g : Expr empty TInt)
+:let eval_aff_id = (EvalStep TInt aff_id_app (ELitInt empty) (ELitInt empty) (StepBeta TInt TInt (EVar (ext TInt empty) TInt (here empty TInt)) (ELitInt empty)) (EvalDone TInt (ELitInt empty) ValInt) : Eval TInt aff_id_app (ELitInt empty))
+:let aff_id_val = (graded_eval_sound TInt gempty aff_id_app_g (ELitInt empty) eval_aff_id : IsVal TInt (ELitInt empty))

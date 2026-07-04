@@ -2,6 +2,9 @@
 #include "term.h"
 #include "defs.h"
 
+/* general recursion gate — closed for the proof kernel, opened by llang */
+int core_allow_fix = 0;
+
 /* -- Term constructors */
 
 Term *tm_var(Arena *a, int idx) {

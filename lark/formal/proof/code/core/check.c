@@ -1267,6 +1267,11 @@ Val *infer(Arena *a, int depth, TCtx *tctx, Env *env, Term *t) {
     case TM_FIX: {
         /* Infer mode: infer body type and return its domain as the result type.
          * Annotation is recommended: (fix body : T) for non-trivial cases. */
+        if (!core_allow_fix) {
+            fprintf(stderr, "type error: 'fix' (general recursion) is not "
+                            "part of the proof kernel — llang only\n");
+            return NULL;
+        }
         Val *body_ty = infer(a, depth, tctx, env, t->fix.body);
         if (!body_ty) return NULL;
         if (body_ty->tag != VL_PI) {
@@ -1348,6 +1353,11 @@ int check(Arena *a, int depth, TCtx *tctx, Env *env, Term *t, Val *ty) {
     }
     /* fix body : ty   requires   body : ty -> ty */
     if (t->tag == TM_FIX) {
+        if (!core_allow_fix) {
+            fprintf(stderr, "type error: 'fix' (general recursion) is not "
+                            "part of the proof kernel — llang only\n");
+            return 0;
+        }
         Val *fn_ty = vl_pi(a, "_", ty, env_cons(a, ty, NULL), tm_var(a, 1));
         return check(a, depth, tctx, env, t->fix.body, fn_ty);
     }

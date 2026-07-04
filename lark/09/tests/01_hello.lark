@@ -1,0 +1,9 @@
+(* Test 01 — Hello World
+   Covers: module declaration, IO threading, print built-in
+   Expected output:
+     Hello, Lark! *)
+
+module Hello
+
+fn main(io : IO) : IO =
+  print(io, "Hello, Lark!")

@@ -211,6 +211,11 @@ static Term *parse_atom(Parser *p, NameCtx *ctx) {
             return tm_natrec(p->arena, mot, base, step, scr);
         }
         if (strcmp(name, "fix") == 0) {
+            if (!core_allow_fix) {
+                fprintf(stderr, "parse error: 'fix' (general recursion) is not "
+                                "part of the proof kernel — llang only\n");
+                return NULL;
+            }
             Term *body = parse_atom(p, ctx); if (!body) return NULL;
             return tm_fix(p->arena, body);
         }

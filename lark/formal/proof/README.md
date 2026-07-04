@@ -44,16 +44,25 @@ The REPL accepts one expression per line:
 
 ```
 > succ (succ zero)
+  parsed : succ (succ zero)
+  type   : Nat
   normal : succ (succ zero)
-> :type Π(A : Type). A → A
-  type : Type_1
-> :let id : Π(A : Type). A → A = \A x. x
-> :type id _ zero
-  type : Nat
+> :i Π(A : Type). A → A
+  term   : Π(A : Type). A → A
+  type   : Type_1
+  normal : Π(A : Type). A → A
+> :let id = (\A x. x : Π(A : Type). A → A)
+  id : Π(A : Type). A → A
 ```
 
-Commands: `:type e` infers and prints the type of `e`. `:conv a b` tests
-definitional equality. `:let name : type = term` adds a global definition.
+Commands: a bare term is type-checked, then normalised — a term whose
+type cannot be inferred is an error, so `(star : Empty)` is rejected,
+not normalised.  `:i e` infers and prints the type of `e`.  `:let name
+= expr` adds a global definition (expr must be inferrable).  `:nf e`
+normalises WITHOUT type checking (the untyped-NbE playground; `:nf
+(\x. x x) (\x. x)` is fine here and only here).  `:t` runs the built-in
+self-tests.  Any failed line makes the process exit non-zero, so a
+piped run of a proof file fails loudly.
 
 For the graph-reducer layer:
 
@@ -61,6 +70,12 @@ For the graph-reducer layer:
 cd code/lang && make && ./llang
 :load "lib/prelude.lam"
 ```
+
+llang is a *programming language*, not a proof checker: it has `fix`
+(via `let rec`), so its type system is deliberately inconsistent as a
+logic, and bare expressions and unannotated `let`s reduce without type
+checking — it is a runner.  Proof claims belong in lcore, which refuses
+`fix` outright (see step 9.12 note below).
 
 
 
@@ -149,7 +164,10 @@ booleans, strings, unit, functions, let-bindings, and conditionals.
 | File | Contents |
 |---|---|
 | `lark-typing.lcore` | Inductive families: `Ty`, `Ctx`, `Var`, `Expr` |
+| `lark-affine.lcore` | Graded ({0,1,ω}) affine typing: `Grade`, `GCtx`, `GVar`, `GExpr`; `no_use_in_erased`, `capture_rejected`, `no_second_use` |
+| `lark-weaken.lcore` | `weaken_l`: positional-insertion weakening, discharging the `TM_WEAKEN` kernel primitive (and documenting the bug found in it) |
 | `lark-subst.lcore` | Semantic environments, substitution, value predicate |
+| `lark-erase.lcore` | Id-toolkit (via `J`); `erase : GExpr → Expr`; `strip_demote`; `graded_eval_sound` — the affine layer inherits the STLC dynamics |
 | `lark-step.lcore` | Small-step reduction (`Step`), multi-step (`Eval`) |
 | `lark-preservation.lcore` | `eval_produces_val`: every evaluated term is a value |
 | `lark-formal.tex` | Typeset account of the proof (build with `tectonic`) |
@@ -158,12 +176,57 @@ booleans, strings, unit, functions, let-bindings, and conditionals.
 
 ```
 cd code/core && make
-cat lark/lark-typing.lcore lark/lark-subst.lcore \
+cat lark/lark-typing.lcore lark/lark-affine.lcore \
+    lark/lark-weaken.lcore lark/lark-subst.lcore \
     lark/lark-step.lcore lark/lark-preservation.lcore \
+    lark/lark-erase.lcore \
   | grep -v '^--' | grep -v '^$' | ./lcore
 ```
 
-#### The `weaken` kernel primitive
+The exit code is the verdict: `0` means every `:let`, bare claim and
+`:i` query in the stack type-checked; any failure prints its error and
+the run exits `1` (`lcore: one or more inputs FAILED`).  This is strict
+since the step 9.11 fix — previously bare (non-`:let`) terms were
+normalised without type checking, so `(star : Empty)` slipped through
+and greenness rested on the discipline of routing every claim through
+`:let`.
+
+Relatedly (step 9.12): `fix` — general recursion, which the llang layer
+needs for `let rec` — used to live ungated in the shared parser and
+checker, so lcore accepted `(fix (\x. x) : Empty)` as a proof of Empty.
+The kernel now refuses `fix` on every path (`core_allow_fix`, default
+closed); only llang, a partial programming language rather than a proof
+checker, opens the gate at startup.
+
+#### The affine layer (`lark-affine.lcore`, Phase 9)
+
+The layer deferred by `lark-typing.lcore` is now mechanised as a graded
+type system over the {0, 1, ω} semiring (QTT's grades; the affine
+fragment uses the order, `gplus`/`gtimes` are defined and law-tested for
+the Track B elaboration).  The judgment is *leftover typing* —
+`GExpr g t g'` consumes usage budget `g` and returns leftover `g'` —
+because that is literally what `infer.py`'s `tracked` dict does,
+including its conservative sequential threading through both branches of
+an `if`.  The lambda rule **demotes** the enclosing context (grade 1 → 0)
+before checking the body: closure capture of an affine variable, the
+soundness hole found by the Phase 9 hardening review, is impossible by
+construction, and demotion is exactly where the 0 grade enters.  The
+central theorem, `no_use_in_erased`, shows a variable lookup in a
+fully-erased context is `Empty`; its corollaries replay error test 16
+(`capture_rejected`) and property P1 (`no_second_use`) at proof level.
+The dynamic side is closed by `lark-erase.lcore`: an erasure functor
+`erase : GExpr g t g' → Expr (strip g) t` maps every graded derivation
+to the STLC expression it refines, so closed graded programs inherit
+the whole dynamic stack — `Step` (intrinsically type-preserving),
+`Eval`, and `eval_produces_val` (`graded_eval_sound`).  The blocker
+`strip (demote g) ≡ strip g` fell to a ten-line `Id`-toolkit (`sym`,
+`trans`, `ap`, `transport`, all instances of `J`) plus one induction;
+the leftover-context mismatches in the application, let, and if cases
+fall to the companion lemma `gexpr_preserves_types` (grading consumes
+grades, never bindings).  Affine soundness itself stays static: graded
+programs that would duplicate a resource do not exist to be erased.
+
+#### The `weaken` kernel primitive — DISCHARGED (Phase 9)
 
 The substitution lemma requires **weakening**:
 
@@ -171,17 +234,33 @@ The substitution lemma requires **weakening**:
 weaken : Π(a : Ty). Π(g : Ctx). Π(t : Ty). Expr g t → Expr (ext a g) t
 ```
 
-This inserts a new innermost type binding `a` into the context of every
-expression without changing what the expression means. Implemented by the
-C-level primitive `TM_WEAKEN` / `weaken_expr_val` in `code/core/eval.c`.
+This was the proof's one trusted-base hole: a C-level primitive
+(`TM_WEAKEN` / `weaken_expr_val` in `code/core/eval.c`), used because a
+naive lcore implementation via `indrec Expr` fails — the ELam case
+produces a body in context `ext a_lam (ext a g)` but needs
+`ext a (ext a_lam g)`, and these are definitionally distinct.
 
-**Why a C primitive?** A naive lcore implementation of weakening via
-`indrec Expr` fails: the ELam case produces a body in context
-`ext a_lam (ext a g)` but needs context `ext a (ext a_lam g)`, and
-these are definitionally *distinct* in the kernel.  Rather than adding an
-axiom or switching variable representations, the C implementation walks the
-`VL_INDCON` tree directly with a de Bruijn cutoff parameter, updating all
-context-index arguments consistently throughout the tree.
+**The discharge** (`lark-weaken.lcore`): generalise the statement to
+insertion at an arbitrary *position*, computed by a recursive function —
+`insert pz a g = ext a g`, `insert (ps n) a (ext s g) = ext s (insert n a g)`.
+Under a binder the recursion moves to position `ps n`, and the required
+context equation holds *definitionally*; the ext-commutativity problem
+never arises.  `weaken_l` is the head-position specialisation, a pure
+checked lcore term with exactly the primitive's type.  `lark-subst.lcore`
+now uses `weaken_l`; no proof depends on `TM_WEAKEN`.
+
+**The bug the discharge found.** The two implementations disagreed on
+variables — and the *kernel* was wrong: `shift_var_val`'s here-case at
+cutoff 0 passed `g` as `there`'s first argument where the inner
+variable's context `ext t g` is required, producing an ill-typed value
+the kernel never re-checks (primitive outputs are trusted).  The
+kernel's own type checker rejects the term the primitive built.  The C
+code is fixed (all 339 kernel self-tests pass), but the structural
+lesson stands: every earlier proof run that weakened a variable
+manipulated ill-typed evidence, and only discharging the primitive —
+forcing an independent, fully-checked implementation to exist — made
+the divergence observable.  Same pattern as the compiler's certifying
+register allocator: don't trust, check every answer.
 
 **Syntax in `.lcore` files:**
 ```

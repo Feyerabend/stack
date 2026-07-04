@@ -1,0 +1,14 @@
+(* Error test 16 — affine variable captured by a closure (Phase 9 hardening).
+   Expected: type error — g captures the affine io token, and a closure may
+   be called any number of times: g(1) and g(2) would each hand back the
+   *same* IO resource, duplicating it without the name ever appearing twice
+   in the outer scope.  The affine tracker counts uses per scope, so before
+   this check the program was accepted — an affine soundness hole found by
+   the Phase 9 hardening review.  Closures must receive affine values as
+   parameters, never by capture. *)
+
+module AffineCapture
+
+fn f(io : IO) : (IO, IO) =
+  let g = fn(x : Int) => io in
+  (g(1), g(2))

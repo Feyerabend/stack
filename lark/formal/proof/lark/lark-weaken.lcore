@@ -1,0 +1,128 @@
+-- lark-weaken.lcore
+--
+-- Phase 9 (Track C): Discharging the `weaken` kernel primitive.
+-- Checked by lcore (proof/code/core/).
+--
+-- Run: cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-weaken.lcore | grep -v '^--' | grep -v '^[[:space:]]*$' | ./lcore
+--
+-- THE HOLE THIS CLOSES
+-- ====================
+-- The substitution lemma (lark-subst.lcore) needs weakening:
+--
+--   weaken : Π(a : Ty). Π(g : Ctx). Π(t : Ty). Expr g t → Expr (ext a g) t
+--
+-- Until Phase 9 this was a trusted C primitive (TM_WEAKEN in eval.c),
+-- because a naive indrec implementation fails at ELam: the body lives in
+-- ext p (ext a g) but the recursion hands back ext a (ext p g), and the
+-- two are definitionally distinct.
+--
+-- THE DISSOLUTION: WEAKEN AT A *POSITION*, NOT AT THE HEAD
+-- ========================================================
+-- Generalise the statement.  `insert n a g` inserts binding `a` at depth
+-- n in g — a recursive *function*, so it computes:
+--
+--   insert pz     a g          = ext a g
+--   insert (ps n) a (ext s g)  = ext s (insert n a g)
+--
+-- Under a binder the recursion simply moves to position (ps n), and the
+-- required context equation  insert (ps n) a (ext p g) = ext p (insert n a g)
+-- holds *definitionally* — the ext-commutativity problem never arises.
+-- This is the same definitional-motive discipline as SemCtx in
+-- lark-subst.lcore, applied to the weakening statement itself.
+--
+-- WHAT IS PROVED HERE:
+--   1. Pos, insert — insertion positions and the insertion function. COMPLETE.
+--   2. wk_var  — variable weakening at any position (indrec Var, inner
+--      indrec Pos; every case discharges definitionally). COMPLETE.
+--   3. wk_expr — expression weakening at any position (indrec Expr; the
+--      ELam and ELet bodies recurse at (ps n)). COMPLETE.
+--   4. weaken_l — the head-position specialisation, with exactly the
+--      type of the old kernel primitive.  lark-subst.lcore now uses
+--      weaken_l; TM_WEAKEN is no longer used by any proof. COMPLETE.
+
+-- ── Pos : insertion positions ─────────────────────────────────────────────────
+-- pz = insert at the head; ps n = skip one binder, insert deeper.
+-- (Nat is a kernel builtin without indrec support, so we roll our own.)
+
+data Pos : Type where pz : Pos ; ps : Pos → Pos
+
+-- ── insert : context insertion at a position ──────────────────────────────────
+-- The ps case analyses the context; the gempty branch is junk (never
+-- reached for in-range positions, and nothing below instantiates it).
+
+:let insert = (\n. \a. indrec Pos (\_. Ctx → Ctx : Pos → Type) (\g. ext a g : Ctx → Ctx) (\m. \ih. \g. indrec Ctx (\_. Ctx : Ctx → Type) empty (\s. \g1. \ihc. ext s (ih g1) : Π(s : Ty). Π(g1 : Ctx). Ctx → Ctx) g : Π(m : Pos). (Ctx → Ctx) → Ctx → Ctx) n : Pos → Ty → Ctx → Ctx)
+
+-- Definitional smoke tests: head insertion and under-binder insertion.
+
+:let ins_pz = (refl (ext TBool (ext TInt empty)) : Id Ctx (insert pz TBool (ext TInt empty)) (ext TBool (ext TInt empty)))
+:let ins_ps = (refl (ext TInt (ext TBool empty)) : Id Ctx (insert (ps pz) TBool (ext TInt empty)) (ext TInt (ext TBool empty)))
+
+-- ── wk_var : variable weakening at any position ───────────────────────────────
+-- By indrec Var with motive  M g t _ = Π(n : Pos). Π(a : Ty). Var (insert n a g) t.
+-- Each case splits on the position with an inner indrec Pos whose motive
+-- mentions insert applied to a *constructor-headed* context — so it
+-- unfolds by computation and every branch is a plain constructor:
+--
+--   here,  pz   :  insert pz a (ext t g)     = ext a (ext t g)      → there (here)
+--   here,  ps m :  insert (ps m) a (ext t g) = ext t (insert m a g) → here
+--   there, pz   :  ...                       = ext a (ext s g)      → there (there v)
+--   there, ps m :  ...                       = ext s (insert m a g) → there (ih m a)
+
+:let wk_var = (\g. \t. \v. indrec Var (\ga. \ta. \_. Π(n : Pos). Π(a : Ty). Var (insert n a ga) ta : Π(ga : Ctx). Π(ta : Ty). Var ga ta → Type) (\ga. \ta. \n. \a. indrec Pos (\n1. Var (insert n1 a (ext ta ga)) ta : Pos → Type) (there (ext ta ga) ta a (here ga ta)) (\m. \ihm. here (insert m a ga) ta : Π(m : Pos). Var (insert m a (ext ta ga)) ta → Var (insert (ps m) a (ext ta ga)) ta) n : Π(ga : Ctx). Π(ta : Ty). Π(n : Pos). Π(a : Ty). Var (insert n a (ext ta ga)) ta) (\ga. \ta. \sa. \va. \ihv. \n. \a. indrec Pos (\n1. Var (insert n1 a (ext sa ga)) ta : Pos → Type) (there (ext sa ga) ta a (there ga ta sa va)) (\m. \ihm. there (insert m a ga) ta sa (ihv m a) : Π(m : Pos). Var (insert m a (ext sa ga)) ta → Var (insert (ps m) a (ext sa ga)) ta) n : Π(ga : Ctx). Π(ta : Ty). Π(sa : Ty). Π(va : Var ga ta). (Π(n : Pos). Π(a : Ty). Var (insert n a ga) ta) → Π(n : Pos). Π(a : Ty). Var (insert n a (ext sa ga)) ta) v : Π(g : Ctx). Π(t : Ty). Var g t → Π(n : Pos). Π(a : Ty). Var (insert n a g) t)
+
+-- ── wk_expr : expression weakening at any position ────────────────────────────
+-- By indrec Expr with motive  M g t _ = Π(n : Pos). Π(a : Ty). Expr (insert n a g) t.
+-- ELam and ELet check their bodies at position (ps n) — the context
+-- equation holds definitionally, which is the entire point.
+
+:let wk_expr = (\g. \t. \e. indrec Expr (\ga. \ta. \_. Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ta : Π(ga : Ctx). Π(ta : Ty). Expr ga ta → Type) (\ga. \n. \a. ELitInt (insert n a ga) : Π(ga : Ctx). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TInt) (\ga. \n. \a. ELitFlt (insert n a ga) : Π(ga : Ctx). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TFloat) (\ga. \b. \n. \a. ELitBool (insert n a ga) b : Π(ga : Ctx). Π(b : Bool). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TBool) (\ga. \n. \a. ELitStr (insert n a ga) : Π(ga : Ctx). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TStr) (\ga. \n. \a. EUnit (insert n a ga) : Π(ga : Ctx). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TUnit) (\ga. \ta. \va. \n. \a. EVar (insert n a ga) ta (wk_var ga ta va n a) : Π(ga : Ctx). Π(ta : Ty). Π(va : Var ga ta). Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ta) (\ga. \pa. \ba. \body. \ihb. \n. \a. ELam (insert n a ga) pa ba (ihb (ps n) a) : Π(ga : Ctx). Π(pa : Ty). Π(ba : Ty). Π(body : Expr (ext pa ga) ba). (Π(n : Pos). Π(a : Ty). Expr (insert n a (ext pa ga)) ba) → Π(n : Pos). Π(a : Ty). Expr (insert n a ga) (TFn pa ba)) (\ga. \aa. \ba. \f. \ihf. \x. \ihx. \n. \a. EApp (insert n a ga) aa ba (ihf n a) (ihx n a) : Π(ga : Ctx). Π(aa : Ty). Π(ba : Ty). Π(f : Expr ga (TFn aa ba)). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) (TFn aa ba)) → Π(x : Expr ga aa). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) aa) → Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ba) (\ga. \aa. \ba. \val. \ihv. \body. \ihb. \n. \a. ELet (insert n a ga) aa ba (ihv n a) (ihb (ps n) a) : Π(ga : Ctx). Π(aa : Ty). Π(ba : Ty). Π(val : Expr ga aa). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) aa) → Π(body : Expr (ext aa ga) ba). (Π(n : Pos). Π(a : Ty). Expr (insert n a (ext aa ga)) ba) → Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ba) (\ga. \ta. \c. \ihc. \th. \ihth. \el. \ihel. \n. \a. EIf (insert n a ga) ta (ihc n a) (ihth n a) (ihel n a) : Π(ga : Ctx). Π(ta : Ty). Π(c : Expr ga TBool). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) TBool) → Π(th : Expr ga ta). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ta) → Π(el : Expr ga ta). (Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ta) → Π(n : Pos). Π(a : Ty). Expr (insert n a ga) ta) e : Π(g : Ctx). Π(t : Ty). Expr g t → Π(n : Pos). Π(a : Ty). Expr (insert n a g) t)
+
+-- ── weaken_l : the discharged primitive ───────────────────────────────────────
+-- Exactly the type of the old TM_WEAKEN, as a pure lcore term:
+-- insert pz a g = ext a g definitionally, so no coercion is needed.
+
+:let weaken_l = (\a. \g. \t. \e. wk_expr g t e pz a : Π(a : Ty). Π(g : Ctx). Π(t : Ty). Expr g t → Expr (ext a g) t)
+
+-- ── Smoke tests: the same checks lark-subst.lcore ran against TM_WEAKEN ──────
+
+-- weaken_l TBool empty TInt (ELitInt empty)  :  Expr (ext TBool empty) TInt
+:let wkl_1 = (weaken_l TBool empty TInt (ELitInt empty) : Expr (ext TBool empty) TInt)
+:i wkl_1
+
+-- weaken_l shifts a variable under the new binding:
+-- x : Bool ⊢ x  becomes  y : Int, x : Bool ⊢ x  (the variable steps outward)
+:let wkl_2 = (weaken_l TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool)) : Expr (ext TInt (ext TBool empty)) TBool)
+:i wkl_2
+
+-- Under-binder correctness: weakening a lambda leaves its bound variable
+-- pointing at the binder, not at the inserted type.
+-- λ(b : Bool). b  weakened by Int  =  λ(b : Bool). b  in the larger context.
+:let wkl_lam = (weaken_l TInt empty (TFn TBool TBool) (ELam empty TBool TBool (EVar (ext TBool empty) TBool (here empty TBool))) : Expr (ext TInt empty) (TFn TBool TBool))
+:i wkl_lam
+wkl_lam
+
+-- Agreement with the kernel primitive on literals (definitional):
+:let wk_agree_lit = (refl (weaken_l TBool empty TInt (ELitInt empty)) : Id (Expr (ext TBool empty) TInt) (weaken_l TBool empty TInt (ELitInt empty)) (weaken TBool empty TInt (ELitInt empty)))
+
+-- THE BUG THE DISCHARGE FOUND (AND FIXED)
+-- =======================================
+-- On variables, the kernel primitive originally DISAGREED with weaken_l —
+-- and the kernel was wrong.  weaken TInt (ext TBool empty) TBool
+-- (EVar ... (here ...)) normalised to
+--     EVar (ext TInt (ext TBool empty)) TBool (there empty TBool TInt (here empty TBool))
+-- but  there : Π(g : Ctx). ... Π(v : Var g t). Var (ext s g) t  demands
+-- v : Var empty TBool there, while (here empty TBool) : Var (ext TBool empty) TBool.
+-- Feeding the primitive's own output back through the checker was
+-- REJECTED with a type mismatch.  Root cause (eval.c, shift_var_val,
+-- here-case at cutoff 0): `there`'s first argument must be the inner
+-- variable's context ext t g, but the code passed g — the adjacent
+-- there-case always had it right.  Primitive outputs are never re-checked
+-- by the kernel, so the ill-typed values flowed silently through every
+-- earlier proof run that weakened a variable.
+--
+-- The C code is now fixed, and the agreement below holds definitionally —
+-- but the deeper repair is structural: the proof stack no longer *trusts*
+-- TM_WEAKEN at all.  lark-subst.lcore uses weaken_l, where every
+-- weakening step is checked like any other term.
+
+:let wk_agree_var = (refl (weaken_l TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool))) : Id (Expr (ext TInt (ext TBool empty)) TBool) (weaken_l TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool))) (weaken TInt (ext TBool empty) TBool (EVar (ext TBool empty) TBool (here empty TBool))))

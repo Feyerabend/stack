@@ -1,0 +1,8 @@
+(* Error test 01 — Affine violation: IO used twice
+   Expected: type error — io consumed more than once.
+   IO has no Copy impl, so it cannot be duplicated. *)
+
+module AffineError
+
+fn use_twice(io : IO) : (IO, IO) =
+  (io, io)

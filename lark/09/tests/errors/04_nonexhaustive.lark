@@ -1,0 +1,18 @@
+(* Error test 04 — Non-exhaustive pattern match (static, Phase 8)
+   Through Phase 7 the type checker did not verify exhaustiveness and the
+   CEK machine raised at runtime.  The Phase 8 checker (Maranget's
+   usefulness algorithm) rejects this at compile time, naming the witness.
+   Expected: ExhaustivenessError: pattern 'Blue' not covered *)
+
+module NonExhaustive
+
+type Color = | Red | Green | Blue
+
+fn name(c : Color) : String =
+  match c with
+  | Red   => "red"
+  | Green => "green"
+  end
+
+fn main(io : IO) : IO =
+  print(io, name(Blue))

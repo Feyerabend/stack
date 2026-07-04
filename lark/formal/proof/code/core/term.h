@@ -372,6 +372,17 @@ Spine *spine_circrec  (Arena *a, Val *motive, Val *base_case, Val *loop_case,
 Spine *spine_indrec   (Arena *a, int fam_idx, Val *motive, int n_cases, Val **cases,
                        Spine *next);                          /* SP_INDREC    */
 
+/* ── General recursion gate
+ *
+ * `fix` makes the type theory logically inconsistent (fix (\x. x)
+ * inhabits every type), so the proof kernel (lcore) must not accept it.
+ * The gate defaults to CLOSED; the language layer (llang), which is a
+ * partial programming language and needs `fix` for `let rec`, opens it
+ * at startup.  Guards both the parser (creation) and the type checker
+ * (validation). */
+
+extern int core_allow_fix;
+
 /* ── Printing context (name list, innermost = index 0) */
 
 typedef struct Ctx Ctx;

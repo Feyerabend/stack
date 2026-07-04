@@ -12,37 +12,63 @@
 
 /* ── normalize and print */
 
-static void run(Arena *a, const char *src) {
+/* normalise WITHOUT type checking — untyped NbE playground.  Only the
+   NbE self-tests and the explicit :nf command may take this path; bare
+   terms go through run() below, which insists on a type first. */
+static int run_nf(Arena *a, const char *src) {
     Term *t = parse(a, src);
-    if (!t) return;
+    if (!t) return 0;
     if (term_has_holes(t)) {
         ElabCtx e; elab_init(&e, a);
-        if (!elab_infer(&e, a, 0, NULL, NULL, t)) return;
+        if (!elab_infer(&e, a, 0, NULL, NULL, t)) return 0;
         t = elab_subst(&e, a, 0, t);
-        if (!t) return;
+        if (!t) return 0;
     }
     printf("  parsed : "); term_print(t); printf("\n");
     Term *nf = nbe_nf(a, t);
     printf("  normal : "); term_print(nf); printf("\n");
+    return 1;
+}
+
+/* type-check, then normalise.  A bare term whose type cannot be inferred
+   is an error (annotations are not taken on faith: (star : Empty) must be
+   rejected here, not silently normalised). */
+static int run(Arena *a, const char *src) {
+    Term *t = parse(a, src);
+    if (!t) return 0;
+    if (term_has_holes(t)) {
+        ElabCtx e; elab_init(&e, a);
+        if (!elab_infer(&e, a, 0, NULL, NULL, t)) return 0;
+        t = elab_subst(&e, a, 0, t);
+        if (!t) return 0;
+    }
+    printf("  parsed : "); term_print(t); printf("\n");
+    Val *ty = infer(a, 0, NULL, NULL, t);
+    if (!ty) return 0;
+    printf("  type   : "); val_print_tctx(a, ty, 0, NULL); printf("\n");
+    Term *nf = nbe_nf(a, t);
+    printf("  normal : "); term_print(nf); printf("\n");
+    return 1;
 }
 
 /* ── infer type and print */
 
-static void run_infer(Arena *a, const char *src) {
+static int run_infer(Arena *a, const char *src) {
     Term *t = parse(a, src);
-    if (!t) return;
+    if (!t) return 0;
     if (term_has_holes(t)) {
         ElabCtx e; elab_init(&e, a);
-        if (!elab_infer(&e, a, 0, NULL, NULL, t)) return;
+        if (!elab_infer(&e, a, 0, NULL, NULL, t)) return 0;
         t = elab_subst(&e, a, 0, t);
-        if (!t) return;
+        if (!t) return 0;
     }
     printf("  term   : "); term_print(t); printf("\n");
     Val *ty = infer(a, 0, NULL, NULL, t);
-    if (!ty) return;
+    if (!ty) return 0;
     printf("  type   : "); val_print_tctx(a, ty, 0, NULL); printf("\n");
     Term *nf = nbe_nf(a, t);
     printf("  normal : "); term_print(nf); printf("\n");
+    return 1;
 }
 
 /* ── reserved keyword list (parse.c checks these before name_lookup) */
@@ -210,7 +236,7 @@ static void run_tests(Arena *a) {
     printf("\n=== NbE reduction ===\n");
     for (int i = 0; nbe_tests[i]; i++) {
         printf("\n[%d] %s\n", i + 1, nbe_tests[i]);
-        run(a, nbe_tests[i]);
+        run_nf(a, nbe_tests[i]);
     }
 
     /* --- Type formation (positive) --- */
@@ -2449,20 +2475,22 @@ int main(int argc, char **argv) {
             if (i > 1) strcat(buf, " ");
             strcat(buf, argv[i]);
         }
-        run(&a, buf);
+        int ok = run(&a, buf);
         free(buf);
         arena_free_all(&a);
-        return 0;
+        return ok ? 0 : 1;
     }
 
     /* interactive REPL */
     printf("λ-core  (NbE + bidirectional type checker)\n");
-    printf("  TERM              — normalise\n");
+    printf("  TERM              — type-check and normalise\n");
+    printf("  :nf TERM          — normalise WITHOUT type checking (untyped NbE)\n");
     printf("  :i TERM           — infer type\n");
     printf("  :let name = EXPR  — define a global (EXPR must be inferrable)\n");
     printf("  :t                — run tests\n");
     printf("  :q                — quit\n\n");
 
+    int had_error = 0;
     char   *line = NULL;
     size_t  cap  = 0;
     for (;;) {
@@ -2479,6 +2507,7 @@ int main(int argc, char **argv) {
             char *eq   = strchr(rest, '=');
             if (!eq) {
                 fprintf(stderr, "usage: :let name = expr\n");
+                had_error = 1;
             } else {
                 /* trim leading/trailing spaces from name */
                 char *ns = rest;
@@ -2489,6 +2518,7 @@ int main(int argc, char **argv) {
                 char defname[128];
                 if (nlen <= 0 || nlen >= (int)sizeof(defname)) {
                     fprintf(stderr, ":let: missing or over-long name\n");
+                    had_error = 1;
                 } else {
                     memcpy(defname, ns, nlen);
                     defname[nlen] = '\0';
@@ -2496,6 +2526,7 @@ int main(int argc, char **argv) {
                         fprintf(stderr,
                             ":let: '%s' is a built-in keyword and cannot be redefined\n",
                             defname);
+                        had_error = 1;
                     } else {
                         /* warn if shadowing an existing definition */
                         int prev = def_lookup(defname);
@@ -2512,6 +2543,7 @@ int main(int argc, char **argv) {
                             printf("\n");
                         } else {
                             printf("  definition of '%s' failed\n", defname);
+                            had_error = 1;
                         }
                     }
                 }
@@ -2527,15 +2559,20 @@ int main(int argc, char **argv) {
                 IndDef *fam = ind_get(fam_idx);
                 printf("  defined family: %s (%d constructor%s)\n",
                        fam->name, fam->n_ctors, fam->n_ctors == 1 ? "" : "s");
+            } else {
+                had_error = 1;
             }
+        } else if (strncmp(line, ":nf ", 4) == 0) {
+            if (!run_nf(&a, line + 4)) had_error = 1;
         } else if (strncmp(line, ":i ", 3) == 0) {
-            run_infer(&a, line + 3);
+            if (!run_infer(&a, line + 3)) had_error = 1;
         } else if (len > 0) {
-            run(&a, line);
+            if (!run(&a, line)) had_error = 1;
         }
         arena_free_all(&a);
     }
     free(line);
     arena_free_all(&a);
-    return 0;
+    if (had_error) fprintf(stderr, "lcore: one or more inputs FAILED\n");
+    return had_error;
 }

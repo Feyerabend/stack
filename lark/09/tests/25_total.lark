@@ -1,0 +1,48 @@
+(* Test 25 — Opt-in totality (Phase 8)
+   Covers: `fn total` accepted for structural recursion on lists and trees,
+   nested descent (the recursive argument comes from destructuring the
+   parameter), a total function calling another total function, and a total
+   higher-order function applying a function parameter (totality is
+   relative to the arguments).
+   Expected output:
+     6
+     3
+     12
+     10 *)
+
+module Total
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+fn total sum_list(xs : List(Int)) : Int =
+  match xs with
+  | Nil         => 0
+  | Cons(x, rest) => x + sum_list(rest)
+  end
+
+fn total length(xs : List(Int)) : Int =
+  match xs with
+  | Nil          => 0
+  | Cons(_, rest) => 1 + length(rest)
+  end
+
+fn total map_add(f : Int -> Int, xs : List(Int)) : List(Int) =
+  match xs with
+  | Nil          => Nil
+  | Cons(x, rest) => Cons(f(x), map_add(f, rest))
+  end
+
+fn total tree_sum(t : Tree) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, v, r) => tree_sum(l) + v + tree_sum(r)
+  end
+
+fn main(io : IO) : IO =
+  let xs = Cons(1, Cons(2, Cons(3, Nil))) in
+  let t  = Node(Node(Leaf, 3, Leaf), 5, Node(Leaf, 2, Leaf)) in
+  print(io,
+    show(sum_list(xs)) + "\n" +
+    show(length(Cons(9, Cons(9, Cons(9, Nil))))) + "\n" +
+    show(sum_list(map_add(fn (n) => n * 2, xs))) + "\n" +
+    show(tree_sum(t)))

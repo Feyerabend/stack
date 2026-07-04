@@ -1,0 +1,187 @@
+-- lark-affine.lcore
+--
+-- Phase 9 (Track C): Machine-checked graded (affine) typing for Lark.
+-- Checked by lcore (proof/code/core/).
+--
+-- Run: cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-affine.lcore | grep -v '^--' | grep -v '^[[:space:]]*$' | ./lcore
+--
+-- This is the second layer promised in lark-typing.lcore ("Affine tracking
+-- is deferred to a second layer").  It was written after the Phase 9
+-- hardening review found the affine-capture soundness hole in infer.py —
+-- a closure capturing an affine variable duplicated the resource — so
+-- CLOSURE CAPTURE IS A PRIMARY CASE here, not an afterthought: the lambda
+-- rule demotes the enclosing context, and demotion introduces the 0 grade.
+--
+-- CORRESPONDENCE TABLE
+-- ====================
+--   Lark implementation (09/src/)     lcore proof            note
+--   ─────────────────────────────── ────────────────────── ─────────────────
+--   is_copy(t) == True                grade GW (ω)           unrestricted
+--   is_copy(t) == False               grade G1 (affine)      tracked var
+--   (unusable / erased)               grade G0               QTT's 0 grade
+--   infer.py `tracked` dict           leftover contexts      GExpr g t g'
+--   tracked[n] += 1; > 1 → error      GVar consumes: G1→G0   gv_here1
+--   Copy var, uses unlimited          GVar keeps GW          gv_herew
+--   Lambda capture check (9.6 fix)    demote in GELam        capture rule
+--   tracked threads cond→then→else    GEIf sequential        conservatism
+--   tracked.pop(n) after let body     GELet pops binder      leftover pop
+--
+-- GRADES ARE THE {0,1,ω} SEMIRING (QTT, McBride 2016 / Atkey 2018).
+-- The affine fragment uses only the order structure (1 may be consumed to
+-- 0; ω is free), but gplus/gtimes are defined and tested below so Track B3
+-- (full QTT elaboration) lands on prepared ground: Lark's Copy analysis
+-- was secretly the {1,ω} fragment all along, and demotion is where 0
+-- enters the language.
+--
+-- WHAT IS PROVED HERE:
+--   1. Grade, gplus, gtimes — the {0,1,ω} semiring, laws smoke-tested. COMPLETE.
+--   2. GCtx, demote — graded contexts; demotion (1→0, ω stays). COMPLETE.
+--   3. GVar — consuming variable lookup (leftover style).  There is NO
+--      rule for grade 0: an erased entry cannot be referenced. COMPLETE.
+--   4. GExpr — graded typing with leftover contexts; GELam demotes the
+--      enclosing context (the capture rule). COMPLETE.
+--   5. no_use_in_erased — a variable lookup in a fully-erased context is
+--      impossible (indrec GVar, definitional-motive trick). COMPLETE.
+--   6. capture_rejected — the Phase 9.6 counterexample, at proof level:
+--      after demotion, the captured affine variable is unreachable. COMPLETE.
+--   7. no_second_use — consuming an affine variable leaves G0, and a
+--      second lookup in the leftover context is impossible. COMPLETE.
+
+-- ── Grade : the {0, 1, ω} usage semiring ─────────────────────────────────────
+-- G0 = erased (may not be used) · G1 = affine (at most once) · GW = ω.
+
+data Grade : Type where G0 : Grade ; G1 : Grade ; GW : Grade
+
+-- Addition: combined demand of two uses of the same variable.
+--   0 + q = q;  1 + 0 = 1;  1 + 1 = ω;  1 + ω = ω;  ω + q = ω.
+-- (1 + 1 = ω records that two syntactic uses demand an unrestricted
+-- variable — exactly why an affine variable cannot be used twice.)
+
+:let gplus = (\p. \q. indrec Grade (\_. Grade → Grade : Grade → Type) (\q1. q1 : Grade → Grade) (\q1. indrec Grade (\_. Grade : Grade → Type) G1 GW GW q1 : Grade → Grade) (\q1. GW : Grade → Grade) p q : Grade → Grade → Grade)
+
+-- Multiplication: demand scaling (used under a q-graded position).
+--   0 · q = 0;  1 · q = q;  ω · 0 = 0;  ω · 1 = ω;  ω · ω = ω.
+
+:let gtimes = (\p. \q. indrec Grade (\_. Grade → Grade : Grade → Type) (\q1. G0 : Grade → Grade) (\q1. q1 : Grade → Grade) (\q1. indrec Grade (\_. Grade : Grade → Type) G0 GW GW q1 : Grade → Grade) p q : Grade → Grade → Grade)
+
+-- Semiring smoke tests (definitional, via Id):
+
+:let gp_01 = (refl G1 : Id Grade (gplus G0 G1) G1)
+:let gp_11 = (refl GW : Id Grade (gplus G1 G1) GW)
+:let gp_w0 = (refl GW : Id Grade (gplus GW G0) GW)
+:let gt_1w = (refl GW : Id Grade (gtimes G1 GW) GW)
+:let gt_w0 = (refl G0 : Id Grade (gtimes GW G0) G0)
+:let gt_01 = (refl G0 : Id Grade (gtimes G0 G1) G0)
+
+-- ── GCtx : graded typing contexts ────────────────────────────────────────────
+-- Mirrors infer.py: Env ∪ tracked.  Every binding carries a grade:
+-- GW for Copy types (never in `tracked`), G1 for affine bindings
+-- (tracked with count 0), G0 for consumed/erased bindings.
+
+data GCtx : Type where gempty : GCtx ; gext : Ty → Grade → GCtx → GCtx
+
+-- ── demote : the capture rule's context transform ────────────────────────────
+-- Inside a lambda body, enclosing affine bindings are unusable: a closure
+-- may be called many times, so capture would duplicate the resource
+-- (the Phase 9.6 hardening fix; error test 16).  Demotion sends 1 → 0
+-- and leaves 0 and ω alone — this is where the QTT 0-grade enters.
+
+:let dem_grade = (\q. indrec Grade (\_. Grade : Grade → Type) G0 G0 GW q : Grade → Grade)
+
+:let demote = (\g. indrec GCtx (\_. GCtx : GCtx → Type) gempty (\t. \q. \g1. \ih. gext t (dem_grade q) ih : Π(t : Ty). Π(q : Grade). Π(g1 : GCtx). GCtx → GCtx) g : GCtx → GCtx)
+
+-- Demotion smoke tests: 1 → 0, ω unchanged, composite context.
+
+:let dem_1 = (refl G0 : Id Grade (dem_grade G1) G0)
+:let dem_w = (refl GW : Id Grade (dem_grade GW) GW)
+:let dem_ctx = (refl (gext TInt G0 (gext TBool GW gempty)) : Id GCtx (demote (gext TInt G1 (gext TBool GW gempty))) (gext TInt G0 (gext TBool GW gempty)))
+
+-- ── GVar : consuming variable lookup (leftover style) ────────────────────────
+-- GVar g t g'  witnesses that a variable of type t can be used in context g,
+-- leaving leftover context g'.  Mirrors infer.py case Var: the affine check
+-- `tracked[n] += 1; if > 1: raise AffineError`.
+--
+--   gv_here1 : an affine (G1) binding is consumed — leftover grade G0.
+--   gv_herew : an ω binding is free to use — leftover unchanged.
+--   gv_there : skip one binder, leaving it untouched.
+--
+-- THERE IS NO RULE FOR G0.  An erased binding cannot be referenced — this
+-- single omission is what makes both no_use_in_erased and no_second_use
+-- provable below, and it is the proof-level twin of AffineError.
+
+data GVar : GCtx → Ty → GCtx → Type where gv_here1 : Π(g : GCtx). Π(t : Ty). GVar (gext t G1 g) t (gext t G0 g) ; gv_herew : Π(g : GCtx). Π(t : Ty). GVar (gext t GW g) t (gext t GW g) ; gv_there : Π(g : GCtx). Π(g2 : GCtx). Π(t : Ty). Π(s : Ty). Π(q : Grade). Π(v : GVar g t g2). GVar (gext s q g) t (gext s q g2)
+
+-- ── GExpr : graded typing judgment with leftover contexts ────────────────────
+-- GExpr g t g'  is a Lark expression of type t that starts with usage
+-- budget g and leaves budget g'.  The threading is deliberately
+-- *sequential* — including through both if-branches — because that is
+-- exactly infer.py's conservative rule: the same `tracked` dict flows
+-- through cond, then-branch, and else-branch, so uses accumulate across
+-- branches (property P1's `if True then x else x` counterexample).
+--
+-- GELam IS THE CAPTURE RULE (Phase 9.6): the body is checked in
+-- `demote g` — every enclosing affine binding is erased to G0 — plus the
+-- parameter at grade q.  The lambda consumes nothing from the enclosing
+-- context (it returns leftover g unchanged): ω captures are free, affine
+-- captures are impossible, exactly the fixed infer.py Lambda rule.
+
+data GExpr : GCtx → Ty → GCtx → Type where GLitInt : Π(g : GCtx). GExpr g TInt g ; GLitFlt : Π(g : GCtx). GExpr g TFloat g ; GLitBool : Π(g : GCtx). Π(b : Bool). GExpr g TBool g ; GLitStr : Π(g : GCtx). GExpr g TStr g ; GUnitE : Π(g : GCtx). GExpr g TUnit g ; GEVar : Π(g : GCtx). Π(g2 : GCtx). Π(t : Ty). Π(v : GVar g t g2). GExpr g t g2 ; GELam : Π(g : GCtx). Π(q : Grade). Π(qo : Grade). Π(a : Ty). Π(b : Ty). Π(body : GExpr (gext a q (demote g)) b (gext a qo (demote g))). GExpr g (TFn a b) g ; GEApp : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2 : GCtx). Π(a : Ty). Π(b : Ty). Π(f : GExpr g0 (TFn a b) g1). Π(x : GExpr g1 a g2). GExpr g0 b g2 ; GELet : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2 : GCtx). Π(q : Grade). Π(qo : Grade). Π(a : Ty). Π(b : Ty). Π(val : GExpr g0 a g1). Π(body : GExpr (gext a q g1) b (gext a qo g2)). GExpr g0 b g2 ; GEIf : Π(g0 : GCtx). Π(g1 : GCtx). Π(g2 : GCtx). Π(g3 : GCtx). Π(t : Ty). Π(c : GExpr g0 TBool g1). Π(th : GExpr g1 t g2). Π(el : GExpr g2 t g3). GExpr g0 t g3
+
+-- ── Adequacy smoke tests ──────────────────────────────────────────────────────
+
+-- Lark: fn f(io : IO) : IO = io   — the identity on an affine resource.
+-- (TInt at grade G1 stands in for IO; grades, not types, carry affinity.)
+-- The parameter is consumed exactly once: leftover grade G0.
+
+:let aff_id = (GELam gempty G1 G0 TInt TInt (GEVar (gext TInt G1 gempty) (gext TInt G0 gempty) TInt (gv_here1 gempty TInt)) : GExpr gempty (TFn TInt TInt) gempty)
+:i aff_id
+
+-- Lark: closures may capture Copy (ω) variables freely (10_closures.lark).
+-- Context: one ω binding.  λ(b :1 Bool). x — x survives demotion as GW.
+
+:let omega_capture = (GELam (gext TInt GW gempty) G1 G1 TBool TInt (GEVar (gext TBool G1 (gext TInt GW gempty)) (gext TBool G1 (gext TInt GW gempty)) TInt (gv_there (gext TInt GW gempty) (gext TInt GW gempty) TInt TBool G1 (gv_herew gempty TInt))) : GExpr (gext TInt GW gempty) (TFn TBool TInt) (gext TInt GW gempty))
+:i omega_capture
+
+-- Lark: let t = x in t  with x affine — accepted, x consumed once
+-- (P1's accepted shape: rebinding an affine value then using it).
+
+:let let_rebind = (GELet (gext TInt G1 gempty) (gext TInt G0 gempty) (gext TInt G0 gempty) G1 G0 TInt TInt (GEVar (gext TInt G1 gempty) (gext TInt G0 gempty) TInt (gv_here1 gempty TInt)) (GEVar (gext TInt G1 (gext TInt G0 gempty)) (gext TInt G0 (gext TInt G0 gempty)) TInt (gv_here1 (gext TInt G0 gempty) TInt)) : GExpr (gext TInt G1 gempty) TInt (gext TInt G0 gempty))
+:i let_rebind
+
+-- ── IsG0 / AllG0 : erasure predicates ─────────────────────────────────────────
+-- IsG0 q  is inhabited exactly when q = G0 (Unit / Empty / Empty).
+-- AllG0 g holds when every binding in g is erased.  Both unfold
+-- definitionally (the SemCtx motive trick from lark-subst.lcore).
+
+:let IsG0 = (\q. indrec Grade (\_. Type : Grade → Type_1) Unit Empty Empty q : Grade → Type)
+
+:let AllG0 = (\g. indrec GCtx (\_. Type : GCtx → Type_1) Unit (\t. \q. \g1. \ih. Σ(_ : IsG0 q). ih : Π(t : Ty). Π(q : Grade). Π(g1 : GCtx). Type → Type) g : GCtx → Type)
+
+-- ── Theorem: no variable can be used in a fully-erased context ────────────────
+-- The heart of affine soundness.  Because GVar has no G0 rule, a lookup
+-- must hit a G1 or GW binding — and in an all-G0 context, the head cases
+-- hand us IsG0 G1 = Empty (resp. IsG0 GW = Empty) directly, while the
+-- skip case recurses into the tail.  By indrec GVar with the motive
+-- AllG0 g → Empty; every case discharges definitionally.
+
+:let no_use_in_erased = (\g. \t. \g2. \v. indrec GVar (\ga. \ta. \g2a. \_. AllG0 ga → Empty : Π(ga : GCtx). Π(ta : Ty). Π(g2a : GCtx). GVar ga ta g2a → Type) (\ga. \ta. \h. fst h : Π(ga : GCtx). Π(ta : Ty). AllG0 (gext ta G1 ga) → Empty) (\ga. \ta. \h. fst h : Π(ga : GCtx). Π(ta : Ty). AllG0 (gext ta GW ga) → Empty) (\ga. \g2a. \ta. \sa. \qa. \va. \ih. \h. ih (snd h) : Π(ga : GCtx). Π(g2a : GCtx). Π(ta : Ty). Π(sa : Ty). Π(qa : Grade). Π(va : GVar ga ta g2a). (AllG0 ga → Empty) → AllG0 (gext sa qa ga) → Empty) v : Π(g : GCtx). Π(t : Ty). Π(g2 : GCtx). GVar g t g2 → AllG0 g → Empty)
+
+-- ── Corollary: the Phase 9.6 capture counterexample, at proof level ──────────
+-- Lark source (error test 16):
+--   fn f(io : IO) : (IO, IO) = let g = fn(x : Int) => io in (g(1), g(2))
+-- Inside the lambda, the enclosing context (io at G1) is demoted — and
+-- demote (gext TInt G1 gempty) computes to gext TInt G0 gempty, where
+-- no_use_in_erased applies: the captured variable is unreachable.
+-- The implementation raises AffineError; the proof shows Empty.
+
+:let capture_rejected = (\g2. \v. no_use_in_erased (gext TInt G0 gempty) TInt g2 v (star, star) : Π(g2 : GCtx). GVar (demote (gext TInt G1 gempty)) TInt g2 → Empty)
+
+-- ── Corollary: an affine variable cannot be used twice ────────────────────────
+-- P1's counterexamples, at proof level.  The first use is gv_here1, whose
+-- leftover context is gext TInt G0 gempty.  A second use would be a GVar
+-- from that leftover — impossible.  Sequential threading (GEApp, GELet,
+-- GEIf all pipe leftovers left to right) means this covers `(x, x)`,
+-- `let t = x in (x, t)`, and `if c then x else x` alike: the second
+-- occurrence always starts from the first one's leftover.
+
+:let no_second_use = (\g2. \v. no_use_in_erased (gext TInt G0 gempty) TInt g2 v (star, star) : Π(g2 : GCtx). GVar (gext TInt G0 gempty) TInt g2 → Empty)

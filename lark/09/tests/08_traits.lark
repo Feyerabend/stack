@@ -1,0 +1,56 @@
+(* Test 08 — Trait definition, implementation, and bounds
+   Covers: trait declaration, impl for a type, trait-bounded
+           function, dispatch to correct impl
+   Expected output:
+     the color is red
+     the color is blue
+     areas: 12.0 and 78.53975 *)
+
+module Traits
+
+type Color =
+  | Red
+  | Green
+  | Blue
+
+type Shape =
+  | Rect   of Float, Float
+  | Circle of Float
+
+let pi : Float = 3.14159
+
+trait Describe a = {
+  fn describe : a -> String
+}
+
+trait Area a = {
+  fn area : a -> Float
+}
+
+impl Describe for Color = {
+  fn describe(c) =
+    match c with
+    | Red   => "red"
+    | Green => "green"
+    | Blue  => "blue"
+    end
+}
+
+impl Area for Shape = {
+  fn area(s) =
+    match s with
+    | Rect(w, h)  => w * h
+    | Circle(r)   => pi * r * r
+    end
+}
+
+fn label[Describe a](x : a) : String =
+  "the color is " + describe(x)
+
+fn compare_areas[Area a, Area b](x : a, y : b) : String =
+  "areas: " + show(area(x)) + " and " + show(area(y))
+
+fn main(io : IO) : IO =
+  let io = print(io, label(Red)) in
+  let io = print(io, label(Blue)) in
+  print(io, compare_areas(Rect(3.0, 4.0), Circle(5.0)))

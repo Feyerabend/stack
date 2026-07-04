@@ -684,6 +684,11 @@ static int load_file(const char *path) {
 /* ── REPL ────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
+    /* llang is a partial programming language: open the kernel's general-
+       recursion gate so `fix` / `let rec` parse and type-check here.  The
+       proof kernel (lcore) leaves it closed — fix proves anything. */
+    core_allow_fix = 1;
+
     for (int i = 1; i < argc; i++)
         if (strcmp(argv[i], "--dump-graph") == 0) dump_graph_g = 1;
 

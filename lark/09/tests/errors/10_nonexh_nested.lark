@@ -1,0 +1,15 @@
+(* Error test 10 — Non-exhaustive nested pattern (Phase 8)
+   Every top-level constructor of List appears, but the Cons arm only
+   covers Ok payloads.  The witness must dig into the nesting.
+   Expected: ExhaustivenessError: pattern 'Cons(Err(_), Nil)' not covered *)
+
+module NonExhNested
+
+fn first_ok(xs : List(Result(Int, String))) : Int =
+  match xs with
+  | Nil               => 0
+  | Cons(Ok(n), _)    => n
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(first_ok(Cons(Ok(7), Nil))))
