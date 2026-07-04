@@ -24,6 +24,7 @@ verified script next to it.
 | 10 — Abstract Machines | [`ch10/solutions/`](../ch10/solutions/solutions.md) | `ex03_apply_context.py`, `ex04_prolog.py`, `ex05_cbn_cbv.py` |
 | 11 — Correctness | [`ch11/solutions/`](../ch11/solutions/solutions.md) | `ex02_03_proof_check.py`, `ex04_testing_methods.py`, `ex05_affine_io.py` |
 | 12 — Types as Proofs | [`ch12/solutions/`](../ch12/solutions/solutions.md) | `ex01_curry_howard.py`, `ex02_dependent_types.py` |
+| 13 — The Adversary | [`ch13/solutions/`](../ch13/solutions/solutions.md) | `ex01_wrapping_descent.py`, `ex02_edge_bias.py`, `ex04_graded_typing.py` |
 
 ### Conventions
 
