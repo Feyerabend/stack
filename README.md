@@ -71,7 +71,7 @@ applies (`make run`).
 | 10      | [`ch10/`](./ch10/) | Abstract Machines and Operational Semantics |
 | 11      | [`ch11/`](./ch11/) | Correctness                                 |
 | 12      | [`ch12/`](./ch12/) | Types as Proofs                             |
-| 13      | [`ch12/`](./ch13/) | The Adversary                               |
+| 13      | [`ch13/`](./ch13/) | The Adversary                               |
 
 [`lark/`](./lark/) is the Lark reference implementation — interpreter, compiler,
 and the machine-checked soundness proof in [`lark/formal/proof/`](./lark/formal/proof/).
