@@ -39,8 +39,8 @@ done to the frozen reference). Maybe scrapped soon ..
 
 The development tree is laid out by *history*, not by strand. Five folders:
 
-```
-dev/07/       the frozen Python reference compiler — the ORACLE.  Borrowed from
+* [dev/07/](./dev/07/)
+              the frozen Python reference compiler — the ORACLE.  Borrowed from
               the earlier book. A sealed, complete Lark (lexer -> parser ->
               type checker -> CEK interpreter -> TAC IR -> RV32 backend ->
               C runtime -> REPL -> nine samples), plus a Raspberry Pi Pico 2 / 2W
@@ -48,6 +48,7 @@ dev/07/       the frozen Python reference compiler — the ORACLE.  Borrowed fro
               in Parts I and II is "the port agrees with 07".
               See dev/07/README.md and ORACLE.md.
 
+```
 dev/08/       the refinement-checker fork of the oracle — 07's type checker grown
               until it discharges refinement obligations ({v:Int | v > 0} and the
               like).  The subject of Part III.  See dev/08/README.md.
