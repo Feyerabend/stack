@@ -24,12 +24,10 @@ under `dev/`; a generator derives the reader's tree under `repo/`.** They are ne
 edited in the same place: `repo/` is regenerated from `dev/`, and the whole
 book-and-code story is two commands — regenerate, then check that nothing drifted.
 
-```
-book/     the book "Lark Builds Itself" (generates in LaTeX, PDF only) — cites repo/ paths
-repo/     the reader's companion tree — GENERATED from dev/, never hand-edited
-dev/      the working tangle — this is where code is actually written
-tools/    mkrepo.py (the generator) and oracle_drift.sh (the frozen-oracle audit)
-```
+- [book/](./book/) - the book "Lark Builds Itself" (PDF only) — cites repo/ paths
+- [repo/](./repo/) - the reader's companion tree — GENERATED from dev/, never hand-edited
+- [dev/](./dev/) - the working tangle — this is where code is actually written
+- [tools/](./tools/) - mkrepo.py (the generator) and oracle_drift.sh (the frozen-oracle audit)
 
 For NOW: Alongside these sit the plan-and-log documents that drive the work and are not
 part of the reader's tree: `AIMS.md` (the north star), `STRUCTURE.md` (how the
