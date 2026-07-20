@@ -39,7 +39,7 @@ done to the frozen reference). Maybe scrapped soon ..
 
 The development tree is laid out by *history*, not by strand. Five folders:
 
-* [dev/07/](./dev/07/)
+* [dev/07/](./dev/07/) --
               the frozen Python reference compiler — the ORACLE.  Borrowed from
               the earlier book. A sealed, complete Lark (lexer -> parser ->
               type checker -> CEK interpreter -> TAC IR -> RV32 backend ->

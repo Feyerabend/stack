@@ -78,13 +78,11 @@ and the machine-checked soundness proof in [`lark/formal/proof/`](./lark/formal/
 [`solutions/`](./solutions/) holds worked solutions to the chapter exercises.
 
 
-### Continued in the repository ..
+### Continued in the repository `comp` ..
 
-I keep a few planned extensions that will not appear in a revised edition of the book,
-but will instead be published here as downloadable supplements. The first is a
+The printed book is now finished, but the companion book still lives.
+It is for you to download as a PDF. The first part is about a
 self-hosting Lark: Lark compiling Lark, the ultimate self-test, now complete.
 Next come optimizations. They were mentioned only briefly in the book, at a
 theoretical level; here they are worked out in practice. Finally, affine and
-refinement types make their entrance in what I hope will become:
-we proved programs the way we proved the language ..
-
+refinement types make their entrancem in relation to proofs.
