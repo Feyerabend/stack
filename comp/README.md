@@ -45,10 +45,10 @@ The development tree is laid out by *history*, not by strand. Five folders:
 dev/07/       the frozen Python reference compiler — the ORACLE.  Borrowed from
               the earlier book. A sealed, complete Lark (lexer -> parser ->
               type checker -> CEK interpreter -> TAC IR -> RV32 backend ->
-              C runtime -> REPL -> nine samples), plus a
-              Raspberry Pi Pico 2 / 2W (RP2350, RISC-V) firmware build.  It is
-              never edited: every claim in Parts I and II is "the port agrees
-              with 07".  See dev/07/README.md and ORACLE.md.
+              C runtime -> REPL -> nine samples), plus a Raspberry Pi Pico 2 / 2W
+              (RP2350, RISC-V) firmware build.  It is never edited: every claim
+              in Parts I and II is "the port agrees with 07".
+              See dev/07/README.md and ORACLE.md.
 
 dev/08/       the refinement-checker fork of the oracle — 07's type checker grown
               until it discharges refinement obligations ({v:Int | v > 0} and the
