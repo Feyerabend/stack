@@ -1,0 +1,67 @@
+(* Test 24 — String decomposition primitives (self-hosting M0 + M4)
+   Covers: string_index, string_slice, char_to_string, string_to_int,
+           string_to_float.  These runtime prims unblock the self-host lexer
+           (M0) and float literals in the meta-circular evaluator (M4).
+   Expected output:
+     104
+     101
+     -1
+     ell
+     [empty]
+     hi
+     Ok: 42
+     Err
+     Ok: -7
+     Ok: 3.14
+     Ok: -0.5
+     Err
+     Err
+     1078523331
+     1056964608
+     1120403456 *)
+
+module StringPrims
+
+type Result a b =
+  | Ok  of a
+  | Err of b
+
+fn show_result(r : Result(Int, String)) : String =
+  match r with
+  | Ok(n)  => "Ok: " + int_to_string(n)
+  | Err(_) => "Err"
+  end
+
+fn show_fresult(r : Result(Float, String)) : String =
+  match r with
+  | Ok(f)  => "Ok: " + float_to_string(f)
+  | Err(_) => "Err"
+  end
+
+fn main(io : IO) : IO =
+  let s   = "hello" in
+  (* string_index: codepoints of 'h', 'e', then out-of-bounds → -1 *)
+  let io  = print(io, int_to_string(string_index(s, 0)))  in
+  let io  = print(io, int_to_string(string_index(s, 1)))  in
+  let io  = print(io, int_to_string(string_index(s, 99))) in
+  (* string_slice: [1,4) = "ell"; empty slice prints a marker *)
+  let io  = print(io, string_slice(s, 1, 4)) in
+  let e   = string_slice(s, 3, 3) in
+  let io  = print(io, if string_length(e) == 0 then "[empty]" else e) in
+  (* char_to_string: 104='h', 105='i' *)
+  let io  = print(io, char_to_string(104) + char_to_string(105)) in
+  (* string_to_int: both Result arms, plus a negative literal *)
+  let io  = print(io, show_result(string_to_int("42")))  in
+  let io  = print(io, show_result(string_to_int("4x2"))) in
+  let io  = print(io, show_result(string_to_int("-7")))   in
+  (* string_to_float: valid signed decimals, then two rejects — a
+     non-number and an int-shaped string (the strict FLOAT shape needs a '.') *)
+  let io  = print(io, show_fresult(string_to_float("3.14"))) in
+  let io  = print(io, show_fresult(string_to_float("-0.5"))) in
+  let io  = print(io, show_fresult(string_to_float("abc")))  in
+  let io  = print(io, show_fresult(string_to_float("42"))) in
+  (* float_to_bits: IEEE-754 float32 bit pattern of a (non-negative) literal,
+     as the C emitter uses it.  Non-negative ⇒ bit 31 clear ⇒ C/Python agree. *)
+  let io  = print(io, int_to_string(float_to_bits(3.14))) in
+  let io  = print(io, int_to_string(float_to_bits(0.5)))  in
+  print(io, int_to_string(float_to_bits(100.0)))

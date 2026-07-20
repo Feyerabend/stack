@@ -1,0 +1,131 @@
+(* Sample 08 — Conway's Game of Life
+   Alive cells stored as a list of (x,y) positions (coordinate-set representation).
+   Rules: a live cell survives with 2 or 3 live neighbours;
+          a dead cell is born if it has exactly 3 live neighbours.
+
+   Initial state: the classic glider (period 4, translates by (1,1) every 4 steps).
+     .#.
+     ..#
+     ###
+
+   Prints a 10x6 grid for generations 0-4 as a single String (no recursive IO).
+   The glider always has exactly 5 live cells. *)
+
+module Life
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+type Pos =
+  | Pos of Int, Int
+
+impl Copy for Pos = {}
+impl Copy for List(Pos) = {}
+
+fn eq_pos(a : Pos, b : Pos) : Bool =
+  match a with
+  | Pos(ax, ay) =>
+    match b with
+    | Pos(bx, by) => ax == bx and ay == by
+    end
+  end
+
+fn member(p : Pos, alive : List(Pos)) : Bool =
+  match alive with
+  | Nil           => false
+  | Cons(h, rest) =>
+    if eq_pos(p, h) then true
+    else member(p, rest)
+  end
+
+fn neighbors(p : Pos) : List(Pos) =
+  match p with
+  | Pos(x, y) =>
+    Cons(Pos(x - 1, y - 1),
+    Cons(Pos(x,     y - 1),
+    Cons(Pos(x + 1, y - 1),
+    Cons(Pos(x - 1, y),
+    Cons(Pos(x + 1, y),
+    Cons(Pos(x - 1, y + 1),
+    Cons(Pos(x,     y + 1),
+    Cons(Pos(x + 1, y + 1),
+    Nil))))))))
+  end
+
+fn count_alive(cells : List(Pos), alive : List(Pos)) : Int =
+  match cells with
+  | Nil           => 0
+  | Cons(h, rest) =>
+    let n = count_alive(rest, alive) in
+    if member(h, alive) then n + 1 else n
+  end
+
+fn append(xs : List(Pos), ys : List(Pos)) : List(Pos) =
+  match xs with
+  | Nil           => ys
+  | Cons(h, rest) => Cons(h, append(rest, ys))
+  end
+
+fn all_candidates(alive : List(Pos)) : List(Pos) =
+  match alive with
+  | Nil           => Nil
+  | Cons(h, rest) => append(neighbors(h), all_candidates(rest))
+  end
+
+fn dedup(xs : List(Pos)) : List(Pos) =
+  match xs with
+  | Nil           => Nil
+  | Cons(h, rest) =>
+    let d = dedup(rest) in
+    if member(h, d) then d else Cons(h, d)
+  end
+
+fn survives(p : Pos, alive : List(Pos)) : Bool =
+  let n = count_alive(neighbors(p), alive) in
+  if member(p, alive) then n == 2 or n == 3
+  else n == 3
+
+fn next_gen_from(cands : List(Pos), alive : List(Pos)) : List(Pos) =
+  match cands with
+  | Nil           => Nil
+  | Cons(h, rest) =>
+    let kept = next_gen_from(rest, alive) in
+    if survives(h, alive) then Cons(h, kept) else kept
+  end
+
+fn step(alive : List(Pos)) : List(Pos) =
+  next_gen_from(dedup(all_candidates(alive)), alive)
+
+fn count(xs : List(Pos)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + count(rest)
+  end
+
+fn row_str(alive : List(Pos), y : Int, x : Int, max_x : Int) : String =
+  if x > max_x then ""
+  else
+    let cell = if member(Pos(x, y), alive) then "#" else "." in
+    cell + row_str(alive, y, x + 1, max_x)
+
+fn grid_str(alive : List(Pos), y : Int, max_y : Int, max_x : Int) : String =
+  if y > max_y then ""
+  else row_str(alive, y, 0, max_x) + "\n" + grid_str(alive, y + 1, max_y, max_x)
+
+fn gen_str(alive : List(Pos), gen : Int) : String =
+  "Gen " + show(gen) + "  (" + show(count(alive)) + " cells)\n"
+  + grid_str(alive, 0, 5, 9)
+
+fn all_gens(alive : List(Pos), gen : Int, max_gen : Int) : String =
+  if gen > max_gen then ""
+  else gen_str(alive, gen) + all_gens(step(alive), gen + 1, max_gen)
+
+fn main(io : IO) : IO =
+  let glider =
+    Cons(Pos(1, 0),
+    Cons(Pos(2, 1),
+    Cons(Pos(0, 2),
+    Cons(Pos(1, 2),
+    Cons(Pos(2, 2), Nil))))) in
+  print(io, all_gens(glider, 0, 4))

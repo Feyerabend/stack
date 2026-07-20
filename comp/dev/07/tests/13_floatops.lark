@@ -1,0 +1,34 @@
+(* Test 13 — Float arithmetic and comparison
+   Covers: all four float arithmetic operators (+, -, *, /),
+           float comparisons including negative floats (where integer-bit
+           comparison would give the wrong answer), show(Bool) from comparison.
+   Expected output:
+     8.5
+     1.5
+     17.5
+     2.5
+     true
+     false
+     true
+     true *)
+
+module FloatOps
+
+fn clamp(x : Float, lo : Float, hi : Float) : Float =
+  if x < lo then lo
+  else if x > hi then hi
+  else x
+
+fn main(io : IO) : IO =
+  let a   = 5.0 in
+  let b   = 3.5 in
+  let io  = print(io, show(a + b)) in
+  let io  = print(io, show(a - b)) in
+  let io  = print(io, show(a * b)) in
+  let io  = print(io, show(10.0 / 4.0)) in
+  let neg = 0.0 - 3.0 in
+  let io  = print(io, show(neg < 0.0)) in
+  let io  = print(io, show(neg > 0.0)) in
+  let lo  = 0.0 - 5.0 in
+  let io  = print(io, show(clamp(10.0, lo, 3.0) <= 3.0)) in
+  print(io, show(clamp(0.0 - 10.0, lo, 3.0) >= lo))

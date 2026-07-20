@@ -1,0 +1,110 @@
+(* Lark standard library — importable as `import Stdlib exposing (...)`
+
+   Sections
+   ────────
+   Integers    : min, max, abs, clamp, pow
+   Floats      : min, max, abs, sqrt, floor, ceil, clamp
+   Strings     : length, repeat, pad_left, pad_right
+   Option      : type + map, and_then, unwrap_or, is_some, is_none
+   Bool        : to_string
+*)
+
+module Stdlib
+
+
+(* ── Integers ────────────────────────────────────────────────────────────── *)
+
+export fn min_int(a : Int, b : Int) : Int =
+  if a < b then a else b
+
+export fn max_int(a : Int, b : Int) : Int =
+  if a > b then a else b
+
+export fn abs_int(n : Int) : Int = int_abs(n)
+
+export fn clamp_int(x : Int, lo : Int, hi : Int) : Int =
+  if x < lo then lo
+  else if x > hi then hi
+  else x
+
+export fn pow_int(base : Int, exp : Int) : Int =
+  if exp == 0 then 1
+  else base * pow_int(base, exp - 1)
+
+
+(* ── Floats ─────────────────────────────────────────────────────────────── *)
+
+export fn min_float(a : Float, b : Float) : Float =
+  if a < b then a else b
+
+export fn max_float(a : Float, b : Float) : Float =
+  if a > b then a else b
+
+export fn abs_float(f : Float) : Float = float_abs(f)
+
+export fn sqrt_float(f : Float) : Float = float_sqrt(f)
+
+export fn floor_float(f : Float) : Float = float_floor(f)
+
+export fn ceil_float(f : Float) : Float = float_ceil(f)
+
+export fn clamp_float(x : Float, lo : Float, hi : Float) : Float =
+  if x < lo then lo
+  else if x > hi then hi
+  else x
+
+export fn round_float(f : Float) : Float =
+  floor_float(f + 0.5)
+
+
+(* ── Strings ─────────────────────────────────────────────────────────────── *)
+
+export fn length(s : String) : Int = string_length(s)
+
+export fn repeat_str(s : String, n : Int) : String =
+  if n <= 0 then ""
+  else s + repeat_str(s, n - 1)
+
+export fn spaces(n : Int) : String = repeat_str(" ", n)
+
+
+(* ── Option ─────────────────────────────────────────────────────────────── *)
+
+export type Option a =
+  | None
+  | Some of a
+
+impl Copy for Option(Int) = {}
+impl Copy for Option(Float) = {}
+impl Copy for Option(Bool) = {}
+impl Copy for Option(String) = {}
+
+export fn is_some(opt : Option(Int)) : Bool =
+  match opt with
+  | None    => false
+  | Some(_) => true
+  end
+
+export fn is_none(opt : Option(Int)) : Bool =
+  match opt with
+  | None    => true
+  | Some(_) => false
+  end
+
+export fn unwrap_or(opt : Option(Int), default : Int) : Int =
+  match opt with
+  | None    => default
+  | Some(x) => x
+  end
+
+export fn map_opt(f : Int -> Int, opt : Option(Int)) : Option(Int) =
+  match opt with
+  | None    => None
+  | Some(x) => Some(f(x))
+  end
+
+export fn and_then(f : Int -> Option(Int), opt : Option(Int)) : Option(Int) =
+  match opt with
+  | None    => None
+  | Some(x) => f(x)
+  end

@@ -1,0 +1,13 @@
+(* Test 19 — Integer overflow (edge case)
+   Covers: multiplication that exceeds 32-bit signed int range.
+           CEK and TAC VM use Python arbitrary-precision integers; RV32 VM
+           uses 32-bit RISC-V MUL (lower 32 bits of the product).
+   Expected output (CEK/TAC — RV32 diverges; see diff_test.py):
+     10000100000 *)
+
+module IntOverflow
+
+fn main(io : IO) : IO =
+  let x = 100000 in
+  let y = 100001 in
+  print(io, show(x * y))

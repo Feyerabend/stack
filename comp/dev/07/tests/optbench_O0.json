@@ -1,0 +1,377 @@
+{
+ "01_hello.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 18,
+   "bin_bytes": 256,
+   "dyn_instrs": 27,
+   "stub_calls": 1,
+   "heap_allocs": 0,
+   "heap_bytes": 0,
+   "compile_s": 0.0033,
+   "run_s": 0.0001,
+   "out_sha": "e212ed09ab23",
+   "out_len": 13
+  }
+ },
+ "02_arithmetic.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 123,
+   "bin_bytes": 676,
+   "dyn_instrs": 131,
+   "stub_calls": 6,
+   "heap_allocs": 3,
+   "heap_bytes": 24,
+   "compile_s": 0.0025,
+   "run_s": 0.0002,
+   "out_sha": "8fc01de135c6",
+   "out_len": 8
+  }
+ },
+ "03_recursion.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 132,
+   "bin_bytes": 688,
+   "dyn_instrs": 7279,
+   "stub_calls": 4,
+   "heap_allocs": 2,
+   "heap_bytes": 20,
+   "compile_s": 0.0024,
+   "run_s": 0.0071,
+   "out_sha": "530b45288596",
+   "out_len": 11
+  }
+ },
+ "04_tailrec.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 77,
+   "bin_bytes": 472,
+   "dyn_instrs": 21000069,
+   "stub_calls": 2,
+   "heap_allocs": 1,
+   "heap_bytes": 16,
+   "compile_s": 0.0015,
+   "run_s": 18.0772,
+   "out_sha": "a6f79d0e122d",
+   "out_len": 11
+  }
+ },
+ "05_adt.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 258,
+   "bin_bytes": 1268,
+   "dyn_instrs": 258,
+   "stub_calls": 11,
+   "heap_allocs": 5,
+   "heap_bytes": 52,
+   "compile_s": 0.0033,
+   "run_s": 0.0003,
+   "out_sha": "55aa58e70e64",
+   "out_len": 22
+  }
+ },
+ "06_lists.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 580,
+   "bin_bytes": 2524,
+   "dyn_instrs": 2356,
+   "stub_calls": 43,
+   "heap_allocs": 40,
+   "heap_bytes": 364,
+   "compile_s": 0.0106,
+   "run_s": 0.0023,
+   "out_sha": "11801f313b84",
+   "out_len": 16
+  }
+ },
+ "07_result.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 250,
+   "bin_bytes": 1204,
+   "dyn_instrs": 341,
+   "stub_calls": 9,
+   "heap_allocs": 6,
+   "heap_bytes": 68,
+   "compile_s": 0.0062,
+   "run_s": 0.0004,
+   "out_sha": "24a0e977888e",
+   "out_len": 28
+  }
+ },
+ "08_traits.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 394,
+   "bin_bytes": 1864,
+   "dyn_instrs": 549,
+   "stub_calls": 17,
+   "heap_allocs": 11,
+   "heap_bytes": 176,
+   "compile_s": 0.0074,
+   "run_s": 0.0006,
+   "out_sha": "e53751b65f7a",
+   "out_len": 60
+  }
+ },
+ "09_modules/main.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 260,
+   "bin_bytes": 1240,
+   "dyn_instrs": 266,
+   "stub_calls": 13,
+   "heap_allocs": 5,
+   "heap_bytes": 60,
+   "compile_s": 0.0049,
+   "run_s": 0.0003,
+   "out_sha": "8bff34c4f5fb",
+   "out_len": 22
+  }
+ },
+ "10_closures.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 236,
+   "bin_bytes": 1116,
+   "dyn_instrs": 315,
+   "stub_calls": 9,
+   "heap_allocs": 6,
+   "heap_bytes": 48,
+   "compile_s": 0.0064,
+   "run_s": 0.0004,
+   "out_sha": "7e9360386e82",
+   "out_len": 9
+  }
+ },
+ "11_tree.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 305,
+   "bin_bytes": 1380,
+   "dyn_instrs": 1155,
+   "stub_calls": 13,
+   "heap_allocs": 11,
+   "heap_bytes": 100,
+   "compile_s": 0.0072,
+   "run_s": 0.0012,
+   "out_sha": "d82a9eb64a62",
+   "out_len": 4
+  }
+ },
+ "12_tuples.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 240,
+   "bin_bytes": 1120,
+   "dyn_instrs": 302,
+   "stub_calls": 10,
+   "heap_allocs": 6,
+   "heap_bytes": 56,
+   "compile_s": 0.0062,
+   "run_s": 0.0003,
+   "out_sha": "507c766a74e5",
+   "out_len": 8
+  }
+ },
+ "13_floatops.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 176,
+   "bin_bytes": 924,
+   "dyn_instrs": 221,
+   "stub_calls": 30,
+   "heap_allocs": 8,
+   "heap_bytes": 84,
+   "compile_s": 0.0042,
+   "run_s": 0.0003,
+   "out_sha": "2816140816c5",
+   "out_len": 38
+  }
+ },
+ "14_stringops.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 126,
+   "bin_bytes": 772,
+   "dyn_instrs": 386,
+   "stub_calls": 27,
+   "heap_allocs": 23,
+   "heap_bytes": 260,
+   "compile_s": 0.0029,
+   "run_s": 0.0005,
+   "out_sha": "3d6e52adb729",
+   "out_len": 53
+  }
+ },
+ "15_tailrec2.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 195,
+   "bin_bytes": 944,
+   "dyn_instrs": 1521387,
+   "stub_calls": 6,
+   "heap_allocs": 3,
+   "heap_bytes": 28,
+   "compile_s": 0.0067,
+   "run_s": 1.3441,
+   "out_sha": "00f17431ef61",
+   "out_len": 12
+  }
+ },
+ "16_stdlib.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 1030,
+   "bin_bytes": 4348,
+   "dyn_instrs": 969,
+   "stub_calls": 41,
+   "heap_allocs": 20,
+   "heap_bytes": 156,
+   "compile_s": 0.0295,
+   "run_s": 0.001,
+   "out_sha": "6bd6c38c4072",
+   "out_len": 45
+  }
+ },
+ "17_mutual_rec.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 136,
+   "bin_bytes": 704,
+   "dyn_instrs": 682,
+   "stub_calls": 8,
+   "heap_allocs": 4,
+   "heap_bytes": 48,
+   "compile_s": 0.005,
+   "run_s": 0.0007,
+   "out_sha": "9ea888490f3b",
+   "out_len": 22
+  }
+ },
+ "18_litpat.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 135,
+   "bin_bytes": 768,
+   "dyn_instrs": 222,
+   "stub_calls": 5,
+   "heap_allocs": 0,
+   "heap_bytes": 0,
+   "compile_s": 0.0051,
+   "run_s": 0.0003,
+   "out_sha": "c2c674a7ede3",
+   "out_len": 21
+  }
+ },
+ "19_intoverflow.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 27,
+   "bin_bytes": 276,
+   "dyn_instrs": 37,
+   "stub_calls": 2,
+   "heap_allocs": 1,
+   "heap_bytes": 16,
+   "compile_s": 0.0048,
+   "run_s": 0.0001,
+   "out_sha": "6847f90fd135",
+   "out_len": 11
+  }
+ },
+ "20_floatprec.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 51,
+   "bin_bytes": 388,
+   "dyn_instrs": 65,
+   "stub_calls": 9,
+   "heap_allocs": 3,
+   "heap_bytes": 48,
+   "compile_s": 0.0015,
+   "run_s": 0.0001,
+   "out_sha": "7ddbfd1d602b",
+   "out_len": 30
+  }
+ },
+ "21_deeprec.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 73,
+   "bin_bytes": 452,
+   "dyn_instrs": 2215,
+   "stub_calls": 2,
+   "heap_allocs": 1,
+   "heap_bytes": 12,
+   "compile_s": 0.0016,
+   "run_s": 0.0022,
+   "out_sha": "6e8660e09bd5",
+   "out_len": 5
+  }
+ },
+ "22_io_seq.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 36,
+   "bin_bytes": 384,
+   "dyn_instrs": 49,
+   "stub_calls": 5,
+   "heap_allocs": 0,
+   "heap_bytes": 0,
+   "compile_s": 0.0015,
+   "run_s": 0.0001,
+   "out_sha": "b601ca50f90c",
+   "out_len": 32
+  }
+ },
+ "23_show_impl.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 139,
+   "bin_bytes": 764,
+   "dyn_instrs": 216,
+   "stub_calls": 12,
+   "heap_allocs": 6,
+   "heap_bytes": 44,
+   "compile_s": 0.0026,
+   "run_s": 0.0003,
+   "out_sha": "96c7419c2ef1",
+   "out_len": 28
+  }
+ },
+ "24_stringprims.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 565,
+   "bin_bytes": 2600,
+   "dyn_instrs": 705,
+   "stub_calls": 56,
+   "heap_allocs": 36,
+   "heap_bytes": 456,
+   "compile_s": 0.0131,
+   "run_s": 0.0008,
+   "out_sha": "9b15b8b704c1",
+   "out_len": 103
+  }
+ },
+ "25_torture.lark": {
+  "0": {
+   "status": "ok",
+   "asm_instrs": 2544,
+   "bin_bytes": 10524,
+   "dyn_instrs": 13493,
+   "stub_calls": 186,
+   "heap_allocs": 160,
+   "heap_bytes": 1624,
+   "compile_s": 0.0556,
+   "run_s": 0.0133,
+   "out_sha": "90b4bc998174",
+   "out_len": 119
+  }
+ }
+}
