@@ -1,0 +1,23 @@
+module IfPredUnsafe
+
+(* The mutant of 26_ifpred_safe.lark.  `abs` and its guarded postcondition are
+   UNCHANGED and still honest — the lie is at the call.  `main` divides by `abs(0)`.
+
+   The postcondition's guard instantiates at `x = 0`: `0 >= 0` is TRUE, so the THEN
+   disjunct fires and the caller learns `a == 0` (and `a >= 0`).  The division
+   `100 / a` then owes `a != 0`, which is FALSE, so it goes UNPROVED — exactly one of
+   the three obligations.  abs's own two body obligations still prove.
+
+   This is the mutant a broken `if`-translation would wave through: if the else
+   branch collapsed to `true`, or the guard were dropped, the checker could conclude
+   `a != 0` from the wrong disjunct.  It does not — the guard at `x = 0` selects the
+   then-disjunct and `a == 0` stands.
+
+   Were the division admitted, it would divide 100 by 0 at run time. *)
+
+fn abs(x : Int) : {v : Int | v >= 0 and (if x >= 0 then v == x else v == 0 - x)} =
+  if x >= 0 then x else 0 - x
+
+fn main(io : IO) : IO =
+  let a = abs(0) in
+  print(io, show(100 / a))

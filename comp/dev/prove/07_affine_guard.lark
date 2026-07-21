@@ -1,0 +1,26 @@
+module AffineGuard
+
+(* The sharper half of the finding, and the one the literature is thin on.
+   
+   The PREDICATE is free (06_affine_mention), but the runtime GUARD that
+   establishes it is not.  `size(b) > 0` evaluates b — a real use — and then
+   `take(b, 0)` uses it again, so the affine checker rejects this function.  You
+   cannot check a precondition about an affine value and still pass the value on.
+   
+   So affine typing and refinement typing are each fine on their own and JOINTLY
+   BLOCKED for non-Copy types: making Buf Copy dissolves it (05_buf_safe), and the
+   borrow idiom — a guard that hands the value back, `size_of(b) : (Int, Buf)` —
+   typechecks but cannot be *proved*, because V1 has no refined tuple components.
+   That is the V2 requirement this interaction implies, derived rather than
+   guessed.  See 07_affine_borrow.lark. *)
+
+type Buf = | Buf of Int
+
+fn size(b: Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn take(b: Buf, i: {v: Int | v >= 0 and v < size(b)}) : Int =
+  match b with | Buf(n) => n + i end
+
+fn guarded(b: Buf) : Int =
+  if size(b) > 0 then take(b, 0) else 0

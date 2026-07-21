@@ -1,0 +1,39 @@
+module FloatFieldUnsafe
+
+(* THE MUTANT — and a false proof that would have slipped through a suite that only
+   ever put a Float in a PARAMETER.  One field different from 29_floatfield_safe: the
+   guard now reads the Float field `f` instead of the Int field `n`.
+
+     match box with | B(f, n) => if f == f then 0 else div(100, d) end
+
+   `f == f` is the same lie as 13_float_unsafe's `x == x`, only now the Float arrived
+   through a constructor.  In the logic equality is reflexive — congruence closure
+   makes it so, as it must.  At run time `f == f` is FALSE when `f` is NaN, and `main`
+   builds exactly that: `B(0.0 / 0.0, 0)`.  So the machine takes the `else` and divides
+   100 by 0.
+
+   Were the field speakable, the checker would assume `not (f == f)` in the `else`,
+   find it unsatisfiable, and prove the branch VACUOUSLY — `ok: 2 obligation(s) proved`,
+   exit 0, then the divide-by-zero.  This is not hypothetical: delete the FLOAT-silence
+   guard in `term_opt` (make a Float speakable again) and this file flips from `1 of 2
+   unproved` to `2 proved`.  It is 13's regression, guarded on a road 13 does not walk.
+
+   The fix is the same one, and it needs nothing new: a Float has a sort at which no
+   term is ever built, so `f` — however it entered — is unnameable, `f == f` is a
+   condition the checker cannot read, and an unreadable condition constrains NEITHER
+   branch.  The `else`'s division stands with nothing to prove `d != 0`, which is the
+   truth: `d` really is 0.
+
+   Expected: 1 of 2 unproved. *)
+
+type Box = | B of Float, Int
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn get(box : Box, d : Int) : Int =
+  match box with
+  | B(f, n) => if f == f then 0 else div(100, d)
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(get(B(0.0 / 0.0, 0), 0)))

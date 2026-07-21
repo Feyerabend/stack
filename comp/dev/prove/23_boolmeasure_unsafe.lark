@@ -1,0 +1,35 @@
+module BoolMeasureUnsafe
+
+(* The mutant of 23_boolmeasure_safe.lark, and the bug is one character: the tree
+   `main` builds has root `0`, not `5`.
+
+   `root`'s precondition is `{v : Tree | pos(v)}`, so the call owes `pos(Node(Leaf,
+   0, Leaf))` — and that is FALSE, because the 'Node' arm of `pos` is `0 > 0 and
+   ...`.  The obligation must go UNPROVED: this is the BUILDING direction of the
+   Bool measure, a false PROPOSITION about a constructor term the program wrote, and
+   the atom `pos(Node(Leaf, 0, Leaf))` has to resolve through the equivalence to
+   `false` rather than being quietly believed.
+
+   Were it admitted, the detonation is real: `root` would return `0`, `x` would be
+   `0`, and `main` would evaluate `100 / 0`.  The measure is the only thing standing
+   between the checker and that division, which is the whole point of the rung.
+
+   Expected: 1 of 4 obligations unproved. *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure pos(t : Tree) : Bool =
+  match t with
+  | Leaf           => true
+  | Node(l, x, r)  => x > 0 and pos(l) and pos(r)
+  end
+
+fn root(t : {v : Tree | pos(v)}) : {v : Int | v > 0} =
+  match t with
+  | Leaf          => 1
+  | Node(l, x, r) => x
+  end
+
+fn main(io : IO) : IO =
+  let x = root(Node(Leaf, 0, Leaf)) in
+  print(io, show(100 / x))

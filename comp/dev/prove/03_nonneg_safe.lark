@@ -1,0 +1,17 @@
+module NonNegSafe
+
+(* A postcondition, and the two ways a program earns one: by branching (the
+   if-join hands the checker `c => p_then` and `not c => p_else`) and by calling
+   something that already has the postcondition. *)
+
+fn abs_val(x: Int) : {v: Int | v >= 0} =
+  if x >= 0 then x else 0 - x
+
+fn sq_dist(a: Int, b: Int) : {v: Int | v >= 0} =
+  abs_val(a - b)
+
+fn clamp_low(x: Int) : {v: Int | v >= 0} =
+  if x < 0 then 0 else x
+
+fn sum_nonneg(a: {v: Int | v >= 0}, b: {v: Int | v >= 0}) : {v: Int | v >= 0} =
+  a + b

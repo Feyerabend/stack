@@ -1,0 +1,64 @@
+module EqSeamString
+
+(* THE EQUALITY SEAM, and the mirror image of the Float story.  This file is PROVED by
+   the checker and REFUSED by the machine — and, unusually for this suite, that is not a
+   bug on either side.  It is a boundary, written down here as a program so it can be
+   read, and pinned in the harness as `proved` with NO entry in RUNS, because it does
+   not run.
+
+   Three layers disagree about `==`, each correctly on its own terms:
+
+     HM        types `==` as `forall a. a -> a -> Bool` — fully polymorphic (infer.py,
+               `_binop_type`: the comparison operators are `t_fn(a, a, T_BOOL)`).  So
+               `s == s` on two Strings type-checks.
+
+     the logic treats a String as OTHER: a value with no interior the checker can name,
+               but an ordinary inhabitant of congruence closure, where equality is
+               REFLEXIVE because congruence makes it so — as it must, or the theory is
+               unsound.  So `s == s` is VALID, its negation is UNSAT, and the `else`
+               branch below is dead code in the logic.  Dead code proves everything,
+               including `d != 0` for the division it guards.  Hence: 2 proved.
+
+     the machine implements `==` for Int and Float and NOTHING ELSE (cek.py, `binop`:
+               the Int and Float arms, then `raise RuntimeError("cannot apply '=='")`).
+               There is a `_val_eq` that would compare Strings structurally, but it
+               serves `match`, not the `==` operator.  So at run time `s == s` does not
+               return `true` — it RAISES, before either branch is taken.
+
+   Put the three together and the seam is exact:
+
+     the checker proves the division by believing `s == s`;
+     the machine never reaches the division, because `s == s` is not a thing it can do.
+
+   So there is no ZeroDivisionError — the narrow promise this checker makes (a proved
+   program does not divide by zero, index out of bounds, ...) is KEPT.  The `cannot apply
+   '=='` crash preempts the branch.  But the proof rested on an equality the machine does
+   not provide, and honesty requires saying so: this is `proved` in a strictly weaker
+   sense than every other proved row in the suite, and the difference is the seam.
+
+   Contrast the Float files (13, 29, 31): Float's `==` EXISTS and LIES (NaN breaks
+   reflexivity, so `x == x` is valid in the logic and FALSE on the machine, and that IS
+   a false proof — hence Floats are made unspeakable).  String's `==` does not exist,
+   and the logic believes in it anyway.  Opposite polarities of the same three-layer
+   fact: what HM admits, the logic reasons about, and the machine implements are three
+   different sets, and `==` is where they come apart.
+
+   Why not simply close it?  Two roads, both real, both declined here for the interlude:
+   route the runtime `==`/`!=` through `_val_eq` (then `s == s` is `true` and this file
+   RUNS, returning 0), or make String `==` untranslatable in the logic the way Float is
+   (then this file's division goes honestly UNPROVED).  The first is a language change to
+   the CEK machine — shared with 07, out of scope for a checker interlude; the second
+   throws away sound String congruence (33_eqseam_control depends on it) to guard a case
+   that already cannot produce a false proof.  The seam is documented rather than closed;
+   PROVE.md carries it as a boundary beside the Z-vs-32-bit and partial-correctness ones.
+
+   Expected: proved (2).  DELIBERATELY NOT IN RUNS — running it raises
+   `cannot apply '=='`. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn f(s : String, d : Int) : Int =
+  if s == s then 0 else div(100, d)
+
+fn main(io : IO) : IO =
+  print(io, show(f("x", 0)))

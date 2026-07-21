@@ -1,0 +1,28 @@
+module ShadowSafe
+
+(* THE CONTROL for the third false proof, and the reason to believe the fix cost
+   nothing.  A contract written against a function the program itself defines —
+   `size` — discharged by a guard at the call site that calls THE SAME `size`.  That
+   is `05_buf`'s idiom, the one the checker has had since V1, and it still works:
+   the logic knows nothing about what `size` computes, only that equal arguments give
+   equal results, and congruence carries the guard into the obligation.
+
+   The difference from `15_shadow_unsafe` is one line — the `let` that rebinds the
+   name.  Here there is none, so the `size` in the guard and the `size` in the
+   contract are the same function, and the symbol they share is honestly theirs.
+
+   Checked, and then RUN: it prints 25. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn size(b : Int) : Int = 0
+
+(* k is anything but the size — so the difference cannot be zero, and dividing by it
+   is safe.  The contract mentions `size(b)`: a dependent function type, and an
+   uninterpreted symbol. *)
+fn take(b : Int, k : {v : Int | v != size(b)}) : Int = div(100, k - size(b))
+
+fn good(b : Int) : Int =
+  if 4 != size(b) then take(b, 4) else 0
+
+fn main(io : IO) : IO = print(io, show(good(9)))

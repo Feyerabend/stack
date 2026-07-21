@@ -1,0 +1,20 @@
+module SliceSafe
+
+(* string_slice(s, a, b) demands 0 <= a <= b <= len(s).  The second argument's
+   contract mentions the FIRST one, so the obligation for `b` is checked with the
+   `a` that was actually passed substituted in — a dependent function type, and
+   the reason the call site can prove `a <= b` at all. *)
+
+fn rest(s: String) : String =
+  string_slice(s, 0, string_length(s))
+
+fn prefix(s: String, k: {v: Int | v >= 0 and v <= string_length(s)}) : String =
+  string_slice(s, 0, k)
+
+fn drop_first(s: String) : String =
+  if string_length(s) > 0 then string_slice(s, 1, string_length(s)) else s
+
+fn middle(s: String, a: {v: Int | v >= 0}, b: {v: Int | v >= 0}) : String =
+  if a <= b then
+    if b <= string_length(s) then string_slice(s, a, b) else s
+  else s

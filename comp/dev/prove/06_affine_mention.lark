@@ -1,0 +1,23 @@
+module AffineMention
+
+(* THE RULE (PROVE.md §7, settled here): naming an affine binding in a predicate
+   is a MENTION, not a USE.  Predicates are use-neutral — they never consume.
+   
+   Buf is NOT Copy, so `b` is affine: the control below shows the checker really
+   does count uses.  Yet `b` appears in take's precondition `v < size(b)` AND is
+   used once in take's body, and that is fine.  It is fine by construction, not by
+   a special case: refinements erase in syntype_to_mono before inference ever
+   traverses them, so a predicate cannot increment a use count.
+   
+   Why it is sound: affinity in Lark restricts USE, not TRUTH.  Lark is pure, so
+   consuming a value moves it, it does not mutate it — a fact proved about an
+   affine binding stays true for the whole scope.  In a language with mutation the
+   rule would be unsound.  The permission is paid for by purity and nothing else. *)
+
+type Buf = | Buf of Int
+
+fn size(b: Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn take(b: Buf, i: {v: Int | v >= 0 and v < size(b)}) : Int =
+  match b with | Buf(n) => n + i end

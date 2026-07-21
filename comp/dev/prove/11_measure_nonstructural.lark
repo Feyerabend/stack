@@ -1,0 +1,41 @@
+module MeasureNonStructural
+
+(* THE FIXTURE WITH TEETH.  A measure whose recursion does not descend.
+
+   `bad`'s Cons arm calls `bad(xs)` — the whole list — where a measure may only
+   call `bad(rest)`, a field of the constructor it just took apart.  One character
+   of difference, and the difference is soundness.
+
+   Elaborated, the arms are ASSUMED.  This one asserts
+
+       bad(xs) == 1 + bad(xs)
+
+   which no integer satisfies.  It is not a weak axiom or a useless one; it is an
+   INCONSISTENT one, and from an inconsistency every goal follows.  `absurd` below
+   is the proof of that: its contract claims its result is negative, it returns 0,
+   and `0 < 0` is false.  Once V2.2 instantiates the equations at the terms an arm
+   mentions, the `Cons` arm's hypotheses would contain the contradiction above, and
+   the checker would cheerfully discharge `0 < 0` — reporting a false program as
+   verified, which is the one failure a verifier may not have.
+
+   So the structural check is not hygiene.  It is the reason the equations may be
+   assumed at all, and this file is where that claim is tested: the measure must be
+   REJECTED, at declaration time, before a single VC is built.
+
+   (Termination is optional for a contract and mandatory for a measure. A
+   non-terminating `fn` merely never returns — its contract is vacuously kept, and
+   V1 already leans on that. A non-terminating measure poisons the logic.) *)
+
+type L = | Nil | Cons of Int, L
+
+measure bad(xs : L) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + bad(xs)
+  end
+
+fn absurd(xs : L) : {v : Int | v < 0} =
+  match xs with
+  | Nil        => 0
+  | Cons(_, _) => 0
+  end

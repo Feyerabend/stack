@@ -1,0 +1,25 @@
+(* 27 — the mutant.  The lambda is unchanged; the call breaks its contract.
+
+   THIS IS THE NINTH FALSE PROOF, IN ONE FILE.  `g`'s parameter is `{v | v != 0}`, and its
+   body proves `100 / k` from that.  The call then passes ZERO.  Under the old checker the
+   lambda's type was `ROpaque()` — it carried no parameter contract — so the application
+   discharged nothing, and the verdict was the body's obligation alone:
+
+       ok: 1 obligation(s) proved          exit 0
+
+   ...and then, at run time, ZeroDivisionError.  One obligation proved is not "the program
+   is safe".  It is "the body is safe IF the parameter is non-zero" — a promise the call
+   was never asked to keep.  It is 22 one step along: 22 made `synth` LOOK at the body;
+   this makes the call PAY for what the body assumed.
+
+   Now: two obligations, one unproved.  The body still proves `k != 0` (it may assume its
+   parameter), and the call `g(x - x)` owes `0 != 0`, which is false. *)
+
+module LambdaPreUnsafe
+
+fn use(x : Int) : Int =
+  let g = fn (k : {v : Int | v != 0}) => 100 / k in
+  g(x - x)                          (* g(0).  The divisor is zero, and always was. *)
+
+fn main(io : IO) : IO =
+  print(io, int_to_string(use(7)))

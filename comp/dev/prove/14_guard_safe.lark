@@ -1,0 +1,17 @@
+module GuardSafe
+
+(* The control for 14_guard_unsafe.lark.  Same shape, same obligation — and a guard the
+   logic can READ.  `d > 0` is linear, so it becomes a hypothesis, and the else branch
+   gets its negation for free.  This is the V1 behaviour the fix had to leave standing:
+   a condition the checker understands is worth exactly what it was always worth.
+
+   Expected output:
+     25 *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn g(x : Int, y : Int, d : Int) : Int =
+  if d > 0 then div(100, d) else 0
+
+fn main(io : IO) : IO =
+  print(io, show(g(2, 3, 4)))

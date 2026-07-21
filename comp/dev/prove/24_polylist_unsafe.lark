@@ -1,0 +1,34 @@
+module PolyListUnsafe
+
+(* The mutant of 24_polylist_safe.lark, one character: the list `main` builds has
+   head `0`, not `5`.
+
+   `head`'s precondition is `{v : List(Int) | allpos(v)}`, so the call owes
+   `allpos(Cons(0, Nil))` — and that is FALSE, because the `Cons` arm of `allpos` is
+   `0 > 0 and ...`.  The obligation must go UNPROVED.  This is the same proposition-
+   about-a-constructor-term the Bool-measure rung checks, now over a POLYMORPHIC list:
+   the P2 fix must pin `x : Int` at the DEFINITION of `head` without also making the
+   false precondition provable at its CALL.
+
+   Were it admitted, `head` would return `0`, `x` would be `0`, and `main` would
+   evaluate `100 / 0`.
+
+   Expected: 1 of 4 obligations unproved. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure allpos(xs : List(Int)) : Bool =
+  match xs with
+  | Nil           => true
+  | Cons(x, rest) => x > 0 and allpos(rest)
+  end
+
+fn head(xs : {v : List(Int) | allpos(v)}) : {v : Int | v > 0} =
+  match xs with
+  | Nil           => 1
+  | Cons(x, rest) => x
+  end
+
+fn main(io : IO) : IO =
+  let x = head(Cons(0, Nil)) in
+  print(io, show(100 / x))

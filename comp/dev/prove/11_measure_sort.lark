@@ -1,0 +1,28 @@
+module MeasureSort
+
+(* A measure into a sort the logic does not have.
+
+   The solver decides QF-UFLIA: uninterpreted functions, and LINEAR INTEGER
+   arithmetic.  It has two sorts it can reason INSIDE — Int and Bool — and one it
+   can only reason ABOUT (OTHER: equality, and application of an uninterpreted
+   symbol).  A measure exists to hand the logic a fact it can compute with, so its
+   result must land in one of the first two.
+
+   `Float` is the honest refusal here, and it is the same refusal `rtype_of_mono`
+   already makes for a Float parameter: there is no sound way to pretend a real is
+   an integer, and pretending is how a verifier ends up proving something false.  A
+   measure returning a Float would be a symbol we could name and never use — an
+   `OTHER` in a costume.
+
+   Rejected: the result type must be Int or Bool. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure total(xs : List(Float)) : Float =
+  match xs with
+  | Nil           => 0.0
+  | Cons(x, rest) => x + total(rest)
+  end
+
+fn zero(xs : List(Float)) : {v : Int | v == 0} =
+  0

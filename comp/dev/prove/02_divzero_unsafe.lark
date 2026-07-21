@@ -1,0 +1,16 @@
+module DivZeroUnsafe
+
+fn safe_div(n: Int, d: {v: Int | v != 0}) : Int =
+  n / d
+
+(* The divisor is unconstrained: nothing rules out 0. *)
+fn ratio(n: Int, d: Int) : Int =
+  n / d
+
+(* A guard that does not guard: d could still be 0. *)
+fn guarded_wrong(n: Int, d: Int) : Int =
+  if d >= 0 then safe_div(n, d) else 0
+
+(* The subtraction is the bug: k = 1 makes the divisor 0. *)
+fn off_by_one(n: Int, k: {v: Int | v > 0}) : Int =
+  n / (k - 1)

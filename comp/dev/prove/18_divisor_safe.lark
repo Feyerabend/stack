@@ -1,0 +1,56 @@
+(* 18 — A DIVISOR THE LOGIC CANNOT NAME.  (found by `08/tests/adversary.py`)
+
+   V2.2′ fixed the rule for a HYPOTHESIS: what the checker cannot read, it must not
+   assume — an unreadable guard constrains neither branch.  This pair is the same
+   sentence at the OPPOSITE POLARITY, and confusing the two is what let a division by
+   zero through:
+
+     a HYPOTHESIS it cannot read must be DROPPED.
+     a GOAL it cannot read must be ASKED ANYWAY, and then honestly go unproved.
+
+   Silence about what you may assume is modesty.  Silence about what you must prove is
+   a lie — and the checker was telling it in two places, both found by the adversary
+   within a few hundred random programs:
+
+     `100 / (x * y)`   the divisor is merely NON-LINEAR, so `term_opt` could not express
+                       it and the site raised NO OBLIGATION AT ALL.
+     `100 / h(x)`      `h` is a LOCAL lambda, which V2.2′(c) rightly made unspeakable —
+                       and the site, seeing a type it did not understand, declined to ask.
+
+   Both printed `ok: 0 obligation(s) proved`, exit 0, and then divided by zero.  The
+   condition for ASKING is no longer "do I understand the divisor" — it is HM's: this is
+   an integer division, so there is an obligation, and the only excuse is knowing the
+   division is a Float's.
+
+   This file is what the fix leaves standing, and both halves are the same old lesson:
+
+     - `nz(x * y)` is exactly as unnameable as `x * y` was, and it PROVES.  The divisor
+       gets a SKOLEM — a name for a value the checker cannot compute — and the skolem
+       inherits the CONTRACT of the thing it stands for, just as an argument's does.
+     - `let v = x * y` is the same product, and once it has a NAME the guard can be about
+       it, and the division is proved.  V2.2's rule one rung down: *a name is what carries
+       a fact.*
+
+   The capability was not lost. It was made to say where it comes from.
+
+   ⚠️ What is NOT here, deliberately: a division by a local lambda's result, `let v = h(x)
+   in if v != 0 then 100 / v`.  It cannot be proved — not because the guard is bad, but
+   because the checker has no type for `v` at all (a locally bound function is unspeakable,
+   so its result is too), and a value with no sort cannot be guarded.  That is the price of
+   V2.2′(c), it is in the sound direction, and it is the first thing a stronger checker
+   would buy back. *)
+
+module DivisorSafe
+
+fn nz(a : Int) : {v : Int | v != 0} =
+  if a > 0 then a else 1
+
+fn by_contract(x : Int, y : Int) : Int =
+  100 / nz(x * y)
+
+fn by_name(x : Int, y : Int) : Int =
+  let v = x * y in
+  if v != 0 then 100 / v else 0
+
+fn main(io : IO) : IO =
+  print(io, show(by_contract(0, 5) + by_name(0, 5)))

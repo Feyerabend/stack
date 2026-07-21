@@ -1,0 +1,25 @@
+module SubstSafe
+
+(* THE OTHER HALF OF THE LIE — and its control.  13_float_unsafe is REFLEXIVITY: the
+   logic believes `x == x`, which NaN denies.  This pair is the twin failure,
+   SUBSTITUTIVITY: from `a == b` the logic would conclude `g(a) == g(b)` for any `g` —
+   and IEEE-754 has values that are `==` at run time yet distinguishable (`0.0` and
+   `-0.0` compare equal, but `1.0 / x` is `+inf` for one and `-inf` for the other).
+   Reflexivity and substitutivity are the two things congruence closure IS, and a Float
+   breaks BOTH — which is the whole reason a Float gets a sort rather than a warning.
+
+   This control shows, as 13_float_safe does, that closing the door costs nothing.  A
+   Float `a` is a parameter; it is passed and ignored; the division is about `d`, an
+   Int, discharged from an Int guard.  The point of the pair is the mutant next door
+   (31_substitutivity_unsafe), which tries to launder a division's safety through the
+   equality of two Floats and is correctly left unproved.
+
+   Expected: proved 2, runs → 25. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn f(a : Float, d : Int) : Int =
+  if d != 0 then div(100, d) else 0
+
+fn main(io : IO) : IO =
+  print(io, show(f(1.5, 4)))

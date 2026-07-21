@@ -1,0 +1,22 @@
+module BufUnsafe
+
+type Buf = | Buf of Int
+impl Copy for Buf = {}
+
+fn size(b: Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn take(b: Buf, i: {v: Int | v >= 0 and v < size(b)}) : Int =
+  match b with | Buf(n) => n + i end
+
+(* No guard. *)
+fn first(b: Buf) : Int =
+  take(b, 0)
+
+(* Only half the guard: i could be negative. *)
+fn at(b: Buf, i: Int) : Int =
+  if i < size(b) then take(b, i) else 0
+
+(* size(b) is the count, not the last index. *)
+fn last(b: Buf) : Int =
+  if size(b) > 0 then take(b, size(b)) else 0

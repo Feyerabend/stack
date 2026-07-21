@@ -1,0 +1,74 @@
+module ResultSafe
+
+(* PROVE V2.3 — a measure's own result refinement, PROVED rather than assumed.
+
+   The measure DECLARES what its result satisfies —
+
+       measure len(xs : List(Int)) : {v : Int | v >= 0}
+
+   — and the checker PROVES it, by structural induction over the very arms that
+   define it.  One obligation per constructor, and the solver learns nothing new:
+
+     arm 'Nil'    prove  len(Nil) >= 0             from  len(Nil) == 0
+     arm 'Cons'   prove  len(Cons($f, rest)) >= 0  from  len(Cons($f, rest)) == 1 + len(rest)
+                                                   and   len(rest) >= 0            (the IH)
+
+   The induction hypothesis is assumed at the RECURSIVE OCCURRENCE and nowhere else.
+   `len(rest)` is an application of the measure to a FIELD of the constructor just
+   taken apart, and V2.1's structural check has already established that a field is a
+   smaller value — which is exactly what entitles the proof to assume the conclusion
+   *there* and only there.  An induction VC is not handed its own conclusion as an
+   axiom about arbitrary terms; if it were, a bogus declaration would prove itself,
+   and 21_result_unsafe.lark is what that would cost.
+
+   WHAT IT BUYS, AND WHY NOTHING ELSE COULD.  `avg` divides by `n + 1` where
+   `n == len(xs)`, and that is safe for exactly one reason: a length is not negative,
+   so the divisor is at least 1.  The equations cannot say so.  They pin `len` at the
+   constructor terms a program MENTIONS (V2.2), and `xs` here is a PARAMETER — there
+   is no `Cons` and no `Nil` to instantiate at, no equation fires, and for all the
+   logic knows `len(xs)` is −1.  A fact that must survive an OPAQUE argument cannot
+   come from a term; it has to come from the declaration.  V2.3 is what makes the
+   declaration worth believing.
+
+   AND IT IS THE ONE THING V1 KNEW AND ADMITTED IT SHOULD NOT HAVE.  `NONNEG_UF` was
+   a set literal buried in the checker, asserting that `string_length` is never
+   negative — a fact with no proof and no home.  It is deleted.  What replaced it is
+   `refine.PRIMITIVE_AXIOMS`: one table, one line, written in the same language as the
+   declaration above, because String has no constructors, so there is nothing to
+   induct over and its non-negativity must be POSTULATED.  The difference between
+   `len` and `string_length` is now the right one, and it is legible: one is a
+   theorem, the other is an axiom, and the table is the complete list of what is
+   taken on faith.
+
+   Expected output:
+     25 *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : {v : Int | v >= 0} =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+(* The real function, tied to the ghost one by its contract.  This is the only way a
+   measure ever reaches running code: a measure is ghost — it lives in
+   Program.measures, never in Program.decls, so HM has never heard of it and calling
+   it from an expression is an unbound-name error.  `size` is what a program may call;
+   `len` is what a contract may say. *)
+fn size(xs : List(Int)) : {v : Int | v == len(xs)} =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) =>
+      let n = size(rest) in
+      1 + n
+  end
+
+(* The divisor is `n + 1`, and it is non-zero because it is POSITIVE — which needs
+   `len(xs) >= 0` at a term the program did not build. *)
+fn avg(xs : List(Int), total : Int) : Int =
+  let n = size(xs) in
+  total / (n + 1)
+
+fn main(io : IO) : IO =
+  print(io, show(avg(Cons(3, Cons(4, Cons(5, Nil))), 100)))

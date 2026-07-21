@@ -1,0 +1,23 @@
+module BufSafe
+
+(* The contract is written in terms of a function the program itself defines.
+   `size` is uninterpreted to the solver: it knows nothing about what `size`
+   computes, only that equal arguments give equal results.  That is enough,
+   because the guard and the call name the same `size(b)`. *)
+
+type Buf = | Buf of Int
+impl Copy for Buf = {}
+
+fn size(b: Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn take(b: Buf, i: {v: Int | v >= 0 and v < size(b)}) : Int =
+  match b with | Buf(n) => n + i end
+
+fn first(b: Buf) : Int =
+  if size(b) > 0 then take(b, 0) else 0
+
+fn at(b: Buf, i: Int) : Int =
+  if i >= 0 then
+    if i < size(b) then take(b, i) else 0
+  else 0

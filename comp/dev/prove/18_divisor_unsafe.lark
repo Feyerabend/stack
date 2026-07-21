@@ -1,0 +1,34 @@
+(* 18 — the mutant.  The same two divisors with what earned them taken away, and both
+   of them divide by zero when run.
+
+     `x * y`   with x = 0: non-linear, so unnameable — and under the old checker, not an
+               obligation.  Now it is one, and it is unproved: `$k /= 0` with nothing
+               said about `$k`, which is the true answer.
+
+     `h(x)`    with x = -1: a local lambda, unspeakable since V2.2′(c) — and the old
+               checker, not understanding the divisor's type, asked nothing.
+
+   Old verdict (measured, at 5da6252): `ok: 2 obligation(s) proved`, exit 0 — and neither of
+   the two it proved was a division.  It proved `nz`'s body and `nz`'s call, the only honest
+   lines here, and about the two divisions it said nothing at all, because it had nothing to
+   say and no rule telling it to ask anyway.  New verdict: 2 of 4 unproved.
+
+   Note what the mutant is NOT.  Neither of these is an exotic term: a product of two
+   variables is the first thing that leaves a linear fragment, and a `let` bound to a
+   lambda is ordinary Lark.  The old checker was silent on the everyday case. *)
+
+module DivisorUnsafe
+
+fn nz(a : Int) : {v : Int | v != 0} =
+  if a > 0 then a else 1
+
+fn by_contract(x : Int, y : Int) : Int =
+  100 / (x * y)
+
+fn by_guard(x : Int) : Int =
+  let h = fn(a) => a + 1 in
+  let v = h(x) in
+  100 / v
+
+fn main(io : IO) : IO =
+  print(io, show(by_contract(0, 5) + by_guard(0 - 1)))

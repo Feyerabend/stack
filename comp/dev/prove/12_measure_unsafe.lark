@@ -1,0 +1,51 @@
+module MeasureUnsafe
+
+(* The mutant of 12_measure_safe.lark.  Three lies about length, one per hook, and
+   the checker must catch all three — because a verifier that only ever says "proved"
+   has not been tested, it has been admired.
+
+     two()          BUILDING, wrong.  Builds `Cons(a, Nil)` — a list of ONE — under a
+                    contract promising two.  The equations give len == 1, the contract
+                    demands 2, and 1 == 2 is not a thing the solver will sign.
+
+     tail_of_two()  DESTRUCTING, wrong.  Returns the WHOLE list where the contract
+                    promises the tail: len 2 offered as len 1.  Note the Nil arm of
+                    this function is still PROVED, and rightly — it is dead code under
+                    a contract that says the list has two elements, and it was dead in
+                    the safe file too.  A mutant is supposed to break one thing.
+
+     main()         COMPOSITION, wrong.  `head(Nil)` — and the obligation is
+                    `len(Nil) > 0`, which instantiates to `0 > 0`.  This is the one to
+                    read twice: under V1 this program was not *unproved*, it was
+                    unprovable, because `len` was an uninterpreted symbol and an empty
+                    list was, to the logic, a value that might have had any length at
+                    all.  Taking the head of the empty list is the oldest bug in
+                    functional programming, and this is the rung on which Lark starts
+                    to see it. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+fn head(xs : {v : List(Int) | len(v) > 0}) : Int =
+  match xs with
+  | Nil        => 0
+  | Cons(x, _) => x
+  end
+
+fn two(a : Int, b : Int) : {v : List(Int) | len(v) == 2} =
+  Cons(a, Nil)
+
+fn tail_of_two(xs : {v : List(Int) | len(v) == 2})
+             : {v : List(Int) | len(v) == 1} =
+  match xs with
+  | Nil        => Nil
+  | Cons(_, r) => xs
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(head(Nil)))

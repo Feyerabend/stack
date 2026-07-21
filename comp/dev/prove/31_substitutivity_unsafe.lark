@@ -1,0 +1,41 @@
+module SubstUnsafe
+
+(* SUBSTITUTIVITY, WEAPONISED — the mutant, and a demonstration that the ONE guard
+   closes BOTH halves of the lie.  13's mutant needs a NaN; this one needs no NaN at
+   all, only that a Float can be equal to something it differs from.
+
+     if a == b then div(100, tag(a) - tag(b) + 1) else 0
+
+   Read it in a logic where a Float is speakable (an ordinary OTHER value).  The guard
+   `a == b` is now a hypothesis.  `tag` is a function, so congruence closure derives
+   `tag(a) == tag(b)`, hence `tag(a) - tag(b) == 0`, hence the divisor `tag(a) - tag(b)
+   + 1 == 1` — provably non-zero, and the division is PROVED.  This is not the reflexive
+   lie; it is the substitutive one: the checker never says `a == a`, it says `equals
+   have equal images`, which is the other axiom congruence is built from.
+
+   And it is a real regression, not decoration: delete the FLOAT-silence guard in
+   `term_opt` and this file flips from `1 of 2 unproved` to `2 proved` — a false proof,
+   caught here by exactly the same fix that catches 13.  That is the lesson of the
+   interlude in one line: reflexivity (13) and substitutivity (31) are the two doors of
+   congruence closure, and BOTH are shut by a single guard — no Float term is ever
+   built, so `a == b` over Floats is itself unreadable and asserts nothing to close on.
+
+   A note on run time, and it is the honest one.  This particular call, `f(0.0, 0.0)`,
+   does not divide by zero: `tag` is constant and the arguments are the same value, so
+   the divisor is 1.  The danger is not that THIS instance detonates — it is that the
+   checker would have PROVED the division for every `tag`, including a `tag` that reads
+   the sign of a zero, where `a == b` holds and `tag(a) - tag(b)` is `-1`.  The sound
+   answer is to prove nothing about a value whose equality the machine does not share.
+   So the division goes unproved, which is the truth about what the logic can know.
+
+   Expected: 1 of 2 unproved. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn tag(x : Float) : Int = 0
+
+fn f(a : Float, b : Float) : Int =
+  if a == b then div(100, tag(a) - tag(b) + 1) else 0
+
+fn main(io : IO) : IO =
+  print(io, show(f(0.0, 0.0)))

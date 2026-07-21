@@ -1,0 +1,22 @@
+module BoundsSafe
+
+(* Bounds safety on a real Lark primitive.  `string_index` is what the
+   self-hosted lexer calls on every character, so an index proved in range here
+   is a proof about code that exists.
+   
+   The checker cannot compute a string's length.  It does not need to: it carries
+   the SAME opaque term string_length(s) out of the guard and into the call, and
+   sees that the two agree. *)
+
+fn char_at(s: String, i: {v: Int | v >= 0 and v < string_length(s)}) : Int =
+  string_index(s, i)
+
+fn first_char(s: String) : Int =
+  if string_length(s) > 0 then char_at(s, 0) else 0
+
+fn second_char(s: String) : Int =
+  if string_length(s) > 1 then char_at(s, 1) else 0
+
+fn last_char(s: String) : Int =
+  let n = string_length(s) in
+  if n > 0 then char_at(s, n - 1) else 0

@@ -1,0 +1,28 @@
+(* 28 — a min/max axiom the checker cannot STATE, and so must decline, not raise.
+
+   The adversary that speaks `min`/`max` (V2.4c step 3, Part A) found this the moment it
+   could say it.  `min`/`max` carry an axiom about their result — `min(a, b) <= a`, and the
+   rest — instantiated at every application an obligation mentions (step 1).  But an
+   argument the logic cannot NAME is skolemised, and a skolem for a term-level `if` (which
+   is untranslatable, V2.4c step 2) lands at sort OTHER.  The axiom then reads
+   `min($k1, $k2) <= $k1` — an ORDER comparison on a non-integer term — and the solver
+   RAISED `comparison on non-integer terms`, turning a legal program into no answer at all.
+
+   That is the failure `torture` names: the only failing grade is no verdict.  The fix is
+   `_instantiate`'s rule one table over — `result_axioms` now takes the sort context and
+   DROPS an instantiation whose order-comparisons are not both integers, exactly as the
+   solver's own `arith` bucket would demand.  Where the checker cannot speak, it says
+   NOTHING: `min`'s result stays opaque, and the division by it goes honestly unproved.
+
+   Both arguments to `min` here are term-level `if`s (untranslatable), so the axiom cannot
+   fire; the divisor `min(...)` is opaque; `100 / min(...)` is UNPROVED.  It is safe at run
+   time (`min(5, 5)` is 5), which makes it the good half of the pair: the checker is too
+   weak here, and too weak is allowed — RAISING is not. *)
+
+module MinMaxUntranslatable
+
+fn f(x : Int) : Int =
+  100 / min((if x != 0 then x else 1), (if x > 0 then x else 1))
+
+fn main(io : IO) : IO =
+  print(io, int_to_string(f(5)))

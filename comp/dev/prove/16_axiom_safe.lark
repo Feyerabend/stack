@@ -1,0 +1,21 @@
+module AxiomSafe
+
+(* THE CONTROL for the fourth false proof, and the file where the ONE axiom V1 has
+   about an uninterpreted symbol is doing all the work.
+
+   `string_length` is opaque: the logic cannot compute it, and congruence alone rules
+   out nothing — as far as entailment is concerned a string could have length -10, and
+   then `string_length(s) + 4` could be negative and dividing by it would be a bug.
+   The obligation is discharged by `refine.NONNEG_UF`, instantiated at the one term
+   this program mentions: `string_length(s) >= 0`, so the divisor is at least 4.
+
+   The mutant is this file plus one declaration. Keep them side by side: the axiom is
+   true of the PRIMITIVE, and the primitive is what this program calls.
+
+   Checked, and then RUN: string_length("abc") is 3, so it prints 100 / 7 = 14. *)
+
+fn div(a : Int, b : {v : Int | v > 0}) : Int = a / b
+
+fn safe(s : String) : Int = div(100, string_length(s) + 4)
+
+fn main(io : IO) : IO = print(io, show(safe("abc")))

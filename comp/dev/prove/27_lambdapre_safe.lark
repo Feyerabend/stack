@@ -1,0 +1,35 @@
+(* 27 — a lambda's PARAMETER is a contract, and a contract is discharged at the call.
+
+   The ninth false proof, and the sibling of 22.  22 fixed the OTHER half: a lambda's
+   body is code, so `synth` must WALK it — a division inside `fn (a) => 100 / a` now
+   raises its obligation.  But walking the body left a hole one step along.  The body is
+   walked with the parameter bound to WHAT ITS ANNOTATION SAYS: `fn (k : {v | v != 0})`
+   assumes `k != 0` while checking `100 / k`, and so proves it.  That assumption is only
+   honest if every CALL is made to keep it — and `synth` returned `ROpaque()`, which
+   carries no parameter contract, so the application discharged NOTHING:
+
+       let g = fn (k : {v : Int | v != 0}) => 100 / k in g(0)
+
+   reported `ok: 1 obligation(s) proved`, exit 0, and then raised ZeroDivisionError.  The
+   body's `k != 0` was proved from an assumption the call never had to earn.  Found by the
+   adversary, which speaks refined lambdas and then RUNS what the checker proves.
+
+   The fix is the one 22's comment pointed at without taking: a lambda synthesises an
+   `RFun` carrying its parameters' refinements, exactly as a top-level `fn` does, so the
+   existing call-site machinery (`_apply`) raises the precondition obligation — and the
+   body may go on assuming the parameter BECAUSE the caller is now made to establish it.
+
+   Here every call keeps the contract, so the safe file proves and runs: the divisor `k`
+   is non-zero on the ANNOTATION, the caller passes `d` which is non-zero on ITS
+   annotation, and `main` passes the literal 4. *)
+
+module LambdaPreSafe
+
+fn use(d : {v : Int | v != 0}) : Int =
+  (* `g`'s parameter demands a non-zero divisor.  The body proves `100 / k` from that
+     demand; the call `g(d)` is now made to MEET it, and does, because `d` is non-zero. *)
+  let g = fn (k : {v : Int | v != 0}) => 100 / k in
+  g(d)
+
+fn main(io : IO) : IO =
+  print(io, int_to_string(use(4)))

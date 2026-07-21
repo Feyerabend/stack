@@ -1,0 +1,40 @@
+module ShadowUnsafe
+
+(* THE THIRD FALSE PROOF, and the fixture that stops it coming back.  Before the fix
+   `refine.py` reported
+
+     ok: 3 obligation(s) proved
+
+   and then the program divided by zero.
+
+   The mutation is one `let`.  A local function is bound to the name `size` — the name
+   the global `size` already has, and the name `take`'s contract was written against.
+   The logic names its symbols by their SOURCE NAME, so both became the symbol `size`,
+   and congruence closure did what congruence closure does: it identified them.
+
+   So the guard `0 != size(b)` was read as a fact about the global `size` — the one in
+   the contract — when at run time it is a fact about the local one, which returns 1
+   and is not the function `take` was promised anything about.  The obligation for
+   `k` (`k != size(b)`, with k = 0) fell straight out of the guard, and it is FALSE:
+   the real `size(9)` is 0, so `k - size(b)` is 0, and `take` divides 100 by it.
+
+   The fix is the same rule as `13_float` and `14_guard`, one level along: where the
+   checker cannot say what a name means, it says NOTHING.  A UF symbol is a global
+   function and only that; a locally bound function is unspeakable, its applications
+   are no term at all, and a fact stated with one cannot be mistaken for a fact about
+   the other.  The verdict is now `cannot prove` — the guard says nothing, so the
+   contract on `k` is not discharged, which is the truth.
+
+   The bug is real: run this and it raises ZeroDivisionError. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn size(b : Int) : Int = 0
+
+fn take(b : Int, k : {v : Int | v != size(b)}) : Int = div(100, k - size(b))
+
+fn bad(b : Int) : Int =
+  let size = fn(x : Int) => 1 in     (* the shadow.  This `size` is not that `size`. *)
+  if 0 != size(b) then take(b, 0) else 0
+
+fn main(io : IO) : IO = print(io, show(bad(9)))

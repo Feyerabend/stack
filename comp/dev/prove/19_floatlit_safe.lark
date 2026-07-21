@@ -1,0 +1,52 @@
+(* 19 — A FLOAT IS NOT A NUMBER THE LOGIC KNOWS.  (found while fixing 18)
+
+   V2.2′(a) established that a Float must never enter the logic: `x == x` is VALID in the
+   solver and FALSE at run time for NaN, and `0.0 == -0.0` is true at run time while the
+   bit patterns differ — reflexivity and substitutivity, the two things congruence closure
+   is made of, both fail.  So the sort FLOAT exists in order that NO TERM IS EVER BUILT AT
+   IT: about a Float, the checker is silent.
+
+   That fix paved the roads it could see.  A Float PARAMETER is a Float because its type
+   says so; `float_sqrt` returns one because its declaration says so.  But a Float LITERAL
+   says nothing out loud — and `0.0` synthesised to an rtype with no sort, which the checker
+   read as OTHER: the sort of an ordinary opaque value.  An OTHER-sorted value is SPEAKABLE.
+   It can be equated.  Congruence will believe `a == a` about it.  So the one Float the
+   checker could still talk about was the one nobody had to declare.
+
+   Two lines closed it, and they are the same sentence twice:
+
+     - a Float literal is a Float (`Lit(float) => ROpaque(sort=FLOAT)`), and
+     - the sort SURVIVES arithmetic: if either operand is a Float, so is the result.
+
+   The second is the one that bites.  Without it, `0.0 / 0.0` is a Float divided by a Float
+   yielding — an Int?  Which is also how a float division came to look like an INTEGER
+   division and raise a division-by-zero obligation about a value the logic cannot name.
+   One missing sort, two bugs, pointing opposite ways: an obligation invented where none was
+   owed, and a hypothesis believed that was never true.  The second one is the mutant.
+
+   This file is the shape of a Float-safe program: the Floats do what Floats do, the checker
+   says NOTHING about them, and every integer division is proved by an INTEGER fact.  A Bool
+   born from a Float carries no weight in either branch — not in the `then`, and (this is the
+   part that took a false proof to learn) not in the `else`. *)
+
+module FloatLitSafe
+
+(* A float division needs no proof.  `1.0 / 0.0` is not a crash — this machine answers NaN
+   (cek.py: `VFloat(_f32(lf / rf) if rf else nan)`).  It is only the LOGIC that must not
+   pretend to know what came back. *)
+fn ratio(a : Float, b : Float) : Float =
+  a / b
+
+(* NaN, made out of nothing but literals — the one road into the logic that was left open.
+   `nan == nan` is FALSE at run time, so this takes the `else`, so the `else` is the branch
+   that had better be honest. *)
+fn nan_guard(x : Int) : Int =
+  let nan = 0.0 / 0.0 in
+  if nan == nan then 0
+  else if x != 0 then 100 / x
+  else 0
+
+fn main(io : IO) : IO =
+  let io = print(io, show(ratio(7.0, 2.0))) in
+  let io = print(io, show(nan_guard(4))) in
+  print(io, show(nan_guard(0)))

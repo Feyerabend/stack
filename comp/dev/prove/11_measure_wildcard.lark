@@ -1,0 +1,25 @@
+module MeasureWildcard
+
+(* A catch-all arm.
+
+   `| _ => 0` is the most natural thing in the world to write and it cannot mean
+   anything here.  An arm of a measure is an EQUATION INDEXED BY A CONSTRUCTOR;
+   a wildcard names no constructor, so it indexes nothing — to admit it we would
+   have to expand it into "every constructor not mentioned above", which is to say
+   we would have to give the arms an ORDER, and ordered axioms are not axioms.
+
+   The same objection kills `| ys => ...`, for the same reason.  A measure needs
+   exactly one arm per constructor, and both of these are a way of writing fewer.
+
+   Rejected: every arm must be a constructor pattern. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Cons(_, rest) => 1 + len(rest)
+  | _             => 0
+  end
+
+fn zero(xs : List(Int)) : {v : Int | v == 0} =
+  0

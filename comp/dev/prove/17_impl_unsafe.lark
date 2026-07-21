@@ -1,0 +1,51 @@
+(* 17 — the mutant.  It lies once per hook, and under the old checker BOTH lies were
+   invisible: the whole impl block was never walked.
+
+     (1) `weight` returns 0 for a Dime.  The trait promised `{v : Int | v > 0}`, and
+         the arm must now prove it — `0 > 0` is not provable, and the obligation fails
+         AT THE ARM.  This is the half that keeps `share` honest: `share` still proves
+         its division, from the contract, and it is entitled to because the contract is
+         no longer taken on trust.  A lie has to be caught where it is told.
+
+     (2) `split` divides by `w - 1`, and a weight of 1 makes that zero.  Nothing in
+         the trait, nothing in the contract — just an ordinary division inside an impl
+         body, of the kind the checker did not previously know existed.
+
+   Old verdict: `1 of 1 obligation(s) unproved` — and the one it named was `share`'s,
+   the only honest line in the file.  Neither lie was among the obligations, because
+   there were no obligations from inside the impl: the block was not walked.  The
+   program then divides by zero on the CEK machine (`split(Penny)`: w = 1, and 100 / 0).
+   New verdict: 2 of 4 unproved, each lie caught where it is told. *)
+
+module ImplUnsafe
+
+type Coin =
+  | Penny
+  | Dime
+
+impl Copy for Coin = {}
+
+trait Weigh a = {
+  fn weight : a -> {v : Int | v > 0}
+  fn split  : a -> Int
+}
+
+impl Weigh for Coin = {
+  fn weight(c) =
+    match c with
+    | Penny => 1
+    | Dime  => 0
+    end
+
+  fn split(c) =
+    let w = weight(c) in
+    100 / (w - 1)
+
+}
+
+fn share(total : Int, c : Coin) : Int =
+  let w = weight(c) in
+  total / w
+
+fn main(io : IO) : IO =
+  print(io, show(share(50, Dime) + split(Penny)))

@@ -1,0 +1,26 @@
+module FloatSafe
+
+(* The control for 13_float_unsafe.lark, and the point it makes is that the fix cost
+   NOTHING a program was entitled to.
+
+   A Float may not enter the logic (see the mutant for why).  It can still be a
+   parameter, be passed, be returned, be computed with — it simply says nothing to the
+   checker, and nothing is all it ever honestly had to say.  The obligation here is
+   about `d`, an Int, and it is discharged from an Int guard exactly as it was before
+   Floats were shown the door.
+
+   The rule, stated once: a Float is a value the logic may not even NAME.  `OTHER`
+   values (a String, a Buf, a List) may be named but not opened — the logic gets
+   equality and congruence on them and nothing else.  A Float cannot have that much,
+   because the logic's `==` is an equivalence relation and IEEE-754's is not.
+
+   Expected output:
+     25 *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn scale(x : Float, d : Int) : Int =
+  if d != 0 then div(100, d) else 0
+
+fn main(io : IO) : IO =
+  print(io, show(scale(1.5, 4)))

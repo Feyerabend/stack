@@ -1,0 +1,26 @@
+module ProductSafe
+
+(* PROVE V2.0 — refined products, on their own.
+
+   A function that returns a PAIR whose components carry facts, and a caller that
+   destructures the pair and uses those facts.  V1 could not do this: a tuple was
+   opaque, so a pattern like `| (a, b) =>` gave its binders fresh type variables at
+   sort OTHER, and every fact the callee had promised was lost at the comma.
+
+   Nothing here is a toy.  `string_slice` is a real Lark builtin with a real
+   precondition — 0 <= a <= b <= string_length(s) — and slicing a string from 0 to
+   its own length is the operation that cannot fail and that V1 nevertheless could
+   not prove once the bounds arrived in a pair.
+
+   Note what the components mention.  Each one relates itself to `s`, the ARGUMENT;
+   neither mentions the other.  That is the whole of the dependency V2.0 provides,
+   and it is enough, because a product's components are computed from a common
+   input and not from each other. *)
+
+fn bounds(s : String) : ({v : Int | v == 0}, {v : Int | v == string_length(s)}) =
+  (0, string_length(s))
+
+fn whole(s : String) : String =
+  match bounds(s) with
+  | (a, b) => string_slice(s, a, b)
+  end

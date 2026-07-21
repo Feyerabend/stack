@@ -1,0 +1,37 @@
+module MeasureClash
+
+(* A measure that shares its name with a function.
+
+   In Lark these are two different things in two different worlds: `len` the
+   function is code that runs, `len` the measure is a symbol that erases.  In the
+   LOGIC they are one name.  The measure's equations would be asserted about `len`,
+   and every predicate that says `len(xs)` would silently mean the other one — the
+   one whose body nobody checked against those equations.  Here the two even
+   disagree, which is the point: the function counts, and the measure would claim
+   the count is always zero.  Assert both and the checker will prove that a list of
+   three elements is empty.
+
+   There is a real feature hiding behind this rejection — a measure that is
+   *implemented* by a function, with the equations discharged against the body as
+   proof obligations rather than assumed.  That is a design, not an oversight, and
+   V2 does not need it: nothing in Lark wants to run `len` at all.  Until someone
+   does, one name means one thing.
+
+   Rejected: same name as a function or value. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+fn len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 0
+  end
+
+fn zero(xs : List(Int)) : {v : Int | v == 0} =
+  0
