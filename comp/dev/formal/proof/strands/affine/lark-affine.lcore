@@ -1,0 +1,151 @@
+-- lark-affine.lcore  —  STRAND: prove AFFINITY, the A in "Lambda Affine Resource
+-- Kernel."  denot / solver / vdeep all answer *what does a refinement derivation
+-- buy?*  This strand answers a DIFFERENT question: *what does Lark's affine
+-- discipline buy?*  Affinity is the property that names the language and the one
+-- first-class mechanism the metatheory still only *describes* (lark-formal.tex
+-- lists "affine ownership" among the features "not yet formalized").  Here it is
+-- mechanized.  See strands/affine/PLAN.md.
+--
+-- THE PROPERTY (affine soundness).  A well-typed program consumes each affine
+-- binding AT MOST ONCE.  We model a context that flows THROUGH a derivation:
+-- a linear context flows in, the used slot is spent, a context flows out.  App
+-- THREADS the context left-to-right (so once a slot is spent by the function it
+-- is gone before the argument runs — no sharing).  The summit `affine_sound`
+-- reads the invariant back out: the output context is the input with used slots
+-- flipped avail→spent, and a spent slot NEVER returns to avail (no double use,
+-- no resurrection).
+--
+-- Piped AFTER lark-typing.lcore, so it reuses Ty / TInt / TFn.  It needs nothing
+-- from the refinement layer: affinity is orthogonal to refinements, exactly as it
+-- is orthogonal to type *safety*.  This is a resource property, standing on its own.
+--
+-- WHY FUNCTIONAL, NOT INDUCTIVE.  `Consumed` and `SlotLe` are RECURSIVE PREDICATES
+-- (`indrec ... : Type`, the same house style as denot's TyD / DEnv), not inductive
+-- relations.  That is a deliberate wall-dodge: reflexivity, transitivity, and
+-- tail-projection then become ordinary structural recursions — no `Id`, no `J`, no
+-- inversion of an indexed inductive family.  The move that carried denot/vdeep
+-- through — *recurse on structure, build in the target* — is what carries this.
+--
+-- SCOPE THIS RUNG (named boundaries, declared not discovered):
+--   * The resource skeleton stands ALONE — it is not yet indexed by `Expr Γ τ`.
+--     Bridging LCtx to the intrinsic `Ctx`/`Expr` of lark-typing.lcore (an erasure
+--     layer) is the next rung, not this one.  The teeth below do not depend on it:
+--     the double-use forge is refused at the resource level.
+--   * AFFINE, not linear: a bound variable may be used zero or one times (ALam
+--     does NOT require its binder consumed).  Lark is affine; the proof targets
+--     what the language has.
+--   * STRUCTURAL, not operational: this proves the discipline is internally sound
+--     (linear consumption of the context), not the run-time no-reuse — that would
+--     need `Step` in scope and risks the DESCEND wall.  M2's structural soundness
+--     is the honest floor, the same way denot stops at soundness-not-adequacy.
+
+
+-- ══ M0 ══════════════════════════════════════════════════════════════════════
+-- The linear context: a list of slots, each slot a resource that is either still
+-- AVAILABLE (avail t) or already SPENT (spent t).  Consumption flips avail→spent
+-- in place; the list shape (a de Bruijn spine, mirroring Ctx in lark-typing.lcore)
+-- never changes length.
+
+data Usage : Type where avail : Ty → Usage ; spent : Ty → Usage
+
+data LCtx : Type where lnil : LCtx ; lcons : Usage → LCtx → LCtx
+
+-- SlotLe u1 u2 : "u2 is a legal successor of u1 under consumption."  A slot may
+-- stay as it is, or go avail→spent; it may NEVER go spent→avail (resurrection).
+-- The ONE forbidden transition, spent→avail, is the only `Empty` cell — that lone
+-- Empty is what the whole no-double-use argument stands on.
+--   avail ↦ avail : Unit      avail ↦ spent : Unit
+--   spent ↦ avail : EMPTY     spent ↦ spent : Unit
+:let SlotLe = (\u1. \u2. indrec Usage (\_. Usage → Type : Usage → Type_1) (\t1. \w. indrec Usage (\_. Type : Usage → Type_1) (\t2. Unit : Ty → Type) (\t2. Unit : Ty → Type) w : Π(t1 : Ty). Π(_ : Usage). Type) (\t1. \w. indrec Usage (\_. Type : Usage → Type_1) (\t2. Empty : Ty → Type) (\t2. Unit : Ty → Type) w : Π(t1 : Ty). Π(_ : Usage). Type) u1 u2 : Usage → Usage → Type)
+-- computes: SlotLe (avail TInt) (spent TInt) ↦ Unit ; SlotLe (spent TInt) (avail TInt) ↦ Empty
+:i SlotLe (avail TInt) (spent TInt)
+:i SlotLe (spent TInt) (avail TInt)
+
+-- slotle_refl : every slot is a legal successor of itself (avail↦avail, spent↦spent).
+:let slotle_refl = (\u. indrec Usage (\u1. SlotLe u1 u1 : Usage → Type) (\t1. star : Π(t1 : Ty). SlotLe (avail t1) (avail t1)) (\t1. star : Π(t1 : Ty). SlotLe (spent t1) (spent t1)) u : Π(u : Usage). SlotLe u u)
+:i slotle_refl
+
+-- slotle_avail : an available slot can precede ANY successor (avail↦avail and
+-- avail↦spent are both Unit).  Needed because `SlotLe (avail t) w` stays stuck on
+-- an abstract w — the kernel will not reduce an indrec whose scrutinee is a variable.
+:let slotle_avail = (\t1. \w. indrec Usage (\w1. SlotLe (avail t1) w1 : Usage → Type) (\t2. star : Π(t2 : Ty). SlotLe (avail t1) (avail t2)) (\t2. star : Π(t2 : Ty). SlotLe (avail t1) (spent t2)) w : Π(t1 : Ty). Π(w : Usage). SlotLe (avail t1) w)
+:i slotle_avail
+
+-- slotle_trans : consumption transitions compose.  The only way to reach `avail`
+-- as u3 is if u2 was avail, and the only way SlotLe (spent) u2 holds is u2 = spent
+-- — so spent→…→avail is impossible, discharged by `abort` on the lone Empty cell.
+:let slotle_trans = (\u1. \u2. \u3. \h1. \h2. indrec Usage (\u1'. Π(_ : SlotLe u1' u2). Π(_ : SlotLe u2 u3). SlotLe u1' u3 : Usage → Type) (\t1. \h1a. \h2a. slotle_avail t1 u3 : Π(t1 : Ty). Π(_ : SlotLe (avail t1) u2). Π(_ : SlotLe u2 u3). SlotLe (avail t1) u3) (\t1. \h1a. \h2a. indrec Usage (\u2'. Π(_ : SlotLe (spent t1) u2'). Π(_ : SlotLe u2' u3). SlotLe (spent t1) u3 : Usage → Type) (\t2. \hb1. \hb2. abort (SlotLe (spent t1) u3) hb1 : Π(t2 : Ty). Π(_ : SlotLe (spent t1) (avail t2)). Π(_ : SlotLe (avail t2) u3). SlotLe (spent t1) u3) (\t2. \hb1. \hb2. hb2 : Π(t2 : Ty). Π(_ : SlotLe (spent t1) (spent t2)). Π(_ : SlotLe (spent t2) u3). SlotLe (spent t1) u3) u2 h1a h2a : Π(t1 : Ty). Π(_ : SlotLe (spent t1) u2). Π(_ : SlotLe u2 u3). SlotLe (spent t1) u3) u1 h1 h2 : Π(u1 : Usage). Π(u2 : Usage). Π(u3 : Usage). Π(_ : SlotLe u1 u2). Π(_ : SlotLe u2 u3). SlotLe u1 u3)
+:i slotle_trans
+
+
+-- ══ M2 (the invariant) ══════════════════════════════════════════════════════
+-- Consumed g1 g2 : "g2 is g1 after some slots were spent."  Same length; each slot
+-- related by SlotLe; a spent slot stays spent.  This IS the no-double-use
+-- invariant, stated once and read back out by affine_sound.  Built exactly like
+-- denot's DEnv: an indrec over the first context returning `LCtx → Type`, whose
+-- body destructs the second.
+--   lnil vs lnil : Unit ; length mismatch : Empty
+--   lcons u1 g1' vs lcons u2 g2' : Σ (SlotLe u1 u2) (Consumed g1' g2')
+:let Consumed = (\g1. \g2. indrec LCtx (\_. LCtx → Type : LCtx → Type_1) (\g2'. indrec LCtx (\_. Type : LCtx → Type_1) Unit (\u2. \w'. \_. Empty : Π(u2 : Usage). Π(w' : LCtx). Π(_ : Type). Type) g2' : Π(_ : LCtx). Type) (\u1. \g1t. \ih. \g2'. indrec LCtx (\_. Type : LCtx → Type_1) Empty (\u2. \w'. \_. Σ(_ : SlotLe u1 u2). ih w' : Π(u2 : Usage). Π(w' : LCtx). Π(_ : Type). Type) g2' : Π(u1 : Usage). Π(g1t : LCtx). Π(_ : LCtx → Type). Π(_ : LCtx). Type) g1 g2 : LCtx → LCtx → Type)
+:i Consumed lnil lnil
+:i Consumed (lcons (avail TInt) lnil) (lcons (spent TInt) lnil)
+
+-- consumed_refl : a context consumes into itself (nothing spent).  ALit's soundness.
+:let consumed_refl = (\g. indrec LCtx (\g1. Consumed g1 g1 : LCtx → Type) star (\u. \g1. \ih. (slotle_refl u, ih) : Π(u : Usage). Π(g1 : LCtx). Π(_ : Consumed g1 g1). Consumed (lcons u g1) (lcons u g1)) g : Π(g : LCtx). Consumed g g)
+:i consumed_refl
+
+-- consumed_trans : threading composes.  AApp's soundness.  Structural recursion on
+-- the first witness, casing the second context (then the third) at each slot; the
+-- spent→spent→avail path is impossible and `abort`ed on a length or Empty cell.
+:let consumed_trans = (\a. \b. \c. \p. \q. indrec LCtx (\a'. Π(b1 : LCtx). Π(c1 : LCtx). Π(_ : Consumed a' b1). Π(_ : Consumed b1 c1). Consumed a' c1 : LCtx → Type) (\b1. \c1. \p1. \q1. indrec LCtx (\b'. Π(_ : Consumed lnil b'). Π(_ : Consumed b' c1). Consumed lnil c1 : LCtx → Type) (\pa. \qa. qa : Π(_ : Consumed lnil lnil). Π(_ : Consumed lnil c1). Consumed lnil c1) (\ub. \bt. \_. \pa. \qa. abort (Consumed lnil c1) pa : Π(ub : Usage). Π(bt : LCtx). Π(_ : Π(_ : Consumed lnil bt). Π(_ : Consumed bt c1). Consumed lnil c1). Π(_ : Consumed lnil (lcons ub bt)). Π(_ : Consumed (lcons ub bt) c1). Consumed lnil c1) b1 p1 q1 : Π(b1 : LCtx). Π(c1 : LCtx). Π(_ : Consumed lnil b1). Π(_ : Consumed b1 c1). Consumed lnil c1) (\u1. \a1. \iha. \b1. \c1. \p1. \q1. indrec LCtx (\b'. Π(_ : Consumed (lcons u1 a1) b'). Π(_ : Consumed b' c1). Consumed (lcons u1 a1) c1 : LCtx → Type) (\pa. \qa. abort (Consumed (lcons u1 a1) c1) pa : Π(_ : Consumed (lcons u1 a1) lnil). Π(_ : Consumed lnil c1). Consumed (lcons u1 a1) c1) (\u2. \b1t. \_. \pa. \qa. indrec LCtx (\c'. Π(_ : Consumed (lcons u2 b1t) c'). Consumed (lcons u1 a1) c' : LCtx → Type) (\qb. abort (Consumed (lcons u1 a1) lnil) qb : Π(_ : Consumed (lcons u2 b1t) lnil). Consumed (lcons u1 a1) lnil) (\u3. \c1t. \_. \qb. (slotle_trans u1 u2 u3 (fst pa) (fst qb), iha b1t c1t (snd pa) (snd qb)) : Π(u3 : Usage). Π(c1t : LCtx). Π(_ : Π(_ : Consumed (lcons u2 b1t) c1t). Consumed (lcons u1 a1) c1t). Π(_ : Consumed (lcons u2 b1t) (lcons u3 c1t)). Consumed (lcons u1 a1) (lcons u3 c1t)) c1 qa : Π(u2 : Usage). Π(b1t : LCtx). Π(_ : Π(_ : Consumed (lcons u1 a1) b1t). Π(_ : Consumed b1t c1). Consumed (lcons u1 a1) c1). Π(_ : Consumed (lcons u1 a1) (lcons u2 b1t)). Π(_ : Consumed (lcons u2 b1t) c1). Consumed (lcons u1 a1) c1) b1 p1 q1 : Π(u1 : Usage). Π(a1 : LCtx). Π(_ : Π(b1 : LCtx). Π(c1 : LCtx). Π(_ : Consumed a1 b1). Π(_ : Consumed b1 c1). Consumed a1 c1). Π(b1 : LCtx). Π(c1 : LCtx). Π(_ : Consumed (lcons u1 a1) b1). Π(_ : Consumed b1 c1). Consumed (lcons u1 a1) c1) a b c p q : Π(a : LCtx). Π(b : LCtx). Π(c : LCtx). Π(_ : Consumed a b). Π(_ : Consumed b c). Consumed a c)
+:i consumed_trans
+
+
+-- ══ M0 (variable use) ═══════════════════════════════════════════════════════
+-- UseVar g t g' : de Bruijn variable reference that CONSUMES.  It witnesses that g
+-- has an AVAILABLE slot of type t, and that spending it yields exactly g'.  The
+-- teeth: `uv_here` demands the front slot be `avail` — a second reference to an
+-- already-spent slot has no `uv_here` to build, so double use is unconstructible.
+data UseVar : LCtx → Ty → LCtx → Type where uv_here : Π(t : Ty). Π(g : LCtx). UseVar (lcons (avail t) g) t (lcons (spent t) g) ; uv_there : Π(u : Usage). Π(g : LCtx). Π(t : Ty). Π(g' : LCtx). Π(_ : UseVar g t g'). UseVar (lcons u g) t (lcons u g')
+
+-- usevar_consumed : a variable use is a legal consumption.  AVar's soundness.
+:let usevar_consumed = (\g. \t. \g'. \uv. indrec UseVar (\g1. \t1. \g1'. \_. Consumed g1 g1' : Π(g1 : LCtx). Π(t1 : Ty). Π(g1' : LCtx). Π(_ : UseVar g1 t1 g1'). Type) (\t1. \g1. (star, consumed_refl g1) : Π(t1 : Ty). Π(g1 : LCtx). Consumed (lcons (avail t1) g1) (lcons (spent t1) g1)) (\u1. \g1. \t1. \g1'. \sub. \ih. (slotle_refl u1, ih) : Π(u1 : Usage). Π(g1 : LCtx). Π(t1 : Ty). Π(g1' : LCtx). Π(_ : UseVar g1 t1 g1'). Π(_ : Consumed g1 g1'). Consumed (lcons u1 g1) (lcons u1 g1')) uv : Π(g : LCtx). Π(t : Ty). Π(g' : LCtx). Π(_ : UseVar g t g'). Consumed g g')
+:i usevar_consumed
+
+
+-- ══ M1 ══════════════════════════════════════════════════════════════════════
+-- HasA g t g' : the affine judgment, context-in / context-out.
+--   AVar : a consuming variable use.
+--   ALit : a literal consumes nothing — the context passes through untouched.
+--   AApp : THREAD.  The function runs on g leaving gm; the argument runs on gm
+--          leaving g'.  A slot spent by the function is already gone when the
+--          argument runs — that is how sharing is forbidden.
+--   ALam : bind a fresh AVAILABLE slot, check the body, drop the slot.  Its final
+--          usage `u` may be avail (unused — fine, affine) or spent (used once).
+data HasA : LCtx → Ty → LCtx → Type where AVar : Π(g : LCtx). Π(t : Ty). Π(g' : LCtx). Π(_ : UseVar g t g'). HasA g t g' ; ALit : Π(g : LCtx). Π(t : Ty). HasA g t g ; AApp : Π(g : LCtx). Π(gm : LCtx). Π(g' : LCtx). Π(a : Ty). Π(b : Ty). Π(_ : HasA g (TFn a b) gm). Π(_ : HasA gm a g'). HasA g b g' ; ALam : Π(g : LCtx). Π(g' : LCtx). Π(a : Ty). Π(b : Ty). Π(u : Usage). Π(_ : HasA (lcons (avail a) g) b (lcons u g')). HasA g (TFn a b) g'
+
+
+-- ══ M2 (the spine) ══════════════════════════════════════════════════════════
+-- affine_sound : HasA g t g' → Consumed g g'.  By indrec HasA — recursion on the
+-- DERIVATION, landing in structural facts about LCtx.  Wall-free.  Each rule one
+-- line: AVar ↦ usevar_consumed ; ALit ↦ consumed_refl ; AApp ↦ consumed_trans of
+-- the two threaded halves ; ALam ↦ the tail of the body's consumption (snd — the
+-- fresh binder slot is dropped, whatever its final usage).  The summit: the output
+-- context is the input with used slots spent, and nothing is ever spent twice.
+:let affine_sound = (\g. \t. \g'. \ha. indrec HasA (\g1. \t1. \g1'. \_. Consumed g1 g1' : Π(g1 : LCtx). Π(t1 : Ty). Π(g1' : LCtx). Π(_ : HasA g1 t1 g1'). Type) (\g1. \t1. \g1'. \uv. usevar_consumed g1 t1 g1' uv : Π(g1 : LCtx). Π(t1 : Ty). Π(g1' : LCtx). Π(_ : UseVar g1 t1 g1'). Consumed g1 g1') (\g1. \t1. consumed_refl g1 : Π(g1 : LCtx). Π(t1 : Ty). Consumed g1 g1) (\g1. \gm. \g1'. \a. \b. \f. \ihf. \x. \ihx. consumed_trans g1 gm g1' ihf ihx : Π(g1 : LCtx). Π(gm : LCtx). Π(g1' : LCtx). Π(a : Ty). Π(b : Ty). Π(_ : HasA g1 (TFn a b) gm). Π(_ : Consumed g1 gm). Π(_ : HasA gm a g1'). Π(_ : Consumed gm g1'). Consumed g1 g1') (\g1. \g1'. \a. \b. \u. \body. \ihbody. snd ihbody : Π(g1 : LCtx). Π(g1' : LCtx). Π(a : Ty). Π(b : Ty). Π(u : Usage). Π(_ : HasA (lcons (avail a) g1) b (lcons u g1')). Π(_ : Consumed (lcons (avail a) g1) (lcons u g1')). Consumed g1 g1') ha : Π(g : LCtx). Π(t : Ty). Π(g' : LCtx). Π(_ : HasA g t g'). Consumed g g')
+:i affine_sound
+
+
+-- ══ The payoff: a linear use ACCEPTED, distinct resources threaded ═══════════
+-- Lark:  (x : Int) used once.  Context [avail Int] ⟶ [spent Int].
+:let use_once = (AVar (lcons (avail TInt) lnil) TInt (lcons (spent TInt) lnil) (uv_here TInt lnil) : HasA (lcons (avail TInt) lnil) TInt (lcons (spent TInt) lnil))
+:i use_once
+-- its soundness computes a Consumed witness (the slot went avail→spent):
+:let use_once_sound = (affine_sound (lcons (avail TInt) lnil) TInt (lcons (spent TInt) lnil) use_once : Consumed (lcons (avail TInt) lnil) (lcons (spent TInt) lnil))
+:i use_once_sound
+
+-- Lark:  f x   with f : Int -> Int at slot 0, x : Int at slot 1 — TWO DISTINCT
+-- resources, each consumed exactly once, threaded left to right.
+-- g  = [avail (Int->Int), avail Int] ; gm = [spent (Int->Int), avail Int] ; g' = [spent, spent]
+:let apply_lin = (AApp (lcons (avail (TFn TInt TInt)) (lcons (avail TInt) lnil)) (lcons (spent (TFn TInt TInt)) (lcons (avail TInt) lnil)) (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)) TInt TInt (AVar (lcons (avail (TFn TInt TInt)) (lcons (avail TInt) lnil)) (TFn TInt TInt) (lcons (spent (TFn TInt TInt)) (lcons (avail TInt) lnil)) (uv_here (TFn TInt TInt) (lcons (avail TInt) lnil))) (AVar (lcons (spent (TFn TInt TInt)) (lcons (avail TInt) lnil)) TInt (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)) (uv_there (spent (TFn TInt TInt)) (lcons (avail TInt) lnil) TInt (lcons (spent TInt) lnil) (uv_here TInt lnil))) : HasA (lcons (avail (TFn TInt TInt)) (lcons (avail TInt) lnil)) TInt (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)))
+:i apply_lin

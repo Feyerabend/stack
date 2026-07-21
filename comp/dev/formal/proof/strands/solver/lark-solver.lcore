@@ -1,0 +1,110 @@
+-- lark-solver.lcore — STRAND B: PROVE THE SOLVER (interval / lower-bound fragment).
+--
+-- Everywhere in the V3 proof, the refinement SOLVER is *modelled, not proven*:
+-- `SubBase` (lark-refine.lcore:207) takes the predicate implication
+--   imp : Π n. IsTrue (p n) → IsTrue (q n)
+-- as a GIVEN hypothesis — "if the solver says p ⊆ q, subtyping is sound." This
+-- strand discharges that hypothesis for the fragment the spine actually uses:
+-- lower-bound (interval) refinements {n | n ≥ c}. We build a real DECISION
+-- procedure, prove it sound, and let its verdict CONSTRUCT the `SubBase` premise —
+-- so for this fragment the seam is closed: the solver is proven, not assumed.
+--
+-- Piped after the metatheory + lark-refine.lcore. See strands/solver/PLAN.md.
+--
+-- ── absurd : ex falso (Empty is eliminated by the kernel's `abort`) ────────────
+:let absurd = (\C. \e. abort C e : Π(C : Type). Π(_ : Empty). C)
+
+-- ── leB : the DECISION PROCEDURE — a boolean ≤ ────────────────────────────────
+-- leB a b decides a ≤ b:  leB 0 _ = true; leB (S a) 0 = false; leB (S a)(S b)=leB a b.
+-- The spine's predicates ARE this: ge1 ≡ \n. leB 1 n, ge2 ≡ \n. leB 2 n (n ≥ c is
+-- c ≤ n), definitionally — so certificates below land at the real fixtures.
+:let leB = (\a. natrec (\_. Π(_ : Nat). Bool : Π(_ : Nat). Type) (\b. true : Π(_ : Nat). Bool) (\a1. \ih. \b. natrec (\_. Bool : Π(_ : Nat). Type) false (\b1. \_. ih b1 : Π(_ : Nat). Π(_ : Bool). Bool) b : Π(_ : Nat). Π(_ : Π(_ : Nat). Bool). Π(_ : Nat). Bool) a : Π(_ : Nat). Π(_ : Nat). Bool)
+
+-- ── The decision procedure is CORRECT: leB reflects the inductive relation Le ──
+-- leB_sound : a true verdict yields a real proof.  leB_complete : the converse.
+-- Together they pin `leB a b = true` ⇔ `Le a b`, so the boolean check is exactly
+-- the order.  (This is the heart of a solver-soundness proof: verdict ⇒ truth.)
+:let leB_sound = (\a. natrec (\a1. Π(b : Nat). Π(_ : IsTrue (leB a1 b)). Le a1 b : Π(a1 : Nat). Type) (\b. \_. LeZ b : Π(b : Nat). Π(_ : IsTrue (leB zero b)). Le zero b) (\a1. \ih. \b. natrec (\b1. Π(_ : IsTrue (leB (succ a1) b1)). Le (succ a1) b1 : Π(b1 : Nat). Type) (\h. absurd (Le (succ a1) zero) h : Π(_ : IsTrue (leB (succ a1) zero)). Le (succ a1) zero) (\b1. \_. \h. LeS a1 b1 (ih b1 h) : Π(b1 : Nat). Π(_ : Π(_ : IsTrue (leB (succ a1) b1)). Le (succ a1) b1). Π(_ : IsTrue (leB (succ a1) (succ b1))). Le (succ a1) (succ b1)) b : Π(a1 : Nat). Π(_ : Π(b : Nat). Π(_ : IsTrue (leB a1 b)). Le a1 b). Π(b : Nat). Π(_ : IsTrue (leB (succ a1) b)). Le (succ a1) b) a : Π(a : Nat). Π(b : Nat). Π(_ : IsTrue (leB a b)). Le a b)
+:let leB_complete = (\a. \b. \h. indrec Le (\a1. \b1. \_. IsTrue (leB a1 b1) : Π(a1 : Nat). Π(b1 : Nat). Le a1 b1 → Type) (\n. star : Π(n : Nat). IsTrue (leB zero n)) (\m. \n. \h1. \ih. ih : Π(m : Nat). Π(n : Nat). Π(h1 : Le m n). Π(ih : IsTrue (leB m n)). IsTrue (leB (succ m) (succ n))) h : Π(a : Nat). Π(b : Nat). Π(_ : Le a b). IsTrue (leB a b))
+
+-- ── entail_ge : the SOLVER'S ENTAILMENT for the interval fragment ──────────────
+-- To prove {n | n≥c1} ⊆ {n | n≥c2} the solver decides ONE comparison, c2 ≤ c1,
+-- then transports:  n≥c1  and  c2≤c1  give  n≥c2  by le_trans (the existing
+-- metatheory lemma).  This IS the SubBase premise, produced from a decision.
+:let entail_ge = (\c1. \c2. \dec. \n. \h. leB_complete c2 n (le_trans c2 c1 (leB_sound c2 c1 dec) n (leB_sound c1 n h)) : Π(c1 : Nat). Π(c2 : Nat). Π(_ : IsTrue (leB c2 c1)). Π(n : Nat). Π(_ : IsTrue (leB c1 n)). IsTrue (leB c2 n))
+
+-- ── sub_ge : the solver EMITS a subtyping certificate from a decided bound ─────
+:let sub_ge = (\c1. \c2. \dec. SubBase (\n. leB c1 n) (\n. leB c2 n) (entail_ge c1 c2 dec) : Π(c1 : Nat). Π(c2 : Nat). Π(_ : IsTrue (leB c2 c1)). Sub TInt (RInt (\n. leB c1 n)) (RInt (\n. leB c2 n)))
+
+-- smoke: {n|n≥2} <: {n|n≥1}, DECIDED (leB 1 2 = true, star witnesses the verdict).
+:let sub_ge_21 = (sub_ge (succ (succ zero)) (succ zero) star : Sub TInt (RInt (\n. leB (succ (succ zero)) n)) (RInt (\n. leB (succ zero) n)))
+:i sub_ge_21
+
+-- THE SEAM CLOSED ON THE REAL FIXTURES: leB 2 ≡ ge2 and leB 1 ≡ ge1 definitionally,
+-- so the SAME decision produces `Sub TInt rge2 rge1` — the very certificate the V3
+-- proof took on faith — and it flows into the existing operational soundness map.
+:let sub_fixture = (sub_ge (succ (succ zero)) (succ zero) star : Sub TInt rge2 rge1)
+:let sub_fixture_sem = (sub_sound_v TInt rge2 rge1 sub_fixture : Π(v : Expr empty TInt). Π(_ : SemV TInt rge2 v). SemV TInt rge1 v)
+:i sub_fixture
+
+-- ── S2 : CONJUNCTIONS of lower bounds — normalization to the tightest bound ────
+-- A real bound-solver takes a SET of constraints and keeps their max. nmax picks
+-- the larger; `norm` folds a list of atoms to the tightest lower bound; a
+-- conjunction predicate is `\n. leB (norm cs) n`. Entailment between conjunctions
+-- reduces to comparing normalized bounds — no new soundness proof, just sub_ge.
+:let nmax = (\a. \b. boolrec (\_. Nat : Π(_ : Bool). Type) b a (leB a b) : Π(_ : Nat). Π(_ : Nat). Nat)
+data NList : Type where nnil : NList ; ncons : Π(_ : Nat). Π(_ : NList). NList
+:let norm = (\cs. indrec NList (\_. Nat : Π(_ : NList). Type) zero (\c. \rest. \ih. nmax c ih : Π(c : Nat). Π(rest : NList). Π(ih : Nat). Nat) cs : Π(_ : NList). Nat)
+:let pconj = (\cs. \n. leB (norm cs) n : Π(_ : NList). Π(_ : Nat). Bool)
+:let sub_conj = (\cs. \ds. \dec. sub_ge (norm cs) (norm ds) dec : Π(cs : NList). Π(ds : NList). Π(_ : IsTrue (leB (norm ds) (norm cs))). Sub TInt (RInt (pconj cs)) (RInt (pconj ds)))
+
+-- smoke: the constraint set {n≥3, n≥1, n≥2} normalizes to n≥3 and entails {n≥1, n≥2}.
+:let cs312 = (ncons (succ (succ (succ zero))) (ncons (succ zero) (ncons (succ (succ zero)) nnil)) : NList)
+:let ds12 = (ncons (succ zero) (ncons (succ (succ zero)) nnil) : NList)
+:let sub_conj_smoke = (sub_conj cs312 ds12 star : Sub TInt (RInt (pconj cs312)) (RInt (pconj ds12)))
+:i sub_conj_smoke
+
+-- ══ CC : CONGRUENCE-CLOSURE SOUNDNESS — the UF half of QF-UFLIA ═════════════════
+-- The interval fragment above is the LIA (arithmetic) half. QF-UFLIA's other half
+-- is the equational theory of UNINTERPRETED FUNCTIONS, decided by congruence
+-- closure. Here we prove that half sound: model first-order terms, define the
+-- closure CC computes as an inductive derivation `Cong`, and show EVERY derivation
+-- maps to a semantic equality `Id` that holds in EVERY model of the axioms. So CC,
+-- like leB, cannot certify a false equality — its verdict entails truth.
+
+-- ── Tm : first-order terms over one binary application + Nat-indexed atoms ──────
+data Tm : Type where tv : Π(_ : Nat). Tm ; tapp : Π(_ : Tm). Π(_ : Tm). Tm
+
+-- ── eval : interpret a term in ANY model (a domain D, an atom valuation, an app) ─
+-- The universal quantification over D/val/app below IS "in every model" — the
+-- content of soundness. eval (tapp a b) = app (eval a) (eval b) definitionally.
+:let eval = (\D. \val. \app. \t. indrec Tm (\_. D : Π(_ : Tm). Type) (\n. val n : Π(n : Nat). D) (\a. \iha. \b. \ihb. app iha ihb : Π(a : Tm). Π(iha : D). Π(b : Tm). Π(ihb : D). D) t : Π(D : Type). Π(val : Π(_ : Nat). D). Π(app : Π(_ : D). Π(_ : D). D). Π(_ : Tm). D)
+
+-- ── Ax : the hypothesis set handed to the solver. One axiom: f(a) = a ──────────
+-- (f ≡ tv 0, a ≡ tv 1; f a ≡ tapp (tv 0) (tv 1)). A closed, concrete E — the
+-- classic congruence example. Every model that SATISFIES this is what we quantify.
+data Ax : Tm → Tm → Type where axfa : Ax (tapp (tv zero) (tv (succ zero))) (tv (succ zero))
+
+-- ── Cong : the congruence closure — exactly the rules union-find+congruence apply ─
+-- reflexivity, symmetry, transitivity, the congruence rule over application, and
+-- the axiom leaves. These are ALL the moves CC makes; nothing here can build a
+-- false equation (that is what the soundness theorem below turns into a proof).
+data Cong : Tm → Tm → Type where cAx : Π(a : Tm). Π(b : Tm). Ax a b → Cong a b ; cRefl : Π(a : Tm). Cong a a ; cSym : Π(a : Tm). Π(b : Tm). Cong a b → Cong b a ; cTrans : Π(a : Tm). Π(b : Tm). Π(c : Tm). Cong a b → Cong b c → Cong a c ; cApp : Π(a : Tm). Π(a2 : Tm). Π(b : Tm). Π(b2 : Tm). Cong a a2 → Cong b b2 → Cong (tapp a b) (tapp a2 b2)
+
+-- ── cc_sound : the SOLVER-SOUNDNESS theorem for the equational half ─────────────
+-- If the model satisfies every axiom (hs), then every closure-derived equation
+-- holds in it. By indrec on the derivation: cAx ↦ hs; cRefl ↦ refl; cSym ↦ sym;
+-- cTrans ↦ trans; cApp ↦ ap2 on `app` (application respects equality) — the whole
+-- proof is that Id is an equivalence and a congruence, which the kernel gives us.
+:let cc_sound = (\D. \val. \app. \hs. \a0. \b0. \d. indrec Cong (\a1. \b1. \_. Id D (eval D val app a1) (eval D val app b1) : Π(a1 : Tm). Π(b1 : Tm). Cong a1 b1 → Type) (\x. \y. \ax. hs x y ax : Π(x : Tm). Π(y : Tm). Π(ax : Ax x y). Id D (eval D val app x) (eval D val app y)) (\x. refl (eval D val app x) : Π(x : Tm). Id D (eval D val app x) (eval D val app x)) (\x. \y. \cxy. \ih. sym D (eval D val app x) (eval D val app y) ih : Π(x : Tm). Π(y : Tm). Π(cxy : Cong x y). Π(ih : Id D (eval D val app x) (eval D val app y)). Id D (eval D val app y) (eval D val app x)) (\x. \y. \z. \cxy. \ihxy. \cyz. \ihyz. trans D (eval D val app x) (eval D val app y) (eval D val app z) ihxy ihyz : Π(x : Tm). Π(y : Tm). Π(z : Tm). Π(cxy : Cong x y). Π(ihxy : Id D (eval D val app x) (eval D val app y)). Π(cyz : Cong y z). Π(ihyz : Id D (eval D val app y) (eval D val app z)). Id D (eval D val app x) (eval D val app z)) (\x. \x2. \y. \y2. \cxx. \ihxx. \cyy. \ihyy. ap2 D D D app (eval D val app x) (eval D val app x2) (eval D val app y) (eval D val app y2) ihxx ihyy : Π(x : Tm). Π(x2 : Tm). Π(y : Tm). Π(y2 : Tm). Π(cxx : Cong x x2). Π(ihxx : Id D (eval D val app x) (eval D val app x2)). Π(cyy : Cong y y2). Π(ihyy : Id D (eval D val app y) (eval D val app y2)). Id D (eval D val app (tapp x y)) (eval D val app (tapp x2 y2))) d : Π(D : Type). Π(val : Π(_ : Nat). D). Π(app : Π(_ : D). Π(_ : D). D). Π(hs : Π(a : Tm). Π(b : Tm). Π(_ : Ax a b). Id D (eval D val app a) (eval D val app b)). Π(a0 : Tm). Π(b0 : Tm). Π(_ : Cong a0 b0). Id D (eval D val app a0) (eval D val app b0))
+
+-- ── smoke: derive f(f a) = a — the closure step CC actually performs ────────────
+-- f a = a is the axiom; congruence lifts it under f to f(f a) = f a; transitivity
+-- with the axiom again gives f(f a) = a. A genuine two-step congruence-closure run.
+:let d_fa = (cAx (tapp (tv zero) (tv (succ zero))) (tv (succ zero)) axfa : Cong (tapp (tv zero) (tv (succ zero))) (tv (succ zero)))
+:let d_ffa_fa = (cApp (tv zero) (tv zero) (tapp (tv zero) (tv (succ zero))) (tv (succ zero)) (cRefl (tv zero)) d_fa : Cong (tapp (tv zero) (tapp (tv zero) (tv (succ zero)))) (tapp (tv zero) (tv (succ zero))))
+:let cc_smoke = (cTrans (tapp (tv zero) (tapp (tv zero) (tv (succ zero)))) (tapp (tv zero) (tv (succ zero))) (tv (succ zero)) d_ffa_fa d_fa : Cong (tapp (tv zero) (tapp (tv zero) (tv (succ zero)))) (tv (succ zero)))
+-- the payoff: in EVERY model satisfying f a = a, f(f a) = a — the verdict is true.
+:let cc_smoke_sem = (\D. \val. \app. \hs. cc_sound D val app hs (tapp (tv zero) (tapp (tv zero) (tv (succ zero)))) (tv (succ zero)) cc_smoke : Π(D : Type). Π(val : Π(_ : Nat). D). Π(app : Π(_ : D). Π(_ : D). D). Π(hs : Π(a : Tm). Π(b : Tm). Π(_ : Ax a b). Id D (eval D val app a) (eval D val app b)). Id D (eval D val app (tapp (tv zero) (tapp (tv zero) (tv (succ zero))))) (eval D val app (tv (succ zero))))
+:i cc_sound
+:i cc_smoke_sem

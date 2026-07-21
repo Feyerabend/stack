@@ -1,0 +1,46 @@
+-- vec.lam  —  length-indexed vectors (extended library)
+-- Load with:  :load "lib/vec.lam"
+-- Requires:   lib/nat.lam  (for plus, used in vconcat)
+--
+-- indrec's motive (: Pi(n:Nat). Vec A n -> Type) and its vcons case carry
+-- explicit annotations so the checker accepts each definition. The vnil case is
+-- checked against the motive and needs none.
+
+import "nat.lam"
+
+-- Parameterised by element type A, indexed by length n.
+data Vec (A : Type) : Nat -> Type where \
+  vnil  : Vec A zero ; \
+  vcons : Pi(n : Nat). A -> Vec A n -> Vec A (succ n)
+
+-- Return the length (forget the vector).
+let vlength : Pi(A : Type). Pi(n : Nat). Vec A n -> Nat = \
+  \A. \n. \v. \
+    indrec Vec ((\n. \v. Nat) : Pi(n : Nat). Vec A n -> Type) \
+      zero \
+      ((\n. \a. \v. \ih. succ ih) \
+         : Pi(n : Nat). Pi(a : A). Pi(v : Vec A n). Nat -> Nat) \
+      v
+
+-- Map a function over every element.
+let vmap : Pi(A : Type). Pi(B : Type). Pi(n : Nat). \
+           (A -> B) -> Vec A n -> Vec B n = \
+  \A. \B. \n. \f. \v. \
+    indrec Vec ((\n. \v. Vec B n) : Pi(n : Nat). Vec A n -> Type) \
+      (vnil B) \
+      ((\n. \a. \v. \ih. vcons B n (f a) ih) \
+         : Pi(n : Nat). Pi(a : A). Pi(v : Vec A n). Vec B n -> Vec B (succ n)) \
+      v
+
+-- Concatenate two vectors.
+-- The index of the result is (plus m n), which reduces definitionally
+-- because plus recurses on m, matching the recursion on the first vector.
+let vconcat : Pi(A : Type). Pi(m : Nat). Pi(n : Nat). \
+              Vec A m -> Vec A n -> Vec A (plus m n) = \
+  \A. \m. \n. \u. \v. \
+    indrec Vec ((\m. \u. Vec A (plus m n)) : Pi(m : Nat). Vec A m -> Type) \
+      v \
+      ((\m. \a. \u. \ih. vcons A (plus m n) a ih) \
+         : Pi(m : Nat). Pi(a : A). Pi(u : Vec A m). \
+           Vec A (plus m n) -> Vec A (plus (succ m) n)) \
+      u

@@ -1,0 +1,16 @@
+-- controls.lcore — NEGATIVE controls for the denotational strand.  Piped AFTER
+-- lark-denot.lcore; every :let here is a DELIBERATE LIE and MUST be refused.
+-- Run with strands/denot/run-controls.sh — it counts error lines, expects 4.
+--
+-- (1) payload forge — the subset demands real evidence.  `\_. false` is false at
+--     n2, so IsTrue ((\_. false) n2) = Empty; star cannot inhabit it.  REFUSED.
+:let ctl_payload = (RT_Int empty star (\_. false) n2 star : HasR empty star TInt (RInt (\_. false)) (ELitInt empty n2))
+-- (2) variance forge — the identity built at {ge2}→{ge2} is NOT a {ge1}→{ge2}
+--     map (that would strengthen a weaker witness for free).  Domain differs.
+:let ctl_variance = (fundD empty star (TFn TInt TInt) (RFn TInt TInt rge2 rge2) (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt))) d_id star : Π(_ : RTyD TInt rge1). RTyD TInt rge2)
+-- (3) subtyping direction forge — imp21 proves ge2⇒ge1, so it CANNOT witness
+--     {ge1}⊆{ge2}.  SubBase demands the implication the other way.  REFUSED.
+:let ctl_subdir = (sub_denot TInt rge1 rge2 (SubBase ge1 ge2 imp21) : Π(_ : RTyD TInt rge1). RTyD TInt rge2)
+-- (4) erasure / index forge — RInt ge2 : RTy TInt cannot index RTyD at a TFn.
+--     The type index is load-bearing: ill-indexed refinements do not denote.
+:let ctl_erasure = (RTyD (TFn TInt TInt) (RInt ge2) : Type)

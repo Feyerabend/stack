@@ -1,0 +1,17 @@
+-- strand vdeep — negative controls. Concatenated AFTER lark-vdeep.lcore; every
+-- :let here is a LIE and MUST be refused. A PASS = exactly 8 error lines (4×2).
+-- Reuses the lark-refine fixtures ge1/ge2/rge1/rge2/rc12/rc21/imp21/sub_fn21/
+-- gF/rgF/eF/d_sub, plus the strand's elab/elabSub/mhere.
+
+-- (1) wrong result refinement: d_sub's subtyping lands at ge1 ({n≥1}); claiming the
+--     elaborated term inhabits MSub ge2 ({n≥2}) forges a tighter bound than proven.
+:let ctl_wrong_result = (elab gF rgF TInt rge1 eF d_sub : MTm (ctxD gF rgF) (MSub ge2))
+-- (2) variance forge: sub_fn21 proves rc12 ⊆ rc21; feeding it where elabSub expects
+--     Sub ... rc21 rc12 flips the subtyping direction of a function type.
+:let ctl_variance = (elabSub (TFn TInt TInt) rc21 rc12 sub_fn21 : Π(g : MCtx). Π(_ : MTm g (MFun (MSub ge2) (MSub ge1))). MTm g (MFun (MSub ge1) (MSub ge2)))
+-- (3) false implication (the solver's teeth, in object-theory form): SubBase ge1 ge2
+--     demands {n≥1} ⊆ {n≥2}; imp21 only witnesses the true {n≥2} ⊆ {n≥1}.
+:let ctl_badimp = (elabSub TInt rge1 rge2 (SubBase ge1 ge2 imp21) : Π(g : MCtx). Π(_ : MTm g (MSub ge1)). MTm g (MSub ge2))
+-- (4) index forge: mhere at (mcons MBool mnil) has head MBool; annotating its head as
+--     MNat forges a de-Bruijn variable pointing at the wrong slot type.
+:let ctl_var_forge = (mhere mnil MBool : MVar (mcons MNat mnil) MBool)

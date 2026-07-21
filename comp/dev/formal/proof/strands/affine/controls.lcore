@@ -1,0 +1,23 @@
+-- controls.lcore — NEGATIVE controls for the affine strand.  Piped AFTER
+-- lark-affine.lcore; every :let here is a DELIBERATE LIE and MUST be refused.
+-- `make affine-controls` counts error lines and expects exactly 8 (4 × 2).
+-- A PASS = the kernel refused ALL of them; that is what stops affine_sound from
+-- being vacuous — the discipline forbids exactly the programs it should.
+--
+-- (1) DOUBLE-USE forge — consume an already-SPENT slot.  `uv_here` demands the
+--     front slot be `avail`; forging its input to `spent` (a slot used once
+--     already) has no witness.  This is the core no-double-use, refused atomically.
+:let ctl_double = (uv_here TInt lnil : UseVar (lcons (spent TInt) lnil) TInt (lcons (spent TInt) lnil))
+-- (2) NON-CONSUMING var forge — an `AVar` whose output still holds the slot
+--     `avail`.  Using a variable MUST spend it; a use that leaves it available
+--     would licence a later second use.  uv_here outputs `spent`, not `avail`.
+:let ctl_nonconsume = (uv_here TInt lnil : UseVar (lcons (avail TInt) lnil) TInt (lcons (avail TInt) lnil))
+-- (3) RESURRECTION forge — a `Consumed` that turns a spent slot back to avail.
+--     Consumed (spent)(avail) = Σ (SlotLe (spent)(avail)) … = Σ Empty …, and
+--     `star` is no such pair.  A spent resource cannot come back to life.
+:let ctl_resurrect = (star : Consumed (lcons (spent TInt) lnil) (lcons (avail TInt) lnil))
+-- (4) THREADED-REUSE forge — the payoff teeth.  After `f x` spends BOTH slots
+--     (context [spent, spent]), reach for the argument slot again: `uv_here` at
+--     slot 1 demands it be `avail`, but threading left it `spent`.  Sharing one
+--     affine value across two consumers is unconstructible.
+:let ctl_reuse = (AVar (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)) TInt (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)) (uv_there (spent (TFn TInt TInt)) (lcons (spent TInt) lnil) TInt (lcons (spent TInt) lnil) (uv_here TInt lnil)) : HasA (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)) TInt (lcons (spent (TFn TInt TInt)) (lcons (spent TInt) lnil)))

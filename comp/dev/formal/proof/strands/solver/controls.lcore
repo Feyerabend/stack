@@ -1,0 +1,33 @@
+-- controls.lcore — NEGATIVE controls for the solver strand. Piped AFTER
+-- lark-solver.lcore; every :let is a DELIBERATE LIE and MUST be refused.
+-- Run with `make solver-controls` — it counts error lines, expects 16 (8 × 2):
+-- controls (1)–(4) are the interval (LIA) fragment, (5)–(8) the congruence
+-- closure (UF) fragment.
+--
+-- (1) false-entailment forge — the solver CANNOT certify {n≥1} ⊆ {n≥2} (false:
+--     n=1 is in the first, not the second). sub_ge 1 2 needs a witness of
+--     leB 2 1 = false = Empty. No verdict, no certificate. REFUSED.
+:let ctl_false_entail = (sub_ge (succ zero) (succ (succ zero)) star : Sub TInt (RInt (\n. leB (succ zero) n)) (RInt (\n. leB (succ (succ zero)) n)))
+-- (2) forged soundness — leB_sound only speaks when the verdict is true; feeding
+--     it a false verdict (leB 2 1) demands star : Empty. REFUSED.
+:let ctl_forge_sound = (leB_sound (succ (succ zero)) (succ zero) star : Le (succ (succ zero)) (succ zero))
+-- (3) reversed certificate — sub_ge 2 1 proves {n≥2} ⊆ {n≥1}; claiming it is the
+--     REVERSE {n≥1} ⊆ {n≥2} (rge1 ⊆ rge2) is a type mismatch. REFUSED.
+:let ctl_reversed = (sub_ge (succ (succ zero)) (succ zero) star : Sub TInt rge1 rge2)
+-- (4) conjunction weakening forge — a set forcing n≥3 cannot entail one forcing
+--     only... the reverse: sub_conj ds12 cs312 asks {n≥2} ⊆ {n≥3}, needs
+--     leB (norm cs312) (norm ds12) = leB 3 2 = false = Empty. REFUSED.
+:let ctl_conj_weaken = (sub_conj ds12 cs312 star : Sub TInt (RInt (pconj ds12)) (RInt (pconj cs312)))
+-- (5) reflexivity forge — cRefl only yields Cong a a; claiming Cong (tv 0) (tv 1)
+--     (distinct atoms equal with no axiom) is an index mismatch. REFUSED.
+:let ctl_cc_refl_forge = (cRefl (tv zero) : Cong (tv zero) (tv (succ zero)))
+-- (6) congruence forge — cApp on two reflexivities gives Cong (tapp a b)(tapp a b);
+--     claiming the result equates tapp (tv 0)(tv 1) with tapp (tv 1)(tv 1) is a
+--     mismatch — congruence cannot manufacture an unequal head. REFUSED.
+:let ctl_cc_app_mismatch = (cApp (tv zero) (tv zero) (tv (succ zero)) (tv (succ zero)) (cRefl (tv zero)) (cRefl (tv (succ zero))) : Cong (tapp (tv zero) (tv (succ zero))) (tapp (tv (succ zero)) (tv (succ zero))))
+-- (7) axiom forge — the ONLY axiom is axfa : Ax (f a) a; using it as a proof of
+--     Ax (tv 0)(tv 1) to equate f with a invents a hypothesis. REFUSED.
+:let ctl_cc_ax_forge = (cAx (tv zero) (tv (succ zero)) axfa : Cong (tv zero) (tv (succ zero)))
+-- (8) transitivity gap — cTrans needs a shared middle; feeding Cong (tv 0)(tv 0)
+--     where Cong (tv 0)(tv 1) is required breaks the chain. REFUSED.
+:let ctl_cc_trans_mid = (cTrans (tv zero) (tv (succ zero)) (tv (succ (succ zero))) (cRefl (tv zero)) (cRefl (tv (succ zero))) : Cong (tv zero) (tv (succ (succ zero))))

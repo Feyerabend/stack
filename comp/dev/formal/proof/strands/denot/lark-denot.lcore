@@ -1,0 +1,80 @@
+-- lark-denot.lcore  —  STRAND A: the DENOTATIONAL model (the road not taken in
+-- PROVE.md §4 V3 decision (b)).  Interpret refinement types as lcore TYPES and
+-- prove soundness by RECURSION ON THE DERIVATION — never eliminating the
+-- operational relation.  This structurally dodges the DESCEND wall (positive
+-- `Step` inversion / Ctx-refinement inside `indrec Expr`): there is no syntax to
+-- invert here, only lcore's own Nat / → / Σ.
+--
+-- Piped AFTER the metatheory + lark-refine.lcore, so it reuses Ty, RTy, Sub,
+-- IsTrue, and the ge1/ge2/imp21/rge2/rid22 fixtures.  See strands/denot/PLAN.md.
+--
+-- ── TyD : the bare semantic domain ────────────────────────────────────────────
+-- TyD t  interprets a Lark type as an lcore type: Int↦Nat, Bool↦Bool, functions
+-- as lcore functions, the unmodelled scalars as Unit (same stance the metatheory
+-- takes on Float/Str).  Large elimination on Ty; motive lands in Type_1.
+:let TyD = (\t. indrec Ty (\t1. Type : Π(t1 : Ty). Type_1) Nat Unit Bool Unit Unit (\a. \iha. \b. \ihb. Π(_ : iha). ihb : Π(a : Ty). Π(iha : Type). Π(b : Ty). Π(ihb : Type). Type) t : Π(t : Ty). Type)
+-- computes: TyD TInt ↦ Nat, TyD TBool ↦ Bool, TyD (TFn TInt TBool) ↦ (Nat → Bool)
+:i TyD TInt
+:i TyD (TFn TInt TBool)
+
+-- ── RTyD : the REFINED denotation ─────────────────────────────────────────────
+-- RTyD t r  interprets a refinement type as an lcore type: {v:Int|p} ↦ the
+-- SUBSET Σ(n:Nat). IsTrue(p n); a refined function ↦ a dependent map from the
+-- refined domain to the refined codomain.  indrec RTy.
+:let RTyD = (\t. \r. indrec RTy (\t1. \r1. Type : Π(t1 : Ty). Π(r1 : RTy t1). Type_1) (\p. Σ(n : Nat). IsTrue (p n) : Π(p : Π(_ : Nat). Bool). Type) (Bool : Type) (\a. \b. \ra. \iha. \rb. \ihb. Π(_ : iha). ihb : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(iha : Type). Π(rb : RTy b). Π(ihb : Type). Type) r : Π(t : Ty). Π(r : RTy t). Type)
+-- computes: RTyD TInt (RInt ge2) ↦ Σ(n:Nat). IsTrue (ge2 n); rid22 ↦ a map
+:i RTyD TInt rge2
+:i RTyD (TFn TInt TInt) rid22
+
+-- ── sub_denot : SUBTYPING SOUNDNESS, denotationally ───────────────────────────
+-- Sub t r r'  ⇒  RTyD t r → RTyD t r'.  The whole point, and DRAMATICALLY cleaner
+-- than the operational sub_sound_v: no step index, no SemEV, no EApp.
+--   SubBase: reindex the subset witness through the predicate implication `imp`.
+--   SubFn:   contravariant domain (ihd), covariant codomain (ihc) — the classic
+--            f ↦ λx. ihc (f (ihd x)).  Both IHs fire, opposite directions.
+:let sub_denot = (\t. \r. \r'. \s. indrec Sub (\t1. \r1. \r1'. \_. Π(_ : RTyD t1 r1). RTyD t1 r1' : Π(t1 : Ty). Π(r1 : RTy t1). Π(r1' : RTy t1). Π(_ : Sub t1 r1 r1'). Type) (\p. \q. \imp. \x. (fst x, imp (fst x) (snd x)) : Π(p : Π(_ : Nat). Bool). Π(q : Π(_ : Nat). Bool). Π(imp : Π(n : Nat). Π(_ : IsTrue (p n)). IsTrue (q n)). Π(_ : RTyD TInt (RInt p)). RTyD TInt (RInt q)) (\a. \b. \ra. \ra'. \rb. \rb'. \sd. \ihd. \sc. \ihc. \f. \x. ihc (f (ihd x)) : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(ra' : RTy a). Π(rb : RTy b). Π(rb' : RTy b). Π(sd : Sub a ra' ra). Π(ihd : Π(_ : RTyD a ra'). RTyD a ra). Π(sc : Sub b rb rb'). Π(ihc : Π(_ : RTyD b rb). RTyD b rb'). Π(f : RTyD (TFn a b) (RFn a b ra rb)). Π(x : RTyD a ra'). RTyD b rb') s : Π(t : Ty). Π(r : RTy t). Π(r' : RTy t). Π(_ : Sub t r r'). Π(_ : RTyD t r). RTyD t r')
+:i sub_denot
+
+-- smoke: {Int|ge2} ⊆ {Int|ge1} lifts to a map Σn.IsTrue(ge2 n) → Σn.IsTrue(ge1 n)
+:let sub21_denot = (sub_denot TInt rge2 rge1 (SubBase ge2 ge1 imp21) : Π(_ : RTyD TInt rge2). RTyD TInt rge1)
+:i sub21_denot
+
+-- ── DEnv : the denotation ENVIRONMENT ─────────────────────────────────────────
+-- DEnv g rg  is a telescope of refined denotations, one RTyD per context slot —
+-- the denotational counterpart of GoodEnv, but valued in RTyD, NOT SemV, and
+-- carrying NO operational SemCtx alongside.  indrec Ctx: empty ↦ Unit, an
+-- extension ↦ Σ(the head's RTyD) (the tail's DEnv).
+:let DEnv = (\g. indrec Ctx (\g1. Π(_ : RCtx g1). Type : Ctx → Type_1) (\rg. Unit : Π(_ : RCtx empty). Type) (\t. \g1. \ih. \rg. Σ(_ : RTyD t (fst rg)). ih (snd rg) : Π(t : Ty). Π(g1 : Ctx). Π(_ : Π(_ : RCtx g1). Type). Π(_ : RCtx (ext t g1)). Type) g : Π(g : Ctx). Π(_ : RCtx g). Type)
+:i DEnv
+
+-- denot_lookup : project the v-th refined denotation out of a DEnv.  indrec Var,
+-- mirroring glookup but with no GoodEnv premise — a plain fst / recurse-on-snd.
+:let denot_lookup = (\g. \t. \v. indrec Var (\g1. \t1. \v1. Π(rg : RCtx g1). Π(env : DEnv g1 rg). RTyD t1 (rlookup g1 t1 v1 rg) : Π(g1 : Ctx). Π(t1 : Ty). Π(v1 : Var g1 t1). Type) (\g1. \t1. \rg. \env. fst env : Π(g1 : Ctx). Π(t1 : Ty). Π(rg : RCtx (ext t1 g1)). Π(env : DEnv (ext t1 g1) rg). RTyD t1 (rlookup (ext t1 g1) t1 (here g1 t1) rg)) (\g1. \t1. \s. \v1. \ih. \rg. \env. ih (snd rg) (snd env) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Π(v1 : Var g1 t1). Π(_ : Π(rg : RCtx g1). Π(env : DEnv g1 rg). RTyD t1 (rlookup g1 t1 v1 rg)). Π(rg : RCtx (ext s g1)). Π(env : DEnv (ext s g1) rg). RTyD t1 (rlookup (ext s g1) t1 (there g1 t1 s v1) rg)) v : Π(g : Ctx). Π(t : Ty). Π(v : Var g t). Π(rg : RCtx g). Π(env : DEnv g rg). RTyD t (rlookup g t v rg))
+
+-- ── fundD : THE FUNDAMENTAL LEMMA, denotationally ─────────────────────────────
+--   HasR g rg t r e  →  DEnv g rg  →  RTyD t r
+-- By indrec HasR.  Contrast this with the operational `fund` (lark-refine.lcore
+-- line 527) — that one threads a step budget, steps_append, lift_app1/2, J
+-- transports, and needs the entire Pitch-2 substitution-lemma pile (lb, fuse,
+-- lam_app_cert, let_cert) for RT_Lam / RT_Let.  Here EVERY case is one line and
+-- the two λ-introduction rules are the payoff:
+--   RT_Lam ↦ \env. \x. ihbody (x, env)          -- no substitution lemma
+--   RT_Let ↦ \env. ihbody (ihval env, env)       -- no σ-fusion
+--   RT_App ↦ \env. ihf env (ihx env)             -- lcore application IS the model
+--   RT_If  ↦ \env. boolrec _ (ihth env) (ihel env) (ihc env)
+--   RT_Sub ↦ \env. sub_denot ... (ihd env)       -- the subtyping map, above
+:let fundD = (\g. \rg. \t. \r. \e. \d. indrec HasR (\g1. \rg1. \t1. \r1. \e1. \_. Π(env : DEnv g1 rg1). RTyD t1 r1 : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(e1 : Expr g1 t1). Π(_ : HasR g1 rg1 t1 r1 e1). Type) (\g1. \rg1. \p. \n. \ev. \env. (n, ev) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(p : Π(_ : Nat). Bool). Π(n : Nat). Π(ev : IsTrue (p n)). Π(env : DEnv g1 rg1). RTyD TInt (RInt p)) (\g1. \rg1. \b1. \env. b1 : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(b1 : Bool). Π(env : DEnv g1 rg1). RTyD TBool RBool) (\g1. \rg1. \t1. \v1. \env. denot_lookup g1 t1 v1 rg1 env : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(v1 : Var g1 t1). Π(env : DEnv g1 rg1). RTyD t1 (rlookup g1 t1 v1 rg1)) (\g1. \rg1. \a. \b. \ra. \rb. \f. \x. \df. \ihf. \dx. \ihx. \env. ihf env (ihx env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(f : Expr g1 (TFn a b)). Π(x : Expr g1 a). Π(df : HasR g1 rg1 (TFn a b) (RFn a b ra rb) f). Π(ihf : Π(env : DEnv g1 rg1). RTyD (TFn a b) (RFn a b ra rb)). Π(dx : HasR g1 rg1 a ra x). Π(ihx : Π(env : DEnv g1 rg1). RTyD a ra). Π(env : DEnv g1 rg1). RTyD b rb) (\g1. \rg1. \t1. \r1. \c. \th. \el. \dc. \ihc. \dth. \ihth. \del. \ihel. \env. boolrec (\_. RTyD t1 r1 : Π(_ : Bool). Type) (ihth env) (ihel env) (ihc env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(c : Expr g1 TBool). Π(th : Expr g1 t1). Π(el : Expr g1 t1). Π(dc : HasR g1 rg1 TBool RBool c). Π(ihc : Π(env : DEnv g1 rg1). RTyD TBool RBool). Π(dth : HasR g1 rg1 t1 r1 th). Π(ihth : Π(env : DEnv g1 rg1). RTyD t1 r1). Π(del : HasR g1 rg1 t1 r1 el). Π(ihel : Π(env : DEnv g1 rg1). RTyD t1 r1). Π(env : DEnv g1 rg1). RTyD t1 r1) (\g1. \rg1. \t1. \r1. \r2. \e1. \d1. \ihd. \s1. \env. sub_denot t1 r1 r2 s1 (ihd env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(r2 : RTy t1). Π(e1 : Expr g1 t1). Π(d1 : HasR g1 rg1 t1 r1 e1). Π(ihd : Π(env : DEnv g1 rg1). RTyD t1 r1). Π(s1 : Sub t1 r1 r2). Π(env : DEnv g1 rg1). RTyD t1 r2) (\g1. \rg1. \a. \b. \ra. \rb. \body. \dbody. \ihbody. \env. \x. ihbody (x, env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(body : Expr (ext a g1) b). Π(dbody : HasR (ext a g1) (ra, rg1) b rb body). Π(ihbody : Π(env : DEnv (ext a g1) (ra, rg1)). RTyD b rb). Π(env : DEnv g1 rg1). RTyD (TFn a b) (RFn a b ra rb)) (\g1. \rg1. \a. \b. \ra. \rb. \val. \body. \dval. \ihval. \dbody. \ihbody. \env. ihbody (ihval env, env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(val : Expr g1 a). Π(body : Expr (ext a g1) b). Π(dval : HasR g1 rg1 a ra val). Π(ihval : Π(env : DEnv g1 rg1). RTyD a ra). Π(dbody : HasR (ext a g1) (ra, rg1) b rb body). Π(ihbody : Π(env : DEnv (ext a g1) (ra, rg1)). RTyD b rb). Π(env : DEnv g1 rg1). RTyD b rb) d : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(r : RTy t). Π(e : Expr g t). Π(_ : HasR g rg t r e). Π(env : DEnv g rg). RTyD t r)
+:i fundD
+
+-- ── Smoke tests: the denotation computes ──────────────────────────────────────
+-- closed literal 2 at {ge2}: denotes the subset element (2, evidence).
+:let fundD_lit = (fundD empty star TInt rge2 (ELitInt empty n2) d_lit star : RTyD TInt rge2)
+:i fundD_lit
+
+-- THE λ-SHOWCASE: the identity on {Int|ge2}, built with RT_Lam / RT_Var, denotes
+-- the identity map on the subset Σ(n).IsTrue(ge2 n).  RT_Lam is a ONE-LINER here;
+-- the operational proof needed the entire Pitch-2 substitution lemma for this.
+:let dbody_id = (RT_Var (ext TInt empty) (rge2, star) TInt (here empty TInt) : HasR (ext TInt empty) (rge2, star) TInt rge2 (EVar (ext TInt empty) TInt (here empty TInt)))
+:let d_id = (RT_Lam empty star TInt TInt rge2 rge2 (EVar (ext TInt empty) TInt (here empty TInt)) dbody_id : HasR empty star (TFn TInt TInt) (RFn TInt TInt rge2 rge2) (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt))))
+:let fundD_id = (fundD empty star (TFn TInt TInt) (RFn TInt TInt rge2 rge2) (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt))) d_id star : Π(_ : RTyD TInt rge2). RTyD TInt rge2)
+:i fundD_id
