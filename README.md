@@ -80,9 +80,10 @@ and the machine-checked soundness proof in [`lark/formal/proof/`](./lark/formal/
 
 ### Continued in the repository `comp` ..
 
-The printed book is now finished, but the companion book still lives.
-It is for you to download as a PDF. The first part is about a
-self-hosting Lark: Lark compiling Lark, the ultimate self-test, now complete.
-Next come optimizations. They were mentioned only briefly in the book, at a
-theoretical level; here they are worked out in practice. Finally, affine and
-refinement types make their entrancem in relation to proofs.
+The printed book is now finished, but the independent companion book
+still lives. It is for you to __download__ for __free__ as a [PDF](./comp/book/).
+The first part is about a self-hosting Lark: Lark compiling Lark,
+the ultimate self-test, now complete. Next come optimizations.
+They were mentioned only briefly in the book, at a theoretical level;
+here they are worked out in practice. Finally, affine and refinement
+types make their entrance in relation to proofs ..
