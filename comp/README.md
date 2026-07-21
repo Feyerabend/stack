@@ -48,11 +48,11 @@ The development tree is laid out by *history*, not by strand. Five folders:
               in Parts I and II is "the port agrees with 07".
               See dev/07/README.md and ORACLE.md.
 
-```
-dev/08/       the refinement-checker fork of the oracle — 07's type checker grown
+* [dev/08/](./dev/dev/08/) --
+             the refinement-checker fork of the oracle — 07's type checker grown
               until it discharges refinement obligations ({v:Int | v > 0} and the
               like).  The subject of Part III.  See dev/08/README.md.
-
+```
 dev/self/     the self-hosted compiler: the oracle rewritten in Lark itself, file
               for file (lex.lark, parse.lark, infer.lark, cek.lark, ...), plus the
               optimizer modules and the differential harnesses that hold it against
