@@ -1,4 +1,7 @@
 
+
+![Lark Cover](cover.png)
+
 ## Lark Builds Itself
 
 > *Lark Builds Itself: Self-Hosting, Optimization, and Proof
@@ -31,5 +34,3 @@ The only prerequisite is some programming — comfort with recursion and with th
 a program can be data. No compiler theory or logic is assumed; every term is defined
 where it first appears. A companion repository provides three self-contained, runnable
 trees, one per part.
-
-![Lark Cover](cover.png)
