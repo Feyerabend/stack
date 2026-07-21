@@ -149,7 +149,7 @@ free: same guard, same obligation, still proved, still runs, still prints its an
 `16_axiom_safe` is the sharpest of them — it is the *unsafe* file minus one declaration,
 and it still proves, because the axiom still holds of the function it was written about.
 
-## The three the adversary found (2026-07-14)
+### The three the adversary found
 
 The four above were found by hand, by going looking for them. `18_divisor`, `19_floatlit`
 and `20_condition` were found by __`08/tests/adversary.py`__ — which generates random
