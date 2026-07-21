@@ -80,7 +80,7 @@ and the machine-checked soundness proof in [`lark/formal/proof/`](./lark/formal/
 
 ### Continued in the repository `comp` ..
 
-The printed book is now finished, but the independent companion book
+The printed book is now finished, but the *independent companion* book
 still lives. It is for you to __download__ for __free__ as a [PDF](./comp/book/).
 The first part is about a self-hosting Lark: Lark compiling Lark,
 the ultimate self-test, now complete. Next come optimizations.
