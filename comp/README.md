@@ -52,12 +52,13 @@ The development tree is laid out by *history*, not by strand. Five folders:
              the refinement-checker fork of the oracle — 07's type checker grown
               until it discharges refinement obligations ({v:Int | v > 0} and the
               like).  The subject of Part III.  See dev/08/README.md.
-```
-dev/self/     the self-hosted compiler: the oracle rewritten in Lark itself, file
+
+* [dev/self/](./dev/self/) --
+              the self-hosted compiler: the oracle rewritten in Lark itself, file
               for file (lex.lark, parse.lark, infer.lark, cek.lark, ...), plus the
               optimizer modules and the differential harnesses that hold it against
               07.  The subject of Part I and Part II.
-
+```
 dev/prove/    the verification corpus: 75 refinement fixtures, each a safe program
               paired with a mutant carrying one real bug.  See dev/prove/README.md.
 
