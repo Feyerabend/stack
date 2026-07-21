@@ -52,18 +52,21 @@ The development tree is laid out by *history*, not by strand. Five folders:
              the refinement-checker fork of the oracle — 07's type checker grown
               until it discharges refinement obligations ({v:Int | v > 0} and the
               like).  The subject of Part III.  See dev/08/README.md.
-```
-dev/self/     the self-hosted compiler: the oracle rewritten in Lark itself, file
+
+* [dev/self/](./dev/self/) --
+              the self-hosted compiler: the oracle rewritten in Lark itself, file
               for file (lex.lark, parse.lark, infer.lark, cek.lark, ...), plus the
               optimizer modules and the differential harnesses that hold it against
               07.  The subject of Part I and Part II.
 
-dev/prove/    the verification corpus: 75 refinement fixtures, each a safe program
+* [dev/prove/](./dev/prove/) --
+              the verification corpus: 75 refinement fixtures, each a safe program
               paired with a mutant carrying one real bug.  See dev/prove/README.md.
 
-dev/formal/   the machine-checked metatheory: formal/proof/ holds the lcore proof
+* [dev/formal/](./dev/formal/) --
+              the machine-checked metatheory: formal/proof/ holds the lcore proof
               kernel and the type-soundness proof of Lark, checked by lcore itself.
-```
+
 
 ### `repo/` — the reader's tree (generated)
 
@@ -89,12 +92,12 @@ Lark subject), `samples/`, `harness/` (the differentials), a `Makefile`, and a
 From the top level, `make help` lists every target:
 
 ```sh
-make repo     # regenerate repo/ from dev/            (tools/mkrepo.py)
-make check    # fail if repo/ drifted, then run the book's path & ref lints
-make book     # build the book PDF (runs the lints, then tectonic)
-make prove    # run the refinement checker over all 75 fixtures
-make formal   # check the Lark soundness proof
-make test     # check + prove + formal
+make repo      # regenerate repo/ from dev/            (tools/mkrepo.py)
+make check     # fail if repo/ drifted, then run the book's path & ref lints
+make book      # build the book PDF (runs the lints, then tectonic)
+make prove     # run the refinement checker over all 75 fixtures
+make formal    # check the Lark soundness proof
+make test      # check + prove + formal
 ```
 
 Each strand under `repo/` and each folder under `dev/` also has its own `Makefile`
