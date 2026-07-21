@@ -1,0 +1,750 @@
+(* asm.lark — Lark's RV32I code generator, written in Lark.
+   (SELFHOST milestone F3, slice 1b: the port of 07/src/asm.py.)
+
+   Pipeline position (per asm.py):
+       lower.lark → tac.lark → [opt.lark] → regalloc.lark → [asm.lark] → RV32I text
+
+   F3 is a BACKEND SWAP, not a new front end: `lex → parse → infer → lower → opt`
+   is unchanged and green, and this module replaces the one terminal stage —
+   emit_tac_c.lark (TAC → C) becomes asm.lark (TAC → RV32I assembly), on the same
+   TAC input.  The `.S` it emits is assembled by the real GNU RISC-V toolchain
+   (pico-sdk) and links against runtime/runtime.c.
+
+   ⚠ CROSS-COMPILATION, NOT ON-DEVICE SELF-HOSTING.  The compiler runs on the
+   host and emits code FOR the RP2350.  A Lark self-compile needs a ~5.6 GB arena;
+   an RP2350 has 520 KB.  Nothing here closes that ~10 000× gap, and the milestone's
+   name should not be read as claiming otherwise.
+
+   PURITY.  asm.py's AsmGen carries one piece of mutable state — the interned
+   string-literal table, whose FIRST-SEEN order fixes both the .Lstr labels and the
+   .rodata layout.  It is threaded here as a plain List(String) (the M7.3 etcIntern
+   idiom): every emitter takes the table and returns the possibly-extended one, so
+   `_instr` returns (lines, table) rather than mutating.  The read-only tables (tag
+   → id, globals → label) ride in an AsCtx record; the per-function frame constants
+   ride in an AsFn record.
+
+   BYTE-IDENTITY IS FORMATTING-IDENTITY.  Immediates, label naming, the 4-column
+   mnemonic padding (`f"  {op:<4} t2, t0, t1"`), section directives and comment
+   text are all mirrored character-for-character — that is what the differential
+   compares. *)
+
+module Asm
+
+
+(* ══ Small helpers ═════════════════════════════════════════════════════════ *)
+(* Monomorphic: the frozen infer forces monomorphic self-recursion, so these are
+   pinned to List(String) / List(Int) rather than written polymorphically. *)
+
+fn asApp(a : List(String), b : List(String)) : List(String) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, asApp(r, b)) end
+
+fn asLenStr(xs : List(String)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + asLenStr(r) end
+
+fn asLenOp(xs : List(Operand)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + asLenOp(r) end
+
+fn asSnocStr(xs : List(String), x : String) : List(String) =
+  match xs with | Nil => Cons(x, Nil) | Cons(y, r) => Cons(y, asSnocStr(r, x)) end
+
+fn asMemberInt(x : Int, xs : List(Int)) : Bool =
+  match xs with | Nil => false | Cons(y, r) => if x == y then true else asMemberInt(x, r) end
+
+(* Python's f"{s:<4}" — left-justify to width 4. *)
+fn asPad(s : String, n : Int) : String =
+  if string_length(s) >= n then s else asPad(s + " ", n)
+
+fn asIntLookup(m : List((String, Int)), k : String) : Maybe(Int) =
+  match m with
+  | Nil             => Nothing
+  | Cons((k0, v), r) => if optStrEq(k0, k) then Just(v) else asIntLookup(r, k)
+  end
+
+fn asStrLookup(m : List((String, String)), k : String) : Maybe(String) =
+  match m with
+  | Nil              => Nothing
+  | Cons((k0, v), r) => if optStrEq(k0, k) then Just(v) else asStrLookup(r, k)
+  end
+
+fn asNth(xs : List(Instr), i : Int) : Maybe(Instr) =
+  match xs with
+  | Nil        => Nothing
+  | Cons(x, r) => if i <= 0 then Just(x) else asNth(r, i - 1)
+  end
+
+fn asNthStr(xs : List(String), i : Int) : Maybe(String) =
+  match xs with
+  | Nil        => Nothing
+  | Cons(x, r) => if i <= 0 then Just(x) else asNthStr(r, i - 1)
+  end
+
+(* A float literal's f32 bit pattern — the M5 float_to_bits idiom.  asm.py does
+   struct.unpack("I", struct.pack("f", v))[0]; float_to_bits is exactly that. *)
+fn asFloatBits(txt : String) : Int =
+  match string_to_float(txt) with | Ok(f) => float_to_bits(f) | Err(_) => 0 end
+
+
+(* ══ Argument registers ════════════════════════════════════════════════════ *)
+
+let asArgRegs : List(String) =
+  Cons("a0", Cons("a1", Cons("a2", Cons("a3",
+  Cons("a4", Cons("a5", Cons("a6", Cons("a7", Nil))))))))
+
+fn asArgReg(i : Int) : String =
+  match asNthStr(asArgRegs, i) with | Just(r) => r | Nothing => "a0" end
+
+(* _BINOP_INT: the ops with a direct RV32 mnemonic. *)
+fn asIntOp(op : String) : Maybe(String) =
+  if      optStrEq(op, "+")  then Just("add")
+  else if optStrEq(op, "-")  then Just("sub")
+  else if optStrEq(op, "*")  then Just("mul")
+  else if optStrEq(op, "/")  then Just("div")
+  else if optStrEq(op, "%")  then Just("rem")
+  else if optStrEq(op, "&&") then Just("and")
+  else if optStrEq(op, "||") then Just("or")
+  else Nothing
+
+
+(* ══ Tag map + globals (asm.py _collect_tags / _collect_globals) ═══════════ *)
+
+fn asTagsOfInstrs(xs : List(Instr)) : List(String) =
+  match xs with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      match i with
+      | IAlloc(_, tag, _) =>
+          if optStrEq(tag, "()") then asTagsOfInstrs(r) else Cons(tag, asTagsOfInstrs(r))
+      | _ => asTagsOfInstrs(r)
+      end
+  end
+
+fn asTagsOfFns(fs : List(Function)) : List(String) =
+  match fs with
+  | Nil        => Nil
+  | Cons(f, r) => asApp(asTagsOfInstrs(optFnBody(f)), asTagsOfFns(r))
+  end
+
+fn asNumber(xs : List(String), i : Int) : List((String, Int)) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => Cons((x, i), asNumber(r, i + 1))
+  end
+
+(* {t: i for i, t in enumerate(sorted(tags))} — StrSet gives sorted + unique. *)
+fn asCollectTags(t : TAC) : List((String, Int)) =
+  match t with
+  | TAC(fns, _) => asNumber(raSsToList(ssFromList(asTagsOfFns(fns), SsLeaf)), 0)
+  end
+
+fn asGvars(xs : List(String), i : Int) : List((String, String)) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => Cons((x, ".Lgvar" + int_to_string(i)), asGvars(r, i + 1))
+  end
+
+(* Only tac.global_names get a .data slot — fresh temps inside __global_init__
+   must not be mistaken for globals in other functions. *)
+fn asCollectGlobals(t : TAC) : List((String, String)) =
+  match t with
+  | TAC(_, gs) => asGvars(raSsToList(ssFromList(gs, SsLeaf)), 0)
+  end
+
+
+(* ══ String-literal interning (AsmGen._str_label) ══════════════════════════ *)
+(* The table is a List(String) in first-seen order; a literal's index IS its
+   .Lstr number, and the table's order is the .rodata order. *)
+
+fn asIndexOfGo(t : List(String), s : String, i : Int) : Int =
+  match t with
+  | Nil        => 0 - 1
+  | Cons(x, r) => if optStrEq(x, s) then i else asIndexOfGo(r, s, i + 1)
+  end
+fn asIndexOf(t : List(String), s : String) : Int = asIndexOfGo(t, s, 0)
+
+fn asIntern(t : List(String), s : String) : (List(String), Int) =
+  let i = asIndexOf(t, s) in
+  if i >= 0 then (t, i) else (asSnocStr(t, s), asLenStr(t))
+
+fn asStrLabel(i : Int) : String = ".Lstr" + int_to_string(i)
+
+
+(* ══ Tail-call detection (asm.py _find_tail_return) ════════════════════════ *)
+(* True when the tmp `live` (a self-call's result) flows straight through
+   assigns/jumps into an IReturn, with no other use in between. *)
+
+fn asFindTailReturn(body : List(Instr), i : Int, live : String,
+                    lmap : List((String, Int)), visited : List(Int), n : Int) : Bool =
+  if i >= n then false
+  else if asMemberInt(i, visited) then false
+  else
+    let seen = Cons(i, visited) in
+    match asNth(body, i) with
+    | Nothing => false
+    | Just(instr) =>
+        match instr with
+        | ILabel(_) => asFindTailReturn(body, i + 1, live, lmap, seen, n)
+        | IJump(t)  =>
+            match asIntLookup(lmap, t) with
+            | Just(k)  => asFindTailReturn(body, k + 1, live, lmap, seen, n)
+            | Nothing  => false
+            end
+        | IAssign(d, s) =>
+            match s with
+            | OTmp(tm) =>
+                if optStrEq(optTmpName(tm), live)
+                then asFindTailReturn(body, i + 1, optTmpName(d), lmap, seen, n)
+                else false
+            | _ => false
+            end
+        | IReturn(mv) =>
+            match mv with
+            | Just(OTmp(tm)) => optStrEq(optTmpName(tm), live)
+            | _              => false
+            end
+        | _ => false
+        end
+    end
+
+fn asLabelsMap(xs : List(Instr), i : Int) : List((String, Int)) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) =>
+      match x with
+      | ILabel(nm) => Cons((nm, i), asLabelsMap(r, i + 1))
+      | _          => asLabelsMap(r, i + 1)
+      end
+  end
+
+fn asTailCallsGo(xs : List(Instr), body : List(Instr), fnName : String,
+                 lmap : List((String, Int)), i : Int, n : Int) : List(Int) =
+  match xs with
+  | Nil           => Nil
+  | Cons(instr, r) =>
+      match instr with
+      | ICall(md, callee, _) =>
+          match md with
+          | Just(d) =>
+              if optStrEq(callee, fnName)
+                 and asFindTailReturn(body, i + 1, optTmpName(d), lmap, Nil, n)
+              then Cons(i, asTailCallsGo(r, body, fnName, lmap, i + 1, n))
+              else asTailCallsGo(r, body, fnName, lmap, i + 1, n)
+          | Nothing => asTailCallsGo(r, body, fnName, lmap, i + 1, n)
+          end
+      | _ => asTailCallsGo(r, body, fnName, lmap, i + 1, n)
+      end
+  end
+
+
+(* ══ Per-function context ══════════════════════════════════════════════════ *)
+
+type AsCtx = | AsCtx of List((String, Int)), List((String, String))
+  (* tag_ids, globals *)
+impl Copy for AsCtx = {}
+
+fn asTagIds(c : AsCtx)  : List((String, Int))    = match c with | AsCtx(t, _) => t end
+fn asGlobals(c : AsCtx) : List((String, String)) = match c with | AsCtx(_, g) => g end
+
+type AsFn =
+  | AsFn of String, List(String), Allocation, Int, Int, Int, Int, List(String), List(Int), String
+    (* name, params, alloc, saveArea, raOff, s0Off, fs, regsUsed, tailCalls, loopLabel *)
+impl Copy for AsFn = {}
+
+fn asFnName(a : AsFn)   : String        = match a with | AsFn(n,_,_,_,_,_,_,_,_,_) => n end
+fn asFnParams(a : AsFn) : List(String)  = match a with | AsFn(_,p,_,_,_,_,_,_,_,_) => p end
+fn asFnAlloc(a : AsFn)  : Allocation    = match a with | AsFn(_,_,al,_,_,_,_,_,_,_) => al end
+fn asFnSave(a : AsFn)   : Int           = match a with | AsFn(_,_,_,s,_,_,_,_,_,_) => s end
+fn asFnRaOff(a : AsFn)  : Int           = match a with | AsFn(_,_,_,_,r,_,_,_,_,_) => r end
+fn asFnS0Off(a : AsFn)  : Int           = match a with | AsFn(_,_,_,_,_,s,_,_,_,_) => s end
+fn asFnFs(a : AsFn)     : Int           = match a with | AsFn(_,_,_,_,_,_,f,_,_,_) => f end
+fn asFnRegs(a : AsFn)   : List(String)  = match a with | AsFn(_,_,_,_,_,_,_,rs,_,_) => rs end
+fn asFnTails(a : AsFn)  : List(Int)     = match a with | AsFn(_,_,_,_,_,_,_,_,tc,_) => tc end
+fn asFnLoop(a : AsFn)   : String        = match a with | AsFn(_,_,_,_,_,_,_,_,_,l) => l end
+
+(* Byte offset from s0 for spill slot k (asm.py's spill_off closure). *)
+fn asSpillOff(af : AsFn, k : Int) : Int = 0 - (asFnSave(af) + (k + 1) * 4)
+
+(* main is emitted as lark_main — the C runtime owns `int main()`. *)
+fn asName(n : String) : String = if optStrEq(n, "main") then "lark_main" else n
+
+(* local(lbl): a TAC label ".L3" becomes ".<fn>_L3"; other labels pass through. *)
+fn asLocal(af : AsFn, lbl : String) : String =
+  if string_length(lbl) > 0 and string_index(lbl, 0) == 46      (* '.' *)
+  then "." + asFnName(af) + "_" + string_slice(lbl, 1, string_length(lbl))
+  else lbl
+
+
+(* ══ load / store / epilogue ═══════════════════════════════════════════════ *)
+(* load may intern a string literal, so it threads the table and returns it. *)
+
+fn asLoad(ctx : AsCtx, af : AsFn, strs : List(String), v : Operand, reg : String)
+   : (List(String), List(String)) =
+  match v with
+  | OConst(c) =>
+      match c with
+      | CUnit     => (Cons("  li   " + reg + ", 0", Nil), strs)
+      | CBool(b)  => if b then (Cons("  li   " + reg + ", 1", Nil), strs)
+                          else (Cons("  li   " + reg + ", 0", Nil), strs)
+      | CInt(s)   => (Cons("  li   " + reg + ", " + s, Nil), strs)
+      | CFloat(s) =>
+          (Cons("  li   " + reg + ", " + int_to_string(asFloatBits(s)) + "  # float " + s, Nil), strs)
+      | CStr(s)   =>
+          match asIntern(strs, s) with
+          | (t1, i) => (Cons("  la   " + reg + ", " + asStrLabel(i), Nil), t1)
+          end
+      end
+  | OTmp(tm) =>
+      let n  = optTmpName(tm) in
+      let al = asFnAlloc(af) in
+      (* Globals (top-level lets) always live in .data — load via la/lw. *)
+      match asStrLookup(asGlobals(ctx), n) with
+      | Just(g) => (Cons("  la   " + reg + ", " + g,
+                    Cons("  lw   " + reg + ", 0(" + reg + ")", Nil)), strs)
+      | Nothing =>
+          if raIsReg(al, n) then
+            let r = raRegOf(raAllocReg(al), n) in
+            if optStrEq(r, reg) then (Nil, strs)
+            else (Cons("  mv   " + reg + ", " + r, Nil), strs)
+          else if raIsSpill(al, n) then
+            (Cons("  lw   " + reg + ", "
+                  + int_to_string(asSpillOff(af, raSlotOf(raAllocSlot(al), n))) + "(s0)", Nil), strs)
+          else (Cons("  # unallocated tmp: " + n, Nil), strs)
+      end
+  end
+
+fn asStore(ctx : AsCtx, af : AsFn, reg : String, dst : Tmp) : List(String) =
+  let n  = optTmpName(dst) in
+  let al = asFnAlloc(af) in
+  match asStrLookup(asGlobals(ctx), n) with
+  | Just(g) => Cons("  la   t5, " + g, Cons("  sw   " + reg + ", 0(t5)", Nil))
+  | Nothing =>
+      if raIsReg(al, n) then
+        let r = raRegOf(raAllocReg(al), n) in
+        if optStrEq(r, reg) then Nil else Cons("  mv   " + r + ", " + reg, Nil)
+      else if raIsSpill(al, n) then
+        Cons("  sw   " + reg + ", "
+             + int_to_string(asSpillOff(af, raSlotOf(raAllocSlot(al), n))) + "(s0)", Nil)
+      else Cons("  # unallocated dst: " + n, Nil)
+  end
+
+fn asRestoreRegs(rs : List(String), k : Int) : List(String) =
+  match rs with
+  | Nil        => Nil
+  | Cons(r, t) => Cons("  lw   " + r + ", " + int_to_string(0 - (12 + k * 4)) + "(s0)",
+                       asRestoreRegs(t, k + 1))
+  end
+
+fn asEpilogue(af : AsFn) : List(String) =
+  asApp(asRestoreRegs(asFnRegs(af), 0),
+    Cons("  lw   ra, " + int_to_string(asFnRaOff(af)) + "(sp)",
+    Cons("  lw   s0, " + int_to_string(asFnS0Off(af)) + "(sp)",
+    Cons("  addi sp, sp, " + int_to_string(asFnFs(af)),
+    Cons("  ret", Nil)))))
+
+
+(* ══ Instruction selection (asm.py _instr) ═════════════════════════════════ *)
+
+(* IAlloc / IAllocClosure field stores: load each field into t0, store at (i+1)*4. *)
+fn asFields(ctx : AsCtx, af : AsFn, strs : List(String), fs : List(Operand), i : Int)
+   : (List(String), List(String)) =
+  match fs with
+  | Nil        => (Nil, strs)
+  | Cons(f, r) =>
+      match asLoad(ctx, af, strs, f, "t0") with
+      | (l1, s1) =>
+          match asFields(ctx, af, s1, r, i + 1) with
+          | (l2, s2) =>
+              (asApp(l1, Cons("  sw   t0, " + int_to_string((i + 1) * 4) + "(t3)", l2)), s2)
+          end
+      end
+  end
+
+(* Non-tail call: stage the arguments into a0…a7. *)
+fn asArgs(ctx : AsCtx, af : AsFn, strs : List(String), args : List(Operand), i : Int)
+   : (List(String), List(String)) =
+  match args with
+  | Nil        => (Nil, strs)
+  | Cons(a, r) =>
+      if i >= 8 then (Nil, strs)      (* asm.py raises; unreachable on this corpus *)
+      else
+        match asLoad(ctx, af, strs, a, asArgReg(i)) with
+        | (l1, s1) =>
+            match asArgs(ctx, af, s1, r, i + 1) with
+            | (l2, s2) => (asApp(l1, l2), s2)
+            end
+        end
+  end
+
+(* Tail call: after the new arg values are staged in a-regs, write them into the
+   parameters' allocated locations, then jump to the loop label. *)
+fn asRebindParams(af : AsFn, ps : List(String), i : Int) : List(String) =
+  match ps with
+  | Nil        => Nil
+  | Cons(p, r) =>
+      if i >= 8 then Nil
+      else
+        let al = asFnAlloc(af) in
+        let ar = asArgReg(i) in
+        let here = if raIsReg(al, p) then
+                     let rr = raRegOf(raAllocReg(al), p) in
+                     if optStrEq(rr, ar) then Nil else Cons("  mv   " + rr + ", " + ar, Nil)
+                   else if raIsSpill(al, p) then
+                     Cons("  sw   " + ar + ", "
+                          + int_to_string(asSpillOff(af, raSlotOf(raAllocSlot(al), p))) + "(s0)", Nil)
+                   else Nil in
+        asApp(here, asRebindParams(af, r, i + 1))
+  end
+
+(* Move incoming parameters (a0-a7) to their allocated locations, at entry. *)
+fn asEntryParams(af : AsFn, ps : List(String), i : Int) : List(String) =
+  match ps with
+  | Nil        => Nil
+  | Cons(p, r) =>
+      if i >= 8 then Nil
+      else
+        let al = asFnAlloc(af) in
+        let ar = asArgReg(i) in
+        let here = if raIsReg(al, p) then
+                     Cons("  mv   " + raRegOf(raAllocReg(al), p) + ", " + ar, Nil)
+                   else if raIsSpill(al, p) then
+                     Cons("  sw   " + ar + ", "
+                          + int_to_string(asSpillOff(af, raSlotOf(raAllocSlot(al), p))) + "(s0)", Nil)
+                   else Nil in      (* unused parameter — drop it *)
+        asApp(here, asEntryParams(af, r, i + 1))
+  end
+
+fn asSaveRegs(rs : List(String), k : Int) : List(String) =
+  match rs with
+  | Nil        => Nil
+  | Cons(r, t) => Cons("  sw   " + r + ", " + int_to_string(0 - (12 + k * 4)) + "(s0)",
+                       asSaveRegs(t, k + 1))
+  end
+
+(* Comparison / string binops all share the load-l-load-r shape. *)
+fn asCmp(ctx : AsCtx, af : AsFn, strs : List(String), l : Operand, r : Operand,
+         d : Tmp, mid : List(String)) : (List(String), List(String)) =
+  match asLoad(ctx, af, strs, l, "t0") with
+  | (l1, s1) =>
+      match asLoad(ctx, af, s1, r, "t1") with
+      | (l2, s2) => (asApp(l1, asApp(l2, asApp(mid, asStore(ctx, af, "t2", d)))), s2)
+      end
+  end
+
+fn asInstr(ctx : AsCtx, af : AsFn, strs : List(String), instr : Instr, idx : Int)
+   : (List(String), List(String)) =
+  match instr with
+
+  | ILabel(lbl) => (Cons(asLocal(af, lbl) + ":", Nil), strs)
+
+  | IJump(lbl)  => (Cons("  j    " + asLocal(af, lbl), Nil), strs)
+
+  | ICondJump(c, t, f) =>
+      match asLoad(ctx, af, strs, c, "t0") with
+      | (l1, s1) =>
+          (asApp(l1, Cons("  bnez t0, " + asLocal(af, t),
+                     Cons("  j    " + asLocal(af, f), Nil))), s1)
+      end
+
+  | IAssign(d, src) =>
+      match asLoad(ctx, af, strs, src, "t0") with
+      | (l1, s1) => (asApp(l1, asStore(ctx, af, "t0", d)), s1)
+      end
+
+  | IBinOp(d, op, l, r) =>
+      match asIntOp(op) with
+      | Just(m) =>
+          asCmp(ctx, af, strs, l, r, d, Cons("  " + asPad(m, 4) + " t2, t0, t1", Nil))
+      | Nothing =>
+          if optStrEq(op, "==") then
+            (* A tag comparison against a string constant loads the tag's id. *)
+            match r with
+            | OConst(CStr(sv)) =>
+                let tagId = match asIntLookup(asTagIds(ctx), sv) with
+                            | Just(i) => i | Nothing => 0 - 1 end in
+                match asLoad(ctx, af, strs, l, "t0") with
+                | (l1, s1) =>
+                    (asApp(l1, Cons("  li   t1, " + int_to_string(tagId) + "  # tag '" + sv + "'",
+                               Cons("  sub  t2, t0, t1",
+                               Cons("  seqz t2, t2", asStore(ctx, af, "t2", d))))), s1)
+                end
+            | _ => asCmp(ctx, af, strs, l, r, d,
+                         Cons("  sub  t2, t0, t1", Cons("  seqz t2, t2", Nil)))
+            end
+          else if optStrEq(op, "!=") then
+            asCmp(ctx, af, strs, l, r, d,
+                  Cons("  sub  t2, t0, t1", Cons("  snez t2, t2", Nil)))
+          else if optStrEq(op, "<") then
+            asCmp(ctx, af, strs, l, r, d, Cons("  slt  t2, t0, t1", Nil))
+          else if optStrEq(op, ">") then
+            asCmp(ctx, af, strs, l, r, d, Cons("  slt  t2, t1, t0", Nil))
+          else if optStrEq(op, "<=") then
+            asCmp(ctx, af, strs, l, r, d,
+                  Cons("  slt  t2, t1, t0", Cons("  xori t2, t2, 1", Nil)))
+          else if optStrEq(op, ">=") then
+            asCmp(ctx, af, strs, l, r, d,
+                  Cons("  slt  t2, t0, t1", Cons("  xori t2, t2, 1", Nil)))
+          else
+            (* string ops → the runtime's __lark_<op>_str helpers *)
+            match asLoad(ctx, af, strs, l, "a0") with
+            | (l1, s1) =>
+                match asLoad(ctx, af, s1, r, "a1") with
+                | (l2, s2) =>
+                    (asApp(l1, asApp(l2, Cons("  call __lark_" + op + "_str",
+                                         asStore(ctx, af, "a0", d)))), s2)
+                end
+            end
+      end
+
+  | IUnary(d, op, src) =>
+      match asLoad(ctx, af, strs, src, "t0") with
+      | (l1, s1) =>
+          let mid = if optStrEq(op, "-") then Cons("  neg  t2, t0", Nil)
+                    else if optStrEq(op, "not") then Cons("  xori t2, t0, 1", Nil)
+                    else Cons("  # unary " + op + " — not handled", Cons("  mv   t2, t0", Nil)) in
+          (asApp(l1, asApp(mid, asStore(ctx, af, "t2", d))), s1)
+      end
+
+  | ICall(md, callee, args) =>
+      if asMemberInt(idx, asFnTails(af)) then
+        (* Self tail call: stage args through the a-regs, rebind params, loop. *)
+        match asArgs(ctx, af, strs, args, 0) with
+        | (l1, s1) =>
+            (asApp(l1, asApp(asRebindParams(af, asFnParams(af), 0),
+                        Cons("  j    " + asFnLoop(af), Nil))), s1)
+        end
+      else
+        match asArgs(ctx, af, strs, args, 0) with
+        | (l1, s1) =>
+            let tail = match md with
+                       | Just(d) => asStore(ctx, af, "a0", d)
+                       | Nothing => Nil
+                       end in
+            (asApp(l1, Cons("  call " + asName(callee), tail)), s1)
+        end
+
+  | IClosureCall(d, fv, arg) =>
+      match asLoad(ctx, af, strs, fv, "t0") with
+      | (l1, s1) =>
+          match asLoad(ctx, af, s1, arg, "a1") with
+          | (l2, s2) =>
+              (asApp(l1, asApp(Cons("  lw   t1, 0(t0)", Cons("  mv   a0, t0", Nil)),
+                          asApp(l2, Cons("  jalr ra, 0(t1)", asStore(ctx, af, "a0", d))))), s2)
+          end
+      end
+
+  | IReturn(mv) =>
+      match mv with
+      | Just(v) =>
+          match asLoad(ctx, af, strs, v, "a0") with
+          | (l1, s1) => (asApp(l1, asEpilogue(af)), s1)
+          end
+      | Nothing => (Cons("  li   a0, 0", asEpilogue(af)), strs)
+      end
+
+  | IAlloc(d, tag, fields) =>
+      let n = 1 + asLenOp(fields) in
+      let tagId = if optStrEq(tag, "()") then 0
+                  else match asIntLookup(asTagIds(ctx), tag) with
+                       | Just(i) => i | Nothing => 0 end in
+      match asFields(ctx, af, strs, fields, 0) with
+      | (l1, s1) =>
+          (asApp(Cons("  li   a0, " + int_to_string(n),
+                 Cons("  call __heap_alloc",
+                 Cons("  mv   t3, a0",
+                 Cons("  li   t0, " + int_to_string(tagId) + "  # " + tag,
+                 Cons("  sw   t0, 0(t3)", Nil))))),
+                 asApp(l1, asStore(ctx, af, "t3", d))), s1)
+      end
+
+  | IGetTag(d, src) =>
+      match asLoad(ctx, af, strs, src, "t0") with
+      | (l1, s1) => (asApp(l1, Cons("  lw   t1, 0(t0)", asStore(ctx, af, "t1", d))), s1)
+      end
+
+  | IGetField(d, src, i) =>
+      match asLoad(ctx, af, strs, src, "t0") with
+      | (l1, s1) =>
+          (asApp(l1, Cons("  lw   t1, " + int_to_string((i + 1) * 4) + "(t0)",
+                     asStore(ctx, af, "t1", d))), s1)
+      end
+
+  | IAllocClosure(d, callee, caps) =>
+      let n = 1 + asLenOp(caps) in
+      match asFields(ctx, af, strs, caps, 0) with
+      | (l1, s1) =>
+          (asApp(Cons("  li   a0, " + int_to_string(n),
+                 Cons("  call __heap_alloc",
+                 Cons("  mv   t3, a0",
+                 Cons("  la   t0, " + asName(callee),
+                 Cons("  sw   t0, 0(t3)", Nil))))),
+                 asApp(l1, asStore(ctx, af, "t3", d))), s1)
+      end
+  end
+
+fn asInstrs(ctx : AsCtx, af : AsFn, strs : List(String), xs : List(Instr), i : Int)
+   : (List(String), List(String)) =
+  match xs with
+  | Nil        => (Nil, strs)
+  | Cons(x, r) =>
+      match asInstr(ctx, af, strs, x, i) with
+      | (l1, s1) =>
+          match asInstrs(ctx, af, s1, r, i + 1) with
+          | (l2, s2) => (asApp(l1, l2), s2)
+          end
+      end
+  end
+
+
+(* ══ Function emission (asm.py gen_fn) ═════════════════════════════════════ *)
+
+fn asGenFn(ctx : AsCtx, f : Function, al : Allocation, strs : List(String))
+   : (List(String), List(String)) =
+  let body      = optFnBody(f) in
+  let nm        = optFnName(f) in
+  let regsUsed  = raAllocRegsUsed(al) in
+  let saveArea  = 8 + asLenStr(regsUsed) * 4 in
+  (* fs = (save_area + 4*num_slots + 15) & ~15 — 16-byte aligned. *)
+  let fs        = ((saveArea + raAllocNumSlots(al) * 4 + 15) / 16) * 16 in
+  let lmap      = asLabelsMap(body, 0) in
+  let n         = raLenI(body) in
+  let tails     = asTailCallsGo(body, body, nm, lmap, 0, n) in
+  let af        = AsFn(nm, optFnParams(f), al, saveArea, fs - 4, fs - 8, fs,
+                       regsUsed, tails, "." + nm + "_loop") in
+  let asmName   = asName(nm) in
+  let prologue  =
+    Cons(".globl " + asmName,
+    Cons(asmName + ":",
+    Cons("  addi sp, sp, -" + int_to_string(fs),
+    Cons("  sw   ra, " + int_to_string(fs - 4) + "(sp)",
+    Cons("  sw   s0, " + int_to_string(fs - 8) + "(sp)",
+    Cons("  addi s0, sp, " + int_to_string(fs), Nil)))))) in
+  let loopHead  = match tails with | Nil => Nil | _ => Cons(asFnLoop(af) + ":", Nil) end in
+  match asInstrs(ctx, af, strs, body, 0) with
+  | (lines, s1) =>
+      (asApp(prologue,
+       asApp(asSaveRegs(regsUsed, 0),
+       asApp(asEntryParams(af, optFnParams(f), 0),
+       asApp(loopHead, lines)))), s1)
+  end
+
+
+(* ══ Data section (asm.py _data_section) ═══════════════════════════════════ *)
+
+(* UTF-8 encode one codepoint.  The corpus has no non-ASCII string literal, but
+   Python emits `s.encode("utf-8")` bytes and string_index yields codepoints —
+   so encode properly rather than assume the two coincide. *)
+fn asUtf8(cp : Int) : List(Int) =
+  if cp < 128 then Cons(cp, Nil)
+  else if cp < 2048 then
+    Cons(192 + cp / 64, Cons(128 + cp - (cp / 64) * 64, Nil))
+  else if cp < 65536 then
+    Cons(224 + cp / 4096,
+    Cons(128 + (cp / 64) - (cp / 4096) * 64,
+    Cons(128 + cp - (cp / 64) * 64, Nil)))
+  else
+    Cons(240 + cp / 262144,
+    Cons(128 + (cp / 4096) - (cp / 262144) * 64,
+    Cons(128 + (cp / 64) - (cp / 4096) * 64,
+    Cons(128 + cp - (cp / 64) * 64, Nil))))
+
+fn asBytesGo(s : String, i : Int, n : Int) : List(Int) =
+  if i >= n then Nil
+  else asAppInt(asUtf8(string_index(s, i)), asBytesGo(s, i + 1, n))
+
+fn asAppInt(a : List(Int), b : List(Int)) : List(Int) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, asAppInt(r, b)) end
+
+fn asBytes(s : String) : List(Int) = asBytesGo(s, 0, string_length(s))
+
+fn asLenInt(xs : List(Int)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + asLenInt(r) end
+
+fn asJoinBytes(xs : List(Int)) : String =
+  match xs with
+  | Nil        => ""
+  | Cons(b, r) =>
+      match r with
+      | Nil => int_to_string(b)
+      | _   => int_to_string(b) + ", " + asJoinBytes(r)
+      end
+  end
+
+fn asGvarLines(gs : List((String, String))) : List(String) =
+  match gs with
+  | Nil              => Nil
+  | Cons((_, lbl), r) => Cons(lbl + ":", Cons("  .word 0", asGvarLines(r)))
+  end
+
+(* Each string is [.word len, ...bytes, 0].  The variable-length byte run leaves
+   the cursor at an arbitrary offset, so re-align to 4 before the next record —
+   real RISC-V (the Pico's Hazard3) traps on a misaligned `lw` of the header. *)
+fn asStrLines(strs : List(String), i : Int) : List(String) =
+  match strs with
+  | Nil        => Nil
+  | Cons(s, r) =>
+      let bs   = asBytes(s) in
+      let n    = asLenInt(bs) in
+      let blst = asJoinBytes(bs) in
+      let byteLine = if string_length(blst) == 0 then "  .byte 0"
+                     else "  .byte " + blst + ", 0" in
+      Cons("  .p2align 2",
+      Cons(asStrLabel(i) + ":",
+      Cons("  .word " + int_to_string(n),
+      Cons(byteLine, asStrLines(r, i + 1)))))
+  end
+
+fn asDataSection(gs : List((String, String)), strs : List(String)) : List(String) =
+  let dataPart = match gs with
+                 | Nil => Nil
+                 | _   => Cons(".section .data", Cons("  .p2align 2", asGvarLines(gs)))
+                 end in
+  let rodataPart = match strs with
+                   | Nil => Nil
+                   | _   => Cons(".section .rodata", asStrLines(strs, 0))
+                   end in
+  asApp(dataPart, rodataPart)
+
+
+(* ══ Entry point (asm.py gen) ══════════════════════════════════════════════ *)
+
+(* Emit every function, threading the string table left to right — its final
+   contents (and order) are what .rodata prints. *)
+fn asGenFns(ctx : AsCtx, fs : List(Function), als : List(Allocation), strs : List(String))
+   : (List(String), List(String)) =
+  match fs with
+  | Nil        => (Nil, strs)
+  | Cons(f, fr) =>
+      match als with
+      | Nil          => (Nil, strs)
+      | Cons(a, ar) =>
+          match asGenFn(ctx, f, a, strs) with
+          | (sec, s1) =>
+              match asGenFns(ctx, fr, ar, s1) with
+              | (rest, s2) => (asApp(asApp(sec, Cons("", Nil)), rest), s2)
+              end
+          end
+      end
+  end
+
+fn asGen(t : TAC) : String =
+  let tagIds  = asCollectTags(t) in
+  let globals = asCollectGlobals(t) in
+  let ctx     = AsCtx(tagIds, globals) in
+  let allocs  = raAllocateTac(t) in
+  match t with
+  | TAC(fns, _) =>
+      match asGenFns(ctx, fns, allocs, Nil) with
+      | (sections, strs) =>
+          (* The data section is emitted FIRST but depends on the string table
+             built while emitting the functions — hence the two-phase shape. *)
+          tacJoin("\n", asApp(asDataSection(globals, strs),
+                        Cons("", Cons(".section .text", sections))))
+      end
+  end
+
+
+fn main(io : IO) : IO =
+  let g0 = Function("main", Nil,
+             Cons(IBinOp(Tmp("t0"), "+", OConst(CInt("2")), OConst(CInt("3"))),
+             Cons(IReturn(Just(OTmp(Tmp("t0")))), Nil)), 1) in
+  let prog = TAC(Cons(g0, Nil), Nil) in
+  print(io, asGen(prog))

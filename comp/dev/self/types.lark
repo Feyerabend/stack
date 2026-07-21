@@ -1,0 +1,439 @@
+(* types.lark — Lark's internal type representation, written in Lark.
+   (SELFHOST milestone M3, first slice: the port of 07/src/ty.py.)
+
+   Monotypes, schemes, substitution, free-variable computation, unification,
+   the Copy check, and the pretty-printer — the bedrock the type checker
+   (infer.lark) stands on.  This slice is deliberately self-contained and
+   validated by a smoke `main`; the full differential (inferred types vs
+   infer.py over the corpus) arrives once infer.lark lands.
+
+   Design notes
+   ────────────
+   • Monotype constructors are M-PREFIXED (MVar/MCon/MApp/MFn/MTup) rather than
+     ty.py's TVar/TCon/TApp/TFn/TTup.  Reason: parse.lark's *syntactic* type
+     ADT already owns `TFn` (and TName/TApply/TUnit/TTuple), and M3's pipeline
+     is assembled by CONCATENATION (see SELFHOST §7) — one module, so the two
+     type vocabularies must not collide.  M = "monotype".
+   • A substitution `Subst` (TVar id → Mono) is the "persistent map" of the risk
+     note (SELFHOST §7): purely functional.  Originally an assoc list; now an
+     Int-keyed Okasaki red-black tree so `substGet` is O(log n) (OPTIMIZE §8b) —
+     `compose` still lets the newer map win, the immutable analogue of dict.update.
+   • Unification returns `Result(Subst, String)` instead of raising: Lark has no
+     exceptions, so every caller threads the Result (Ok = mgu, Err = reason).
+   • Dynamic string equality is CHAR-BY-CHAR (`strEq`), NOT `==`: string `==`
+     type-checks but is unimplemented in the CEK binop (SELFHOST §7, M1 finding).
+     strEq compares codepoints via string_index/Int-== — robust on both runtimes
+     for the ASCII self-host corpus.
+   • Every function is fully annotated so infer's Pass 1.5 pre-registers the
+     mutually-recursive groups (apply/applyList, the unify family).
+
+   Run (smoke):  python3 ../07/src/cek.py types.lark   *)
+
+module Types
+
+
+(* ── Monotypes (port of ty.py's Mono) ─────────────────────────────────────── *)
+
+type Mono =
+  | MVar of Int                 (* unification variable α_i          *)
+  | MCon of String              (* nullary constructor: Int, Bool, … *)
+  | MApp of String, List(Mono)  (* applied: List(Int), Result(a, b)  *)
+  | MFn  of Mono, Mono          (* function type τ₁ → τ₂             *)
+  | MTup of List(Mono)          (* tuple type (τ₁, …)                *)
+
+(* Polytype: ∀qs. body, with the subset of qs that must be Copy at instantiation. *)
+type Scheme = | Scheme of List(Int), Mono, List(Int)   (* qs, body, copyVars *)
+
+(* Copy impls: a value may be reused across match arms / lets (SELFHOST §7). *)
+impl Copy for Mono   = {}
+impl Copy for Scheme = {}
+
+
+(* ── Int-set helpers (free variables, quantifier lists) ───────────────────── *)
+
+fn memberInt(x : Int, xs : List(Int)) : Bool =
+  match xs with
+  | Nil          => false
+  | Cons(y, rest) => if x == y then true else memberInt(x, rest)
+  end
+
+fn insertInt(x : Int, xs : List(Int)) : List(Int) =
+  if memberInt(x, xs) then xs else Cons(x, xs)
+
+fn unionInts(xs : List(Int), ys : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => ys
+  | Cons(x, rest) => insertInt(x, unionInts(rest, ys))
+  end
+
+fn diffInts(xs : List(Int), ys : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => if memberInt(x, ys) then diffInts(rest, ys)
+                     else Cons(x, diffInts(rest, ys))
+  end
+
+
+(* ── Dynamic string equality (see header note) ────────────────────────────── *)
+
+fn strEqFrom(a : String, b : String, i : Int, n : Int) : Bool =
+  if i >= n then true
+  else if string_index(a, i) == string_index(b, i) then strEqFrom(a, b, i + 1, n)
+  else false
+
+fn strEq(a : String, b : String) : Bool =
+  let la = string_length(a) in
+  let lb = string_length(b) in
+  if la == lb then strEqFrom(a, b, 0, la) else false
+
+fn memberStr(x : String, xs : List(String)) : Bool =
+  match xs with
+  | Nil           => false
+  | Cons(y, rest) => if strEq(x, y) then true else memberStr(x, rest)
+  end
+
+
+(* ── Substitution (Int → Mono, as a red-black balanced tree) ──────────────────
+   Was an assoc list `List((Int, Mono))`; now an Int-keyed Okasaki red-black tree
+   so `substGet` is O(log n) instead of a linear scan.  Algorithm W allocates
+   fresh vars monotonically, so an assoc list / naive BST degrades to a chain on
+   exactly the keys unification looks up hardest — balancing is what kills the
+   subst-side O(n^1.9) multiplier (OPTIMIZE §8b residual).  The change is
+   OUTPUT-NEUTRAL: `apply` reads only the key→Mono mapping, never traversal order,
+   and `compose` preserves the same override semantics the assoc list had (s1
+   wins on shared keys; s2-only keys carry s1 applied to their value).  SLeaf is
+   the empty substitution — where the old code wrote `Nil`. *)
+
+type SColor = | SRed | SBlack
+type Subst  = | SLeaf | SNode of SColor, Subst, Int, Mono, Subst
+impl Copy for SColor = {}
+impl Copy for Subst  = {}
+
+type Opt = | ONone | OSome of Mono
+impl Copy for Opt = {}
+
+(* O(log n) lookup: descend by key order (was a linear assoc-list scan). *)
+fn substGet(s : Subst, i : Int) : Opt =
+  match s with
+  | SLeaf                => ONone
+  | SNode(_, l, k, v, r) =>
+      if i == k then OSome(v)
+      else if i < k then substGet(l, i)
+      else substGet(r, i)
+  end
+
+(* Okasaki's balance: repair a red-red violation under a black parent.  The four
+   rotations all rebuild the same red node over two black children; every other
+   shape is returned unchanged. *)
+fn balance(c : SColor, a : Subst, xk : Int, xv : Mono, b : Subst) : Subst =
+  match (c, a, xk, xv, b) with
+  | (SBlack, SNode(SRed, SNode(SRed, t1, k1, v1, t2), k2, v2, t3), k3, v3, t4) =>
+      SNode(SRed, SNode(SBlack, t1, k1, v1, t2), k2, v2, SNode(SBlack, t3, k3, v3, t4))
+  | (SBlack, SNode(SRed, t1, k1, v1, SNode(SRed, t2, k2, v2, t3)), k3, v3, t4) =>
+      SNode(SRed, SNode(SBlack, t1, k1, v1, t2), k2, v2, SNode(SBlack, t3, k3, v3, t4))
+  | (SBlack, t1, k1, v1, SNode(SRed, SNode(SRed, t2, k2, v2, t3), k3, v3, t4)) =>
+      SNode(SRed, SNode(SBlack, t1, k1, v1, t2), k2, v2, SNode(SBlack, t3, k3, v3, t4))
+  | (SBlack, t1, k1, v1, SNode(SRed, t2, k2, v2, SNode(SRed, t3, k3, v3, t4))) =>
+      SNode(SRed, SNode(SBlack, t1, k1, v1, t2), k2, v2, SNode(SBlack, t3, k3, v3, t4))
+  | (cc, aa, kk, vv, bb) => SNode(cc, aa, kk, vv, bb)
+  end
+
+(* insert/override key k with value v, keeping the red-black invariants. *)
+fn subIns(s : Subst, k : Int, v : Mono) : Subst =
+  match s with
+  | SLeaf => SNode(SRed, SLeaf, k, v, SLeaf)
+  | SNode(c, l, k0, v0, r) =>
+      if k < k0 then balance(c, subIns(l, k, v), k0, v0, r)
+      else if k > k0 then balance(c, l, k0, v0, subIns(r, k, v))
+      else SNode(c, l, k, v, r)
+  end
+
+fn subInsert(s : Subst, k : Int, v : Mono) : Subst =
+  match subIns(s, k, v) with
+  | SNode(_, l, k0, v0, r) => SNode(SBlack, l, k0, v0, r)   (* recolour root black *)
+  | SLeaf                  => SLeaf                          (* subIns never yields a leaf *)
+  end
+
+fn applyList(s : Subst, ts : List(Mono)) : List(Mono) =
+  match ts with
+  | Nil           => Nil
+  | Cons(t, rest) => Cons(apply(s, t), applyList(s, rest))
+  end
+
+(* apply substitution s to monotype t (chasing var chains, as ty.apply). *)
+fn apply(s : Subst, t : Mono) : Mono =
+  match t with
+  | MVar(i) =>
+    match substGet(s, i) with
+    | ONone    => t
+    | OSome(u) => apply(s, u)
+    end
+  | MCon(n)     => t
+  | MApp(h, as_) => MApp(h, applyList(s, as_))
+  | MFn(p, r)   => MFn(apply(s, p), apply(s, r))
+  | MTup(es)    => MTup(applyList(s, es))
+  end
+
+(* is t the type variable k itself? *)
+fn monoIsVarId(t : Mono, k : Int) : Bool =
+  match t with
+  | MVar(j) => j == k
+  | MCon(n) => false
+  | MApp(h, as_) => false
+  | MFn(p, r)    => false
+  | MTup(es)     => false
+  end
+
+(* fold every (k,v) of s2 into acc as (k, apply(s1, v)) — s2's range under s1.
+
+   Dropping a composed binding k |-> k, exactly as ty.compose does: it is the
+   identity map, so dropping it changes no answer, and apply/1 chases var chains,
+   so keeping it would be a chain with no end. *)
+fn subComposeRange(s1 : Subst, s2 : Subst, acc : Subst) : Subst =
+  match s2 with
+  | SLeaf => acc
+  | SNode(_, l, k, v, r) =>
+      let accL = subComposeRange(s1, l, acc) in
+      let nv   = apply(s1, v) in
+      let acc2 = if monoIsVarId(nv, k) then accL else subInsert(accL, k, nv) in
+      subComposeRange(s1, r, acc2)
+  end
+
+(* fold every (k,v) of src into acc, src overriding on shared keys. *)
+fn subUnionInto(src : Subst, acc : Subst) : Subst =
+  match src with
+  | SLeaf => acc
+  | SNode(_, l, k, v, r) => subUnionInto(r, subInsert(subUnionInto(l, acc), k, v))
+  end
+
+(* compose s1 s2 = s1 ∘ s2: apply s1 to s2's range, then let s1 override.  Same
+   mapping the assoc-list `appendSub(s1, mapApplyRange(s1, s2))` produced. *)
+fn compose(s1 : Subst, s2 : Subst) : Subst =
+  subUnionInto(s1, subComposeRange(s1, s2, SLeaf))
+
+fn subRemoveInto(src : Subst, ks : List(Int), acc : Subst) : Subst =
+  match src with
+  | SLeaf => acc
+  | SNode(_, l, k, v, r) =>
+      let acc1 = subRemoveInto(l, ks, acc) in
+      let acc2 = if memberInt(k, ks) then acc1 else subInsert(acc1, k, v) in
+      subRemoveInto(r, ks, acc2)
+  end
+
+fn removeKeys(s : Subst, ks : List(Int)) : Subst =
+  subRemoveInto(s, ks, SLeaf)
+
+(* True iff every type variable in `t` is bound by `qs`.  Allocation-free (no
+   freeVars list is built): it walks `t` and short-circuits on the first var not
+   in `qs`.  When true for a scheme's body, the scheme is CLOSED — applying any
+   substitution to it is the identity, so applyScheme can return it unchanged. *)
+fn monoVarsAllIn(t : Mono, qs : List(Int)) : Bool =
+  match t with
+  | MVar(i)      => memberInt(i, qs)
+  | MCon(n)      => true
+  | MApp(h, as_) => monoListVarsAllIn(as_, qs)
+  | MFn(p, r)    => if monoVarsAllIn(p, qs) then monoVarsAllIn(r, qs) else false
+  | MTup(es)     => monoListVarsAllIn(es, qs)
+  end
+
+fn monoListVarsAllIn(ts : List(Mono), qs : List(Int)) : Bool =
+  match ts with
+  | Nil           => true
+  | Cons(t, rest) => if monoVarsAllIn(t, qs) then monoListVarsAllIn(rest, qs) else false
+  end
+
+(* §8b hot path.  A fully-generalised (top-level) scheme is closed, so applying a
+   substitution to it is the identity — return it unchanged, allocating nothing.
+   The frozen path (removeKeys rebuilds all of `s`, then apply rebuilds `body`)
+   only runs for the few open/local schemes that actually have free vars.  This
+   is what stops applyEnv from paying O(env × |s|) at every sub-expression: the
+   ~closed top-level environment (hundreds of schemes) becomes a walk, not a
+   rebuild.  Output-identical to the frozen definition (the else-branch). *)
+fn applyScheme(s : Subst, sc : Scheme) : Scheme =
+  match sc with
+  | Scheme(qs, body, cv) =>
+      if monoVarsAllIn(body, qs) then sc
+      else Scheme(qs, apply(removeKeys(s, qs), body), cv)
+  end
+
+
+(* ── Free variables ───────────────────────────────────────────────────────── *)
+
+fn freeVarsList(ts : List(Mono)) : List(Int) =
+  match ts with
+  | Nil           => Nil
+  | Cons(t, rest) => unionInts(freeVars(t), freeVarsList(rest))
+  end
+
+fn freeVars(t : Mono) : List(Int) =
+  match t with
+  | MVar(i)     => Cons(i, Nil)
+  | MCon(n)     => Nil
+  | MApp(h, as_) => freeVarsList(as_)
+  | MFn(p, r)   => unionInts(freeVars(p), freeVars(r))
+  | MTup(es)    => freeVarsList(es)
+  end
+
+fn freeVarsScheme(sc : Scheme) : List(Int) =
+  match sc with
+  | Scheme(qs, body, cv) => diffInts(freeVars(body), qs)
+  end
+
+
+(* ── Unification → Result(Subst, String) ──────────────────────────────────── *)
+
+fn occursMsg(i : Int, t : Mono) : String =
+  "cannot unify " + pretty(MVar(i)) + " with " + pretty(t) + ": occurs check failed"
+
+fn bind(i : Int, t : Mono) : Result(Subst, String) =
+  match t with
+  | MVar(j) => if i == j then Ok(SLeaf)
+               else if memberInt(i, freeVars(t)) then Err(occursMsg(i, t))
+               else Ok(subInsert(SLeaf, i, t))
+  | _       => if memberInt(i, freeVars(t)) then Err(occursMsg(i, t))
+               else Ok(subInsert(SLeaf, i, t))
+  end
+
+(* Fold-based sequence unifier: accumulate s, apply it to each pair (ty._unify_seq). *)
+fn unifySeqAcc(s : Subst, xs : List(Mono), ys : List(Mono))
+    : Result(Subst, String) =
+  match (xs, ys) with
+  | (Nil, Nil) => Ok(s)
+  | (Cons(x, xr), Cons(y, yr)) =>
+    match unify(apply(s, x), apply(s, y)) with
+    | Err(e)  => Err(e)
+    | Ok(s2)  => unifySeqAcc(compose(s2, s), xr, yr)
+    end
+  | _ => Err("arity mismatch")
+  end
+
+fn unifySeq(xs : List(Mono), ys : List(Mono)) : Result(Subst, String) =
+  unifySeqAcc(SLeaf, xs, ys)
+
+fn unify(a : Mono, b : Mono) : Result(Subst, String) =
+  match (a, b) with
+  | (MVar(i), MVar(j)) => if i == j then Ok(SLeaf) else bind(i, b)
+  | (MVar(i), _)       => bind(i, b)
+  | (_, MVar(j))       => bind(j, a)
+  | (MCon(n1), MCon(n2)) =>
+    if strEq(n1, n2) then Ok(SLeaf)
+    else Err("cannot unify " + pretty(a) + " with " + pretty(b))
+  | (MApp(h1, as1), MApp(h2, as2)) =>
+    if strEq(h1, h2) then unifySeq(as1, as2)
+    else Err("cannot unify " + pretty(a) + " with " + pretty(b))
+  | (MFn(p1, r1), MFn(p2, r2)) =>
+    match unify(p1, p2) with
+    | Err(e) => Err(e)
+    | Ok(s1) =>
+      match unify(apply(s1, r1), apply(s1, r2)) with
+      | Err(e) => Err(e)
+      | Ok(s2) => Ok(compose(s2, s1))
+      end
+    end
+  | (MTup(es1), MTup(es2)) => unifySeq(es1, es2)
+  | _ => Err("cannot unify " + pretty(a) + " with " + pretty(b))
+  end
+
+
+(* ── Copy check (port of is_copy) ─────────────────────────────────────────── *)
+
+fn allCopy(ts : List(Mono), ct : List(String)) : Bool =
+  match ts with
+  | Nil           => true
+  | Cons(t, rest) => if isCopy(t, ct) then allCopy(rest, ct) else false
+  end
+
+fn isCopy(t : Mono, ct : List(String)) : Bool =
+  match t with
+  | MVar(i)     => true                          (* unresolved var: assume Copy *)
+  | MCon(n)     => memberStr(n, ct)
+  | MApp(h, as_) => if memberStr(h, ct) then allCopy(as_, ct) else false
+  | MFn(p, r)   => true                          (* functions are code, freely reusable *)
+  | MTup(es)    => allCopy(es, ct)
+  end
+
+
+(* ── Pretty-printer (port of ty.pretty / _pretty_inner) ───────────────────── *)
+
+(* Greek display for small var ids (ty.py's letter table, ς skipped); α<N> after. *)
+fn greek(i : Int) : String =
+  match i with
+  | 0 => "α" | 1 => "β" | 2 => "γ" | 3 => "δ" | 4 => "ε" | 5 => "ζ"
+  | 6 => "η" | 7 => "θ" | 8 => "ι" | 9 => "κ" | 10 => "λ" | 11 => "μ"
+  | 12 => "ν" | 13 => "ξ" | 14 => "ο" | 15 => "π" | 16 => "ρ" | 17 => "σ"
+  | 18 => "τ" | 19 => "υ" | 20 => "φ" | 21 => "χ" | 22 => "ψ" | 23 => "ω"
+  | _ => "α" + int_to_string(i)
+  end
+
+fn prettyArgs(ts : List(Mono)) : String =
+  match ts with
+  | Nil           => ""
+  | Cons(t, Nil)  => prettyP(t, false)
+  | Cons(t, rest) => prettyP(t, false) + ", " + prettyArgs(rest)
+  end
+
+fn prettyInner(t : Mono) : String =
+  match t with
+  | MVar(i)     => greek(i)
+  | MCon(n)     => n
+  | MApp(h, as_) =>
+    match as_ with
+    | Nil => h
+    | _   => h + "(" + prettyArgs(as_) + ")"
+    end
+  | MFn(p, r)   => prettyP(p, true) + " -> " + prettyP(r, false)
+  | MTup(es)    => "(" + prettyArgs(es) + ")"
+  end
+
+(* paren = wrap a function type in parens (its left position needs it). *)
+fn prettyP(t : Mono, paren : Bool) : String =
+  match t with
+  | MFn(p, r) => if paren then "(" + prettyInner(t) + ")" else prettyInner(t)
+  | _         => prettyInner(t)
+  end
+
+fn pretty(t : Mono) : String = prettyP(t, false)
+
+
+(* ── Built-in type helpers (port of the t_* constructors) ─────────────────── *)
+
+fn tList(a : Mono) : Mono = MApp("List", Cons(a, Nil))
+fn tResult(a : Mono, b : Mono) : Mono = MApp("Result", Cons(a, Cons(b, Nil)))
+
+
+(* ── Smoke driver (eyeball validation until infer.lark's differential) ────── *)
+
+fn showBool(b : Bool) : String = if b then "true" else "false"
+
+fn describe(label : String, r : Result(Subst, String), t : Mono) : String =
+  match r with
+  | Ok(s)  => label + " => ok: " + pretty(apply(s, t))
+  | Err(e) => label + " => err: " + e
+  end
+
+fn main(io : IO) : IO =
+  let a = MVar(0) in
+  let b = MVar(1) in
+  let listA   = tList(a) in
+  let listInt = tList(MCon("Int")) in
+  let fnT = MFn(a, MFn(b, MCon("Bool"))) in
+  let tup = MTup(Cons(MCon("Int"), Cons(MCon("String"), Nil))) in
+  let fn1 = MFn(a, MCon("Int")) in
+  let fn2 = MFn(MCon("Bool"), b) in
+  let nested = MFn(MFn(a, b), MCon("Int")) in
+  let ct = Cons("Int", Cons("Float", Cons("Bool",
+             Cons("String", Cons("()", Cons("List", Nil)))))) in
+  let out =
+        describe("unify List(a) List(Int)", unify(listA, listInt), listA) + "\n"
+      + describe("occurs a = List(a)", unify(a, tList(a)), a) + "\n"
+      + describe("unify (a->Int) (Bool->b)", unify(fn1, fn2), fn1) + "\n"
+      + describe("unify Int String", unify(MCon("Int"), MCon("String")), a) + "\n"
+      + "pretty fnT:    " + pretty(fnT) + "\n"
+      + "pretty tup:    " + pretty(tup) + "\n"
+      + "pretty nested: " + pretty(nested) + "\n"
+      + "pretty var 25: " + pretty(MVar(25)) + "\n"
+      + "isCopy List(Int): " + showBool(isCopy(listInt, ct)) + "\n"
+      + "isCopy IO:        " + showBool(isCopy(MCon("IO"), ct)) + "\n"
+      + "isCopy (a->b):    " + showBool(isCopy(MFn(a, b), ct))
+  in
+  print(io, out)

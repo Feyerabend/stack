@@ -1,0 +1,451 @@
+(* regalloc.lark — Lark's linear-scan register allocator, written in Lark.
+   (SELFHOST milestone F3, slice 1a: the port of 07/src/regalloc.py.)
+
+   Pipeline position (per regalloc.py):
+       lower.lark → tac.lark → [opt.lark] → CFG + liveness → [regalloc.lark] → asm.lark
+
+   Poletto & Sarkar (1999) linear scan over the linearized instruction stream.
+   Every Tmp lands either in a callee-saved register s1–s11 or in a spill slot.
+
+   PURITY.  regalloc.py is inherently stateful — a free-register stack, an active
+   list kept sorted by end point, a spill counter, and a `dict` of intervals whose
+   INSERTION ORDER is load-bearing (see below).  All of it is threaded here as
+   plain values: the scan is a fold carrying (freeRev, active, regAssign, slots,
+   spillCount), and the interval table is an insertion-ordered assoc list.
+
+   ⚠ ORDER IS SEMANTICS.  `_linear_scan` sorts intervals by start with a STABLE
+   sort, so ties are broken by the order intervals were first inserted into the
+   `ivs` dict — and that order decides which Tmp gets which register.  Python
+   built it by iterating frozensets (live_in/live_out/defs/uses), i.e. in HASH
+   order, which made the emitted assembly a function of PYTHONHASHSEED: the
+   oracle emitted different code on every run.  regalloc.py now iterates all four
+   sets SORTED (see its _compute_intervals), which is what this port mirrors —
+   raSortedNames = sorted+deduped, exactly Python's `sorted(frozenset)`.  Without
+   that canonicalisation there is no byte-identity to test against.
+
+   CFG and liveness are NOT re-ported: opt.lark already owns them (M7.4), and
+   this module is always concatenated with it — optBuildCfg / optDefs / optUses /
+   optGenKillMap / optLiveFix / optLiveOutMap, plus the StrSet name-sets. *)
+
+module Regalloc
+
+
+(* ══ Register pool ═════════════════════════════════════════════════════════ *)
+(* regalloc.py's _REGS: the 11 callee-saved RISC-V registers, in order. *)
+
+let raRegs : List(String) =
+  Cons("s1", Cons("s2", Cons("s3", Cons("s4", Cons("s5", Cons("s6",
+  Cons("s7", Cons("s8", Cons("s9", Cons("s10", Cons("s11", Nil)))))))))))
+
+
+(* ══ Small monomorphic helpers ═════════════════════════════════════════════ *)
+(* Pinned to their element type: the frozen infer forces MONOMORPHIC
+   self-recursion, so a polymorphic accumulator-reverse does not typecheck
+   (the occurs-gap that bit ecRev and etcRev). *)
+
+fn raMin(a : Int, b : Int) : Int = if a < b then a else b
+fn raMax(a : Int, b : Int) : Int = if a > b then a else b
+
+fn raLenI(xs : List(Instr)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + raLenI(r) end
+
+fn raRevStrGo(xs : List(String), acc : List(String)) : List(String) =
+  match xs with | Nil => acc | Cons(x, r) => raRevStrGo(r, Cons(x, acc)) end
+fn raRevStr(xs : List(String)) : List(String) = raRevStrGo(xs, Nil)
+
+(* StrSet in-order traversal → ascending list.  This is the sorted iteration
+   order the canonicalised oracle now uses; optStrLt is codepoint-lexicographic,
+   like Python's sorted() on str. *)
+fn raSsToListGo(s : StrSet, acc : List(String)) : List(String) =
+  match s with
+  | SsLeaf             => acc
+  | SsNode(_, l, k, r) => raSsToListGo(l, Cons(k, raSsToListGo(r, acc)))
+  end
+fn raSsToList(s : StrSet) : List(String) = raSsToListGo(s, Nil)
+
+(* Python's `sorted(defs(i))` / `sorted(uses(i))`: a frozenset, so sorted AND
+   deduplicated.  optUses returns operand order, with duplicates. *)
+fn raSortedNames(xs : List(String)) : List(String) = raSsToList(ssFromList(xs, SsLeaf))
+
+
+(* ══ Live intervals ════════════════════════════════════════════════════════ *)
+
+type RaIv = | RaIv of String, Int, Int        (* name, start, end *)
+impl Copy for RaIv = {}
+
+fn raIvName(x : RaIv)  : String = match x with | RaIv(n, _, _) => n end
+fn raIvStart(x : RaIv) : Int    = match x with | RaIv(_, s, _) => s end
+fn raIvEnd(x : RaIv)   : Int    = match x with | RaIv(_, _, e) => e end
+
+(* The interval table is an assoc list in FIRST-SEEN order — it stands in for
+   regalloc.py's `ivs` dict, whose insertion order is the stable-sort tiebreak. *)
+
+fn raHasIv(ivs : List(RaIv), name : String) : Bool =
+  match ivs with
+  | Nil        => false
+  | Cons(x, r) => if optStrEq(raIvName(x), name) then true else raHasIv(r, name)
+  end
+
+(* Widen an existing interval, keeping its position in the list. *)
+fn raWidenIv(ivs : List(RaIv), name : String, p : Int) : List(RaIv) =
+  match ivs with
+  | Nil        => Nil
+  | Cons(x, r) =>
+      match x with
+      | RaIv(n, s, e) =>
+          if optStrEq(n, name) then Cons(RaIv(n, raMin(s, p), raMax(e, p)), r)
+          else Cons(x, raWidenIv(r, name, p))
+      end
+  end
+
+fn raSnocIv(ivs : List(RaIv), x : RaIv) : List(RaIv) =
+  match ivs with
+  | Nil        => Cons(x, Nil)
+  | Cons(y, r) => Cons(y, raSnocIv(r, x))
+  end
+
+(* regalloc.py's inner `extend(name, point)`. *)
+fn raExtend(ivs : List(RaIv), name : String, p : Int) : List(RaIv) =
+  if raHasIv(ivs, name) then raWidenIv(ivs, name, p)
+  else raSnocIv(ivs, RaIv(name, p, p))
+
+fn raExtendAll(ivs : List(RaIv), names : List(String), p : Int) : List(RaIv) =
+  match names with
+  | Nil        => ivs
+  | Cons(n, r) => raExtendAll(raExtend(ivs, n, p), r, p)
+  end
+
+(* `for name in <set>: extend(name, s); extend(name, e)` — both points, per name. *)
+fn raExtendSpan(ivs : List(RaIv), names : List(String), s : Int, e : Int)
+   : List(RaIv) =
+  match names with
+  | Nil        => ivs
+  | Cons(n, r) => raExtendSpan(raExtend(raExtend(ivs, n, s), n, e), r, s, e)
+  end
+
+
+(* -- Step 1: linearize (block label → first instruction number) -- *)
+
+fn raLinearizeGo(bs : List(OptBlock), n : Int) : List((String, Int)) =
+  match bs with
+  | Nil        => Nil
+  | Cons(b, r) => Cons((optBlkLabel(b), n), raLinearizeGo(r, n + raLenI(optBlkInstrs(b))))
+  end
+fn raLinearize(bs : List(OptBlock)) : List((String, Int)) = raLinearizeGo(bs, 0)
+
+fn raStartOf(m : List((String, Int)), lbl : String) : Int =
+  match m with
+  | Nil             => 0
+  | Cons((k, v), r) => if optStrEq(k, lbl) then v else raStartOf(r, lbl)
+  end
+
+
+(* -- Step 2: compute live intervals -- *)
+
+(* def/use points inside one block: instruction i sits at position p = s + i. *)
+fn raInstrPoints(ivs : List(RaIv), instrs : List(Instr), p : Int) : List(RaIv) =
+  match instrs with
+  | Nil        => ivs
+  | Cons(i, r) =>
+      let ivs1 = raExtendAll(ivs, raSortedNames(optDefs(i)), p) in
+      let ivs2 = raExtendAll(ivs1, raSortedNames(optUses(i)), p) in
+      raInstrPoints(ivs2, r, p + 1)
+  end
+
+fn raBlockIvs(ivs : List(RaIv), bs : List(OptBlock), bstart : List((String, Int)),
+              liveIn : List((String, StrSet)), liveOut : List((String, StrSet)))
+   : List(RaIv) =
+  match bs with
+  | Nil        => ivs
+  | Cons(b, r) =>
+      let lbl = optBlkLabel(b) in
+      let s   = raStartOf(bstart, lbl) in
+      let e   = s + raLenI(optBlkInstrs(b)) - 1 in
+      if e < s then raBlockIvs(ivs, r, bstart, liveIn, liveOut)   (* empty block *)
+      else
+        (* live across the whole block, then the individual def/use points *)
+        let ivs1 = raExtendSpan(ivs,  raSsToList(optLiveGet(liveIn,  lbl)), s, e) in
+        let ivs2 = raExtendSpan(ivs1, raSsToList(optLiveGet(liveOut, lbl)), s, e) in
+        let ivs3 = raInstrPoints(ivs2, optBlkInstrs(b), s) in
+        raBlockIvs(ivs3, r, bstart, liveIn, liveOut)
+  end
+
+fn raComputeIntervals(bs : List(OptBlock), liveIn : List((String, StrSet)),
+                      liveOut : List((String, StrSet)), bstart : List((String, Int)),
+                      params : List(String)) : List(RaIv) =
+  (* Parameters arrive in argument registers at entry: force their intervals to
+     start at 0, in PARAMETER order (not sorted — regalloc.py iterates the list). *)
+  let ivs0 = raExtendAll(Nil, params, 0) in
+  raBlockIvs(ivs0, bs, bstart, liveIn, liveOut)
+
+
+(* ══ Step 3: linear scan ═══════════════════════════════════════════════════ *)
+
+(* Sort by start.  STABLE — ties keep first-seen order (Interval.__lt__ compares
+   start only, and Python's sort is stable).  Insertion sort: ≤ 90 intervals in
+   the whole corpus, so the quadratic is free and stability is easy to see.
+   `<=` places x BEFORE equal-start intervals that came after it. *)
+fn raInsByStart(x : RaIv, sorted : List(RaIv)) : List(RaIv) =
+  match sorted with
+  | Nil        => Cons(x, Nil)
+  | Cons(y, r) =>
+      if raIvStart(x) <= raIvStart(y) then Cons(x, Cons(y, r))
+      else Cons(y, raInsByStart(x, r))
+  end
+fn raSortByStart(xs : List(RaIv)) : List(RaIv) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => raInsByStart(x, raSortByStart(r))
+  end
+
+(* `active` is kept sorted by end.  Python appends then stable-sorts, so a new
+   interval lands AFTER every interval with an equal end. *)
+fn raInsActive(x : RaIv, act : List(RaIv)) : List(RaIv) =
+  match act with
+  | Nil        => Cons(x, Nil)
+  | Cons(y, r) =>
+      if raIvEnd(y) > raIvEnd(x) then Cons(x, Cons(y, r))
+      else Cons(y, raInsActive(x, r))
+  end
+
+(* reg_assign / spill_slots: assoc lists.  Their insertion order is never
+   observed (only lookup, membership, and `set(values())`). *)
+fn raRegOf(m : List((String, String)), name : String) : String =
+  match m with
+  | Nil             => ""
+  | Cons((k, v), r) => if optStrEq(k, name) then v else raRegOf(r, name)
+  end
+
+fn raRegHas(m : List((String, String)), name : String) : Bool =
+  match m with
+  | Nil             => false
+  | Cons((k, _), r) => if optStrEq(k, name) then true else raRegHas(r, name)
+  end
+
+fn raRegDel(m : List((String, String)), name : String) : List((String, String)) =
+  match m with
+  | Nil             => Nil
+  | Cons((k, v), r) => if optStrEq(k, name) then r else Cons((k, v), raRegDel(r, name))
+  end
+
+fn raRegSet(m : List((String, String)), name : String, r : String)
+   : List((String, String)) =
+  Cons((name, r), raRegDel(m, name))
+
+fn raSlotOf(m : List((String, Int)), name : String) : Int =
+  match m with
+  | Nil             => 0
+  | Cons((k, v), r) => if optStrEq(k, name) then v else raSlotOf(r, name)
+  end
+
+fn raSlotHas(m : List((String, Int)), name : String) : Bool =
+  match m with
+  | Nil             => false
+  | Cons((k, _), r) => if optStrEq(k, name) then true else raSlotHas(r, name)
+  end
+
+fn raSlotSet(m : List((String, Int)), name : String, i : Int) : List((String, Int)) =
+  Cons((name, i), m)
+
+fn raLenSlots(m : List((String, Int))) : Int =
+  match m with | Nil => 0 | Cons(_, r) => 1 + raLenSlots(r) end
+
+(* Expire every active interval that ended before `start`, returning the surviving
+   active list and the free stack with the released registers pushed on top.
+   Python appends released registers in ACTIVE order (ascending end), and pops
+   from the top — so the last-expired register is handed out first. *)
+fn raExpire(act : List(RaIv), start : Int, regA : List((String, String)),
+            freeRev : List(String)) : (List(RaIv), List(String)) =
+  match act with
+  | Nil        => (Nil, freeRev)
+  | Cons(a, r) =>
+      if raIvEnd(a) < start then
+        raExpire(r, start, regA, Cons(raRegOf(regA, raIvName(a)), freeRev))
+      else
+        match raExpire(r, start, regA, freeRev) with
+        | (still, fr) => (Cons(a, still), fr)
+        end
+  end
+
+(* The spill candidate: the active interval with the LATEST end.  Python's max()
+   returns the FIRST maximal element, so the comparison is strict. *)
+fn raMaxEndGo(xs : List(RaIv), best : RaIv) : RaIv =
+  match xs with
+  | Nil        => best
+  | Cons(x, r) => if raIvEnd(x) > raIvEnd(best) then raMaxEndGo(r, x) else raMaxEndGo(r, best)
+  end
+fn raMaxEnd(xs : List(RaIv)) : RaIv =
+  match xs with
+  | Nil        => RaIv("", 0, 0)     (* unreachable: free empty ⇒ active non-empty *)
+  | Cons(x, r) => raMaxEndGo(r, x)
+  end
+
+(* list.remove(cand) — drop the first interval with that name (names are unique). *)
+fn raRemoveIv(xs : List(RaIv), name : String) : List(RaIv) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => if optStrEq(raIvName(x), name) then r else Cons(x, raRemoveIv(r, name))
+  end
+
+fn raScan(ivs : List(RaIv), freeRev : List(String), act : List(RaIv),
+          regA : List((String, String)), slots : List((String, Int)), sc : Int)
+   : (List((String, String)), List((String, Int))) =
+  match ivs with
+  | Nil          => (regA, slots)
+  | Cons(iv, rest) =>
+      match raExpire(act, raIvStart(iv), regA, freeRev) with
+      | (act1, free1) =>
+          match free1 with
+          | Nil =>
+              (* No register free — spill the interval that ends latest. *)
+              let cand = raMaxEnd(act1) in
+              if raIvEnd(cand) > raIvEnd(iv) then
+                (* Give the candidate's register to iv; send the candidate to memory. *)
+                let r      = raRegOf(regA, raIvName(cand)) in
+                let regA1  = raRegSet(raRegDel(regA, raIvName(cand)), raIvName(iv), r) in
+                let slots1 = raSlotSet(slots, raIvName(cand), sc) in
+                let act2   = raInsActive(iv, raRemoveIv(act1, raIvName(cand))) in
+                raScan(rest, free1, act2, regA1, slots1, sc + 1)
+              else
+                raScan(rest, free1, act1, regA, raSlotSet(slots, raIvName(iv), sc), sc + 1)
+          | Cons(r, freeRest) =>
+              raScan(rest, freeRest, raInsActive(iv, act1),
+                     raRegSet(regA, raIvName(iv), r), slots, sc)
+          end
+      end
+  end
+
+
+(* ══ Allocation ════════════════════════════════════════════════════════════ *)
+
+type Allocation =
+  | Allocation of String, List((String, String)), List((String, Int)), Int, List(String)
+    (* fn_name, reg, slot, num_slots, regs_used *)
+impl Copy for Allocation = {}
+
+fn raAllocName(a : Allocation) : String =
+  match a with | Allocation(n, _, _, _, _) => n end
+fn raAllocReg(a : Allocation) : List((String, String)) =
+  match a with | Allocation(_, m, _, _, _) => m end
+fn raAllocSlot(a : Allocation) : List((String, Int)) =
+  match a with | Allocation(_, _, m, _, _) => m end
+fn raAllocNumSlots(a : Allocation) : Int =
+  match a with | Allocation(_, _, _, n, _) => n end
+fn raAllocRegsUsed(a : Allocation) : List(String) =
+  match a with | Allocation(_, _, _, _, rs) => rs end
+
+fn raIsReg(a : Allocation, name : String) : Bool = raRegHas(raAllocReg(a), name)
+fn raIsSpill(a : Allocation, name : String) : Bool = raSlotHas(raAllocSlot(a), name)
+
+(* regs_used = sorted(set(reg_assign.values()), key=reg_order): walk _REGS in
+   order and keep the ones that were handed out. *)
+fn raRegInUse(r : String, m : List((String, String))) : Bool =
+  match m with
+  | Nil             => false
+  | Cons((_, v), rest) => if optStrEq(v, r) then true else raRegInUse(r, rest)
+  end
+
+fn raRegsUsed(regs : List(String), m : List((String, String))) : List(String) =
+  match regs with
+  | Nil        => Nil
+  | Cons(r, rest) =>
+      if raRegInUse(r, m) then Cons(r, raRegsUsed(rest, m))
+      else raRegsUsed(rest, m)
+  end
+
+fn raAllocate(fnName : String, bs : List(OptBlock), liveIn : List((String, StrSet)),
+              liveOut : List((String, StrSet)), params : List(String),
+              regs : List(String)) : Allocation =
+  let bstart = raLinearize(bs) in
+  let ivs    = raComputeIntervals(bs, liveIn, liveOut, bstart, params) in
+  match raScan(raSortByStart(ivs), raRevStr(regs), Nil, Nil, Nil, 0) with
+  | (regA, slots) =>
+      Allocation(fnName, regA, slots, raLenSlots(slots), raRegsUsed(regs, regA))
+  end
+
+(* One function: CFG → liveness → allocation.  optLiveness returns only live_out,
+   so the fixpoint live_in map is taken straight from optLiveFix. *)
+fn raAllocFn(f : Function) : Allocation =
+  let bs      = optBuildCfg(f) in
+  let gk      = optGenKillMap(bs) in
+  let liveIn  = optLiveFix(bs, gk, Nil, 10000) in
+  let liveOut = optLiveOutMap(bs, liveIn) in
+  raAllocate(optFnName(f), bs, liveIn, liveOut, optFnParams(f), raRegs)
+
+fn raAllocFns(fs : List(Function)) : List(Allocation) =
+  match fs with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(raAllocFn(f), raAllocFns(r))
+  end
+
+fn raAllocateTac(t : TAC) : List(Allocation) =
+  match t with | TAC(fns, _) => raAllocFns(fns) end
+
+
+(* ══ Pretty printer (regalloc.py pretty_allocation, intervals=None) ═════════ *)
+(* Mirrors Python formatting exactly: repr-quoted fn name, a Python list repr for
+   regs_used, and a 14-column left-justified name.  This is the text the F3.1a
+   differential compares. *)
+
+fn raPad(s : String, n : Int) : String =
+  if string_length(s) >= n then s else raPad(s + " ", n)
+
+fn raReprList(xs : List(String)) : String =
+  match xs with
+  | Nil        => ""
+  | Cons(x, r) =>
+      match r with
+      | Nil => tacReprStr(x)
+      | _   => tacReprStr(x) + ", " + raReprList(r)
+      end
+  end
+
+(* location(): register name, else the display form of the spill slot. *)
+fn raLocation(a : Allocation, name : String) : String =
+  if raIsReg(a, name) then raRegOf(raAllocReg(a), name)
+  else if raIsSpill(a, name) then
+    int_to_string(0 - (raSlotOf(raAllocSlot(a), name) + 1) * 4) + "(s0)"
+  else "<unallocated:" + name + ">"
+
+fn raRegKeys(m : List((String, String))) : List(String) =
+  match m with | Nil => Nil | Cons((k, _), r) => Cons(k, raRegKeys(r)) end
+fn raSlotKeys(m : List((String, Int))) : List(String) =
+  match m with | Nil => Nil | Cons((k, _), r) => Cons(k, raSlotKeys(r)) end
+
+fn raLenRegs(m : List((String, String))) : Int =
+  match m with | Nil => 0 | Cons(_, r) => 1 + raLenRegs(r) end
+
+fn raAllocLines(a : Allocation, names : List(String)) : List(String) =
+  match names with
+  | Nil        => Nil
+  | Cons(n, r) =>
+      Cons("  " + raPad(n, 14) + " → " + raLocation(a, n), raAllocLines(a, r))
+  end
+
+fn raPrettyAlloc(a : Allocation) : String =
+  let head = "Allocation " + tacReprStr(raAllocName(a))
+             + "  " + int_to_string(raLenRegs(raAllocReg(a))) + " reg"
+             + "  " + int_to_string(raAllocNumSlots(a)) + " spill"
+             + "  regs_used=[" + raReprList(raAllocRegsUsed(a)) + "]" in
+  (* sorted(set(alloc.reg) | set(alloc.slot)) *)
+  let names = raSsToList(ssFromList(raSlotKeys(raAllocSlot(a)),
+                         ssFromList(raRegKeys(raAllocReg(a)), SsLeaf))) in
+  tacJoin("\n", Cons(head, raAllocLines(a, names)))
+
+fn raPrettyAllocs(as : List(Allocation)) : List(String) =
+  match as with
+  | Nil        => Nil
+  | Cons(a, r) => Cons(raPrettyAlloc(a), raPrettyAllocs(r))
+  end
+
+(* The differential's payload: every function's allocation, blank-line separated. *)
+fn raPrettyTac(t : TAC) : String =
+  tacJoin("\n\n", raPrettyAllocs(raAllocateTac(t)))
+
+
+fn main(io : IO) : IO =
+  let g0 = Function("main", Nil,
+             Cons(IBinOp(Tmp("t0"), "+", OConst(CInt("2")), OConst(CInt("3"))),
+             Cons(IReturn(Just(OTmp(Tmp("t0")))), Nil)), 1) in
+  let prog = TAC(Cons(g0, Nil), Nil) in
+  print(io, raPrettyTac(prog))

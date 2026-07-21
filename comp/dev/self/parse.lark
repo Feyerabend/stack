@@ -1,0 +1,1052 @@
+(* parse.lark — the Lark parser, written in Lark.  (SELFHOST milestone M2.)
+
+   A faithful port of 07/src/parser.py + the AST types of 07/src/tree.py.
+   Consumes the token list produced by lex.lark (imported as module Lex) and
+   builds a Program AST, then pretty-prints it to a canonical S-expression.
+
+   Design notes
+   ────────────
+   • The token stream is a `List(Token)` threaded through every parse function
+     as a Copy value; each function returns `(Node, List(Token))` — the built
+     node plus the remaining tokens (the functional analogue of parser.py's
+     `self.pos` cursor).  Token / Kind / List / Pos come from `import Lex`.
+   • "expect a specific token" is just a structural match on the head token,
+     e.g. `Cons(Tok(KUpper, name, _, _), rest)` grabs an UPPER's text and the
+     tail in one step.  Guaranteed-present tokens (ASSIGN, IN, THEN, …) are
+     dropped with `advance`.  Fallback `_` arms return a placeholder; on the
+     valid corpus they never fire (parser.py raises there instead).
+   • AST value types get `impl Copy` so a node may be reused across `match`
+     arms — the affine checker sums uses across arms (SELFHOST §7), and the
+     precedence tails (`left` used in every arm) need that.  Copy impls are
+     name-only in infer, so this is free.
+   • Literals: INT/FLOAT keep the lexeme text (str(int|float) round-trips it —
+     verified over the corpus); STRING carries the *processed* value (escapes
+     resolved, quotes stripped) so it matches parser.py's `tok.value`.
+   • Validation is differential against parser.py — see self/tests/parse_difftest.py.
+     The `main` here is only a smoke driver; the harness replaces it per file.
+
+   Run (smoke):  python3 ../07/src/cek.py parse.lark   *)
+
+module Parse
+
+import Lex exposing (Kind, Token, Pos, List, tokenize, escape)
+
+
+(* ── AST types (port of tree.py) ──────────────────────────────────────────── *)
+
+(* Types.  (Named Ty to avoid the `type` keyword; serialized as tree.py names.) *)
+type Ty =
+  | TName of String
+  | TApply of String, List(Ty)
+  | TFn of Ty, Ty
+  | TUnit
+  | TTuple of List(Ty)
+
+(* Literal payloads.  INT/FLOAT hold the lexeme text; STR holds the value. *)
+type Val =
+  | VInt of String
+  | VFloat of String
+  | VStr of String
+  | VBool of Bool
+  | VUnit
+
+type Pat =
+  | PWild
+  | PVar of String
+  | PLit of Val
+  | PCon of String, List(Pat)
+  | PTuple of List(Pat)
+
+type Expr =
+  | Lit of Val
+  | Var of String
+  | Con of String
+  | TupleExpr of List(Expr)
+  | Apply of Expr, List(Expr)
+  | BinOp of String, Expr, Expr
+  | UnaryOp of String, Expr
+  | LetExpr of String, Maybe(Ty), Expr, Expr
+  | IfExpr of Expr, Expr, Expr
+  | MatchExpr of Expr, List(Arm)
+  | Lambda of List(Param), Expr
+
+type Arm     = | Arm of Pat, Expr
+type Param   = | Param of String, Maybe(Ty)
+type Bound   = | Bound of String, String
+type Variant = | Variant of String, List(Ty)
+type TMethod = | TMethod of String, Ty
+type IMethod = | IMethod of String, List(Param), Expr
+
+(* A type declaration's body is either an alias or a list of variants. *)
+type TyBody = | Alias of Ty | Variants of List(Variant)
+
+type Decl =
+  | FnDecl of Bool, String, List(Bound), List(Param), Maybe(Ty), Expr
+  | LetDecl of Bool, String, Maybe(Ty), Expr
+  | TypeDecl of Bool, String, List(String), TyBody
+  | TraitDecl of Bool, String, List(String), List(TMethod)
+  | ImplDecl of String, List(Ty), Ty, List(IMethod)
+
+type Import = | Import of String, Maybe(List(String))
+type Prog   = | Prog of String, List(Import), List(Decl)
+
+type Maybe a = | Nothing | Just of a
+
+
+(* ── Copy impls: let a node be reused across match arms (SELFHOST §7). ─────── *)
+
+impl Copy for Ty       = {}
+impl Copy for Val      = {}
+impl Copy for Pat      = {}
+impl Copy for Expr     = {}
+impl Copy for Arm      = {}
+impl Copy for Param    = {}
+impl Copy for Bound    = {}
+impl Copy for Variant  = {}
+impl Copy for TMethod  = {}
+impl Copy for IMethod  = {}
+impl Copy for TyBody   = {}
+impl Copy for Decl     = {}
+impl Copy for Import   = {}
+impl Copy for Prog     = {}
+impl Copy for Maybe(Ty) = {}
+
+
+(* ── Token-stream helper ──────────────────────────────────────────────────── *)
+
+(* Drop the head token (like parser._advance): EOF never advances. *)
+fn advance(ts : List(Token)) : List(Token) =
+  match ts with
+  | Cons(Tok(KEof, _, _, _), _) => ts
+  | Cons(_, rest)               => rest
+  | Nil                         => ts
+  end
+
+
+(* ── String-literal value: mirror lexer._read_string (escapes → value). ───── *)
+
+fn unescapeChar(e : Int) : String =
+  if e == 34 then "\""            (* \" *)
+  else if e == 92 then "\\"       (* \\ *)
+  else if e == 110 then "\n"      (* \n *)
+  else if e == 116 then "\t"      (* \t *)
+  else if e == 114 then "\r"      (* \r *)
+  else char_to_string(e)          (* unknown escape → the char itself *)
+
+fn strValFrom(s : String, i : Int, n : Int) : String =
+  if i >= n then ""
+  else
+    let c = string_index(s, i) in
+    if c == 34 then ""                     (* closing quote *)
+    else if c == 92 then                   (* backslash: consume it + next char *)
+      unescapeChar(string_index(s, i + 1)) + strValFrom(s, i + 2, n)
+    else char_to_string(c) + strValFrom(s, i + 1, n)
+
+fn strVal(s : String) : String =
+  strValFrom(s, 1, string_length(s))       (* skip opening quote at index 0 *)
+
+
+(* ── Types ────────────────────────────────────────────────────────────────── *)
+
+fn pType(ts : List(Token)) : (Ty, List(Token)) = pFnType(ts)
+
+fn pFnType(ts : List(Token)) : (Ty, List(Token)) =
+  match pAtomType(ts) with
+  | (left, ts1) =>
+    match ts1 with
+    | Cons(Tok(KArrow, _, _, _), r) =>
+      match pFnType(r) with | (right, ts2) => (TFn(left, right), ts2) end
+    | _ => (left, ts1)
+    end
+  end
+
+fn pAtomType(ts : List(Token)) : (Ty, List(Token)) =
+  match ts with
+  | Cons(Tok(KUnit, _, _, _), r) => (TUnit, r)
+  | Cons(Tok(KUpper, name, _, _), r) =>
+    match r with
+    | Cons(Tok(KLParen, _, _, _), r2) =>
+      match pTypeArgs(r2) with
+      | (args, ts1) =>
+        match ts1 with
+        | Cons(Tok(KRParen, _, _, _), ts2) => (TApply(name, args), ts2)
+        | _ => (TApply(name, args), ts1)
+        end
+      end
+    | _ => (TName(name), r)
+    end
+  | Cons(Tok(KName, name, _, _), r) => (TName(name), r)
+  | Cons(Tok(KLParen, _, _, _), r) =>
+    match pType(r) with
+    | (first, ts1) =>
+      match ts1 with
+      | Cons(Tok(KComma, _, _, _), _) =>
+        match pTypeArgsTail(ts1) with
+        | (rest, ts2) =>
+          match ts2 with
+          | Cons(Tok(KRParen, _, _, _), ts3) => (TTuple(Cons(first, rest)), ts3)
+          | _ => (TTuple(Cons(first, rest)), ts2)
+          end
+        end
+      | Cons(Tok(KRParen, _, _, _), ts2) => (first, ts2)
+      | _ => (first, ts1)
+      end
+    end
+  | _ => (TUnit, ts)
+  end
+
+fn pTypeArgs(ts : List(Token)) : (List(Ty), List(Token)) =
+  match pType(ts) with
+  | (t, ts1) => match pTypeArgsTail(ts1) with | (rest, ts2) => (Cons(t, rest), ts2) end
+  end
+
+fn pTypeArgsTail(ts : List(Token)) : (List(Ty), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pType(r) with
+    | (t, ts1) => match pTypeArgsTail(ts1) with | (rest, ts2) => (Cons(t, rest), ts2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+
+(* ── Patterns ─────────────────────────────────────────────────────────────── *)
+
+fn pPattern(ts : List(Token)) : (Pat, List(Token)) =
+  match ts with
+  | Cons(Tok(KWildcard, _, _, _), r) => (PWild, r)
+  | Cons(Tok(KName, txt, _, _), r)   => (PVar(txt), r)
+  | Cons(Tok(KInt, txt, _, _), r)    => (PLit(VInt(txt)), r)
+  | Cons(Tok(KFloat, txt, _, _), r)  => (PLit(VFloat(txt)), r)
+  | Cons(Tok(KString, txt, _, _), r) => (PLit(VStr(strVal(txt))), r)
+  | Cons(Tok(KTrue, _, _, _), r)     => (PLit(VBool(true)), r)
+  | Cons(Tok(KFalse, _, _, _), r)    => (PLit(VBool(false)), r)
+  | Cons(Tok(KUnit, _, _, _), r)     => (PLit(VUnit), r)
+  | Cons(Tok(KMinus, _, _, _), r) =>
+    match r with
+    | Cons(Tok(KInt, txt, _, _), r2)   => (PLit(VInt("-" + txt)), r2)
+    | Cons(Tok(KFloat, txt, _, _), r2) => (PLit(VFloat("-" + txt)), r2)
+    | _ => (PWild, r)
+    end
+  | Cons(Tok(KUpper, name, _, _), r) =>
+    match r with
+    | Cons(Tok(KLParen, _, _, _), r2) =>
+      match pPatArgs(r2) with
+      | (args, ts1) =>
+        match ts1 with
+        | Cons(Tok(KRParen, _, _, _), ts2) => (PCon(name, args), ts2)
+        | _ => (PCon(name, args), ts1)
+        end
+      end
+    | _ => (PCon(name, Nil), r)
+    end
+  | Cons(Tok(KLParen, _, _, _), r) =>
+    match pPattern(r) with
+    | (first, ts1) => pPatParenTail(first, ts1)
+    end
+  | _ => (PWild, ts)
+  end
+
+fn pPatArgs(ts : List(Token)) : (List(Pat), List(Token)) =
+  match pPattern(ts) with
+  | (p, ts1) => match pPatArgsTail(ts1) with | (rest, ts2) => (Cons(p, rest), ts2) end
+  end
+
+fn pPatArgsTail(ts : List(Token)) : (List(Pat), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pPattern(r) with
+    | (p, ts1) => match pPatArgsTail(ts1) with | (rest, ts2) => (Cons(p, rest), ts2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+(* '(' pattern {',' pattern} ')'  — single element unwraps to that pattern. *)
+fn pPatParenTail(first : Pat, ts : List(Token)) : (Pat, List(Token)) =
+  match pPatArgsTail(ts) with
+  | (rest, ts1) =>
+    match ts1 with
+    | Cons(Tok(KRParen, _, _, _), ts2) =>
+      match rest with
+      | Nil => (first, ts2)
+      | _   => (PTuple(Cons(first, rest)), ts2)
+      end
+    | _ => (first, ts1)
+    end
+  end
+
+
+(* ── Expressions ──────────────────────────────────────────────────────────── *)
+
+fn pExpr(ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KLet, _, _, _), _)   => pLetExpr(ts)
+  | Cons(Tok(KIf, _, _, _), _)    => pIfExpr(ts)
+  | Cons(Tok(KMatch, _, _, _), _) => pMatchExpr(ts)
+  | Cons(Tok(KFn, _, _, _), _)    => pLambda(ts)
+  | _ => pOr(ts)
+  end
+
+(* optional  ':' type  → (Maybe(Ty), rest) *)
+fn pOptAnn(ts : List(Token)) : (Maybe(Ty), List(Token)) =
+  match ts with
+  | Cons(Tok(KColon, _, _, _), r) =>
+    match pType(r) with | (t, ts1) => (Just(t), ts1) end
+  | _ => (Nothing, ts)
+  end
+
+fn pLetExpr(ts : List(Token)) : (Expr, List(Token)) =
+  let r0 = advance(ts) in                    (* LET *)
+  match r0 with
+  | Cons(Tok(KName, name, _, _), r1) =>
+    match pOptAnn(r1) with
+    | (ann, r2) =>
+      let r3 = advance(r2) in                (* ASSIGN *)
+      match pExpr(r3) with
+      | (val, r4) =>
+        let r5 = advance(r4) in              (* IN *)
+        match pExpr(r5) with
+        | (body, r6) => (LetExpr(name, ann, val, body), r6)
+        end
+      end
+    end
+  | _ => (Lit(VUnit), ts)
+  end
+
+fn pIfExpr(ts : List(Token)) : (Expr, List(Token)) =
+  let r0 = advance(ts) in                    (* IF *)
+  match pExpr(r0) with
+  | (c, r1) =>
+    let r2 = advance(r1) in                  (* THEN *)
+    match pExpr(r2) with
+    | (t, r3) =>
+      let r4 = advance(r3) in                (* ELSE *)
+      match pExpr(r4) with
+      | (e, r5) => (IfExpr(c, t, e), r5)
+      end
+    end
+  end
+
+fn pMatchExpr(ts : List(Token)) : (Expr, List(Token)) =
+  let r0 = advance(ts) in                    (* MATCH *)
+  match pExpr(r0) with
+  | (scrut, r1) =>
+    let r2 = advance(r1) in                  (* WITH *)
+    match pArms(r2) with
+    | (arms, r3) =>
+      let r4 = advance(r3) in                (* END *)
+      (MatchExpr(scrut, arms), r4)
+    end
+  end
+
+fn pArms(ts : List(Token)) : (List(Arm), List(Token)) =
+  match ts with
+  | Cons(Tok(KPipe, _, _, _), r) =>
+    match pPattern(r) with
+    | (p, r1) =>
+      let r2 = advance(r1) in                (* FAT_ARROW *)
+      match pExpr(r2) with
+      | (e, r3) =>
+        match pArms(r3) with | (rest, r4) => (Cons(Arm(p, e), rest), r4) end
+      end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pLambda(ts : List(Token)) : (Expr, List(Token)) =
+  let r0 = advance(ts) in                    (* FN *)
+  let r1 = advance(r0) in                    (* LPAREN *)
+  match pParams(r1) with
+  | (params, r2) =>
+    let r3 = advance(r2) in                  (* RPAREN *)
+    let r4 = advance(r3) in                  (* FAT_ARROW *)
+    match pExpr(r4) with
+    | (body, r5) => (Lambda(params, body), r5)
+    end
+  end
+
+(* Precedence: or < and < compare < add < mul < unary < apply *)
+
+fn pOr(ts : List(Token)) : (Expr, List(Token)) =
+  match pAnd(ts) with | (l, r) => pOrTail(l, r) end
+fn pOrTail(left : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KOr, _, _, _), r) =>
+    match pAnd(r) with | (rhs, r2) => pOrTail(BinOp("or", left, rhs), r2) end
+  | _ => (left, ts)
+  end
+
+fn pAnd(ts : List(Token)) : (Expr, List(Token)) =
+  match pCompare(ts) with | (l, r) => pAndTail(l, r) end
+fn pAndTail(left : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KAnd, _, _, _), r) =>
+    match pCompare(r) with | (rhs, r2) => pAndTail(BinOp("and", left, rhs), r2) end
+  | _ => (left, ts)
+  end
+
+fn pCompare(ts : List(Token)) : (Expr, List(Token)) =
+  match pAdd(ts) with | (l, r) => pCompareTail(l, r) end
+fn pCompareTail(left : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KEqEq, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp("==", left, rhs), r2) end
+  | Cons(Tok(KNeq, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp("!=", left, rhs), r2) end
+  | Cons(Tok(KLt, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp("<", left, rhs), r2) end
+  | Cons(Tok(KLe, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp("<=", left, rhs), r2) end
+  | Cons(Tok(KGt, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp(">", left, rhs), r2) end
+  | Cons(Tok(KGe, _, _, _), r) =>
+    match pAdd(r) with | (rhs, r2) => pCompareTail(BinOp(">=", left, rhs), r2) end
+  | _ => (left, ts)
+  end
+
+fn pAdd(ts : List(Token)) : (Expr, List(Token)) =
+  match pMul(ts) with | (l, r) => pAddTail(l, r) end
+fn pAddTail(left : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KPlus, _, _, _), r) =>
+    match pMul(r) with | (rhs, r2) => pAddTail(BinOp("+", left, rhs), r2) end
+  | Cons(Tok(KMinus, _, _, _), r) =>
+    match pMul(r) with | (rhs, r2) => pAddTail(BinOp("-", left, rhs), r2) end
+  | _ => (left, ts)
+  end
+
+fn pMul(ts : List(Token)) : (Expr, List(Token)) =
+  match pUnary(ts) with | (l, r) => pMulTail(l, r) end
+fn pMulTail(left : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KStar, _, _, _), r) =>
+    match pUnary(r) with | (rhs, r2) => pMulTail(BinOp("*", left, rhs), r2) end
+  | Cons(Tok(KSlash, _, _, _), r) =>
+    match pUnary(r) with | (rhs, r2) => pMulTail(BinOp("/", left, rhs), r2) end
+  | _ => (left, ts)
+  end
+
+fn pUnary(ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KMinus, _, _, _), r) =>
+    match pUnary(r) with | (x, r2) => (UnaryOp("-", x), r2) end
+  | Cons(Tok(KNot, _, _, _), r) =>
+    match pUnary(r) with | (x, r2) => (UnaryOp("not", x), r2) end
+  | _ => pApply(ts)
+  end
+
+fn pApply(ts : List(Token)) : (Expr, List(Token)) =
+  match pAtom(ts) with | (e, ts1) => pApplyTail(e, ts1) end
+fn pApplyTail(e : Expr, ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KLParen, _, _, _), r) =>
+    match pArgs(r) with
+    | (args, ts2) =>
+      match ts2 with
+      | Cons(Tok(KRParen, _, _, _), ts3) => pApplyTail(Apply(e, args), ts3)
+      | _ => (Apply(e, args), ts2)
+      end
+    end
+  | _ => (e, ts)
+  end
+
+fn pArgs(ts : List(Token)) : (List(Expr), List(Token)) =
+  match ts with
+  | Cons(Tok(KRParen, _, _, _), _) => (Nil, ts)
+  | _ =>
+    match pExpr(ts) with
+    | (e, ts1) => match pArgsTail(ts1) with | (rest, ts2) => (Cons(e, rest), ts2) end
+    end
+  end
+
+fn pArgsTail(ts : List(Token)) : (List(Expr), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pExpr(r) with
+    | (e, ts1) => match pArgsTail(ts1) with | (rest, ts2) => (Cons(e, rest), ts2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pAtom(ts : List(Token)) : (Expr, List(Token)) =
+  match ts with
+  | Cons(Tok(KInt, txt, _, _), r)    => (Lit(VInt(txt)), r)
+  | Cons(Tok(KFloat, txt, _, _), r)  => (Lit(VFloat(txt)), r)
+  | Cons(Tok(KString, txt, _, _), r) => (Lit(VStr(strVal(txt))), r)
+  | Cons(Tok(KTrue, _, _, _), r)     => (Lit(VBool(true)), r)
+  | Cons(Tok(KFalse, _, _, _), r)    => (Lit(VBool(false)), r)
+  | Cons(Tok(KUnit, _, _, _), r)     => (Lit(VUnit), r)
+  | Cons(Tok(KName, txt, _, _), r)   => (Var(txt), r)
+  | Cons(Tok(KUpper, txt, _, _), r)  => (Con(txt), r)
+  | Cons(Tok(KLParen, _, _, _), r) =>
+    match pExpr(r) with
+    | (first, ts1) =>
+      match ts1 with
+      | Cons(Tok(KComma, _, _, _), _) =>
+        match pArgsTail(ts1) with
+        | (rest, ts2) =>
+          match ts2 with
+          | Cons(Tok(KRParen, _, _, _), ts3) => (TupleExpr(Cons(first, rest)), ts3)
+          | _ => (TupleExpr(Cons(first, rest)), ts2)
+          end
+        end
+      | Cons(Tok(KRParen, _, _, _), ts2) => (first, ts2)
+      | _ => (first, ts1)
+      end
+    end
+  | _ => (Lit(VUnit), ts)
+  end
+
+
+(* ── Parameters and bounds ────────────────────────────────────────────────── *)
+
+fn pParams(ts : List(Token)) : (List(Param), List(Token)) =
+  match ts with
+  | Cons(Tok(KRParen, _, _, _), _) => (Nil, ts)
+  | _ =>
+    match pParam(ts) with
+    | (p, r1) => match pParamsTail(r1) with | (rest, r2) => (Cons(p, rest), r2) end
+    end
+  end
+
+fn pParamsTail(ts : List(Token)) : (List(Param), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pParam(r) with
+    | (p, r1) => match pParamsTail(r1) with | (rest, r2) => (Cons(p, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pParam(ts : List(Token)) : (Param, List(Token)) =
+  match ts with
+  | Cons(Tok(KWildcard, _, _, _), r) => (Param("_", Nothing), r)
+  | Cons(Tok(KName, name, _, _), r) =>
+    match pOptAnn(r) with | (ann, r1) => (Param(name, ann), r1) end
+  | _ => (Param("?", Nothing), ts)
+  end
+
+fn pOptBounds(ts : List(Token)) : (List(Bound), List(Token)) =
+  match ts with
+  | Cons(Tok(KLBracket, _, _, _), _) => pBounds(ts)
+  | _ => (Nil, ts)
+  end
+
+fn pBounds(ts : List(Token)) : (List(Bound), List(Token)) =
+  let r0 = advance(ts) in                    (* LBRACKET *)
+  match pBound(r0) with
+  | (b, r1) =>
+    match pBoundsTail(r1) with
+    | (rest, r2) =>
+      let r3 = advance(r2) in                (* RBRACKET *)
+      (Cons(b, rest), r3)
+    end
+  end
+
+fn pBoundsTail(ts : List(Token)) : (List(Bound), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pBound(r) with
+    | (b, r1) => match pBoundsTail(r1) with | (rest, r2) => (Cons(b, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pBound(ts : List(Token)) : (Bound, List(Token)) =
+  match ts with
+  | Cons(Tok(KUpper, tr, _, _), r1) =>
+    match r1 with
+    | Cons(Tok(KName, v, _, _), r2) => (Bound(tr, v), r2)
+    | _ => (Bound(tr, "?"), r1)
+    end
+  | _ => (Bound("?", "?"), ts)
+  end
+
+
+(* ── Declarations ─────────────────────────────────────────────────────────── *)
+
+fn pFnDecl(exported : Bool, ts : List(Token)) : (Decl, List(Token)) =
+  let r0 = advance(ts) in                    (* FN *)
+  match r0 with
+  | Cons(Tok(KName, name, _, _), r1) =>
+    match pOptBounds(r1) with
+    | (bounds, r2) =>
+      let r3 = advance(r2) in                (* LPAREN *)
+      match pParams(r3) with
+      | (params, r4) =>
+        let r5 = advance(r4) in              (* RPAREN *)
+        match pOptAnn(r5) with               (* optional ':' return type *)
+        | (ret, r6) =>
+          let r7 = advance(r6) in            (* ASSIGN *)
+          match pExpr(r7) with
+          | (body, r8) => (FnDecl(exported, name, bounds, params, ret, body), r8)
+          end
+        end
+      end
+    end
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pLetDecl(exported : Bool, ts : List(Token)) : (Decl, List(Token)) =
+  let r0 = advance(ts) in                    (* LET *)
+  match r0 with
+  | Cons(Tok(KName, name, _, _), r1) =>
+    match pOptAnn(r1) with
+    | (ann, r2) =>
+      let r3 = advance(r2) in                (* ASSIGN *)
+      match pExpr(r3) with
+      | (val, r4) => (LetDecl(exported, name, ann, val), r4)
+      end
+    end
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pTypeDecl(exported : Bool, ts : List(Token)) : (Decl, List(Token)) =
+  let r0 = advance(ts) in                    (* TYPE *)
+  match r0 with
+  | Cons(Tok(KUpper, name, _, _), r1) =>
+    match pTyParams(r1) with
+    | (params, r2) =>
+      let r3 = advance(r2) in                (* ASSIGN *)
+      match r3 with
+      | Cons(Tok(KPipe, _, _, _), _) =>
+        match pVariants(r3) with
+        | (vs, r4) => (TypeDecl(exported, name, params, Variants(vs)), r4)
+        end
+      | _ =>
+        match pType(r3) with
+        | (t, r4) => (TypeDecl(exported, name, params, Alias(t)), r4)
+        end
+      end
+    end
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pTyParams(ts : List(Token)) : (List(String), List(Token)) =
+  match ts with
+  | Cons(Tok(KName, n, _, _), r) =>
+    match pTyParams(r) with | (rest, r2) => (Cons(n, rest), r2) end
+  | _ => (Nil, ts)
+  end
+
+fn pVariants(ts : List(Token)) : (List(Variant), List(Token)) =
+  match ts with
+  | Cons(Tok(KPipe, _, _, _), r) =>
+    match r with
+    | Cons(Tok(KUpper, vn, _, _), r2) =>
+      match pVariantPayload(r2) with
+      | (payload, r3) =>
+        match pVariants(r3) with
+        | (rest, r4) => (Cons(Variant(vn, payload), rest), r4)
+        end
+      end
+    | _ => (Nil, r)
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pVariantPayload(ts : List(Token)) : (List(Ty), List(Token)) =
+  match ts with
+  | Cons(Tok(KOf, _, _, _), r) =>
+    match pType(r) with
+    | (t, r1) => match pVariantPayloadTail(r1) with | (rest, r2) => (Cons(t, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pVariantPayloadTail(ts : List(Token)) : (List(Ty), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pType(r) with
+    | (t, r1) => match pVariantPayloadTail(r1) with | (rest, r2) => (Cons(t, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pTraitDecl(exported : Bool, ts : List(Token)) : (Decl, List(Token)) =
+  let r0 = advance(ts) in                    (* TRAIT *)
+  match r0 with
+  | Cons(Tok(KUpper, name, _, _), r1) =>
+    match pTyParams(r1) with
+    | (params, r2) =>
+      let r3 = advance(r2) in                (* ASSIGN *)
+      let r4 = advance(r3) in                (* LBRACE *)
+      match pTraitMethods(r4) with
+      | (methods, r5) =>
+        let r6 = advance(r5) in              (* RBRACE *)
+        (TraitDecl(exported, name, params, methods), r6)
+      end
+    end
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pTraitMethods(ts : List(Token)) : (List(TMethod), List(Token)) =
+  match ts with
+  | Cons(Tok(KRBrace, _, _, _), _) => (Nil, ts)
+  | Cons(Tok(KEof, _, _, _), _)    => (Nil, ts)
+  | _ =>
+    match pTraitMethod(ts) with
+    | (m, r1) => match pTraitMethods(r1) with | (rest, r2) => (Cons(m, rest), r2) end
+    end
+  end
+
+fn pTraitMethod(ts : List(Token)) : (TMethod, List(Token)) =
+  let r0 = advance(ts) in                    (* FN *)
+  match r0 with
+  | Cons(Tok(KName, name, _, _), r1) =>
+    let r2 = advance(r1) in                  (* COLON *)
+    match pType(r2) with | (t, r3) => (TMethod(name, t), r3) end
+  | _ => (TMethod("?", TUnit), ts)
+  end
+
+fn pImplDecl(ts : List(Token)) : (Decl, List(Token)) =
+  let r0 = advance(ts) in                    (* IMPL *)
+  match r0 with
+  | Cons(Tok(KUpper, tname, _, _), r1) =>
+    match pImplArgs(r1) with
+    | (targs, r2) =>
+      let r3 = advance(r2) in                (* FOR *)
+      match pAtomType(r3) with
+      | (forty, r4) =>
+        let r5 = advance(r4) in              (* ASSIGN *)
+        let r6 = advance(r5) in              (* LBRACE *)
+        match pImplMethods(r6) with
+        | (methods, r7) =>
+          let r8 = advance(r7) in            (* RBRACE *)
+          (ImplDecl(tname, targs, forty, methods), r8)
+        end
+      end
+    end
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pImplArgs(ts : List(Token)) : (List(Ty), List(Token)) =
+  match ts with
+  | Cons(Tok(KFor, _, _, _), _) => (Nil, ts)
+  | Cons(Tok(KEof, _, _, _), _) => (Nil, ts)
+  | _ =>
+    match pAtomType(ts) with
+    | (t, r1) => match pImplArgs(r1) with | (rest, r2) => (Cons(t, rest), r2) end
+    end
+  end
+
+fn pImplMethods(ts : List(Token)) : (List(IMethod), List(Token)) =
+  match ts with
+  | Cons(Tok(KRBrace, _, _, _), _) => (Nil, ts)
+  | Cons(Tok(KEof, _, _, _), _)    => (Nil, ts)
+  | _ =>
+    match pImplMethod(ts) with
+    | (m, r1) => match pImplMethods(r1) with | (rest, r2) => (Cons(m, rest), r2) end
+    end
+  end
+
+fn pImplMethod(ts : List(Token)) : (IMethod, List(Token)) =
+  let r0 = advance(ts) in                    (* FN *)
+  match r0 with
+  | Cons(Tok(KName, name, _, _), r1) =>
+    let r2 = advance(r1) in                  (* LPAREN *)
+    match pParams(r2) with
+    | (params, r3) =>
+      let r4 = advance(r3) in                (* RPAREN *)
+      let r5 = advance(r4) in                (* ASSIGN *)
+      match pExpr(r5) with | (body, r6) => (IMethod(name, params, body), r6) end
+    end
+  | _ => (IMethod("?", Nil, Lit(VUnit)), ts)
+  end
+
+fn pTopDecl(ts : List(Token)) : (Decl, List(Token)) =
+  match ts with
+  | Cons(Tok(KExport, _, _, _), r) => pDeclBody(true, r)
+  | _ => pDeclBody(false, ts)
+  end
+
+fn pDeclBody(exported : Bool, ts : List(Token)) : (Decl, List(Token)) =
+  match ts with
+  | Cons(Tok(KFn, _, _, _), _)    => pFnDecl(exported, ts)
+  | Cons(Tok(KLet, _, _, _), _)   => pLetDecl(exported, ts)
+  | Cons(Tok(KType, _, _, _), _)  => pTypeDecl(exported, ts)
+  | Cons(Tok(KTrait, _, _, _), _) => pTraitDecl(exported, ts)
+  | Cons(Tok(KImpl, _, _, _), _)  => pImplDecl(ts)
+  | _ => (LetDecl(false, "?", Nothing, Lit(VUnit)), ts)
+  end
+
+fn pDecls(ts : List(Token)) : (List(Decl), List(Token)) =
+  match ts with
+  | Cons(Tok(KEof, _, _, _), _) => (Nil, ts)
+  | Nil => (Nil, ts)
+  | _ =>
+    match pTopDecl(ts) with
+    | (d, r1) => match pDecls(r1) with | (rest, r2) => (Cons(d, rest), r2) end
+    end
+  end
+
+
+(* ── Imports and program ──────────────────────────────────────────────────── *)
+
+fn pModule(ts : List(Token)) : (String, List(Token)) =
+  let r0 = advance(ts) in                    (* MODULE *)
+  match r0 with
+  | Cons(Tok(KUpper, name, _, _), r1) => (name, r1)
+  | _ => ("?", r0)
+  end
+
+fn pExportName(ts : List(Token)) : (String, List(Token)) =
+  match ts with
+  | Cons(Tok(KName, n, _, _), r)  => (n, r)
+  | Cons(Tok(KUpper, n, _, _), r) => (n, r)
+  | _ => ("?", ts)
+  end
+
+fn pExportNames(ts : List(Token)) : (List(String), List(Token)) =
+  match pExportName(ts) with
+  | (n, r1) => match pExportNamesTail(r1) with | (rest, r2) => (Cons(n, rest), r2) end
+  end
+
+fn pExportNamesTail(ts : List(Token)) : (List(String), List(Token)) =
+  match ts with
+  | Cons(Tok(KComma, _, _, _), r) =>
+    match pExportName(r) with
+    | (n, r1) => match pExportNamesTail(r1) with | (rest, r2) => (Cons(n, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn pImport(ts : List(Token)) : (Import, List(Token)) =
+  let r0 = advance(ts) in                    (* IMPORT *)
+  match r0 with
+  | Cons(Tok(KUpper, mod, _, _), r1) =>
+    match r1 with
+    | Cons(Tok(KExposing, _, _, _), r2) =>
+      let r3 = advance(r2) in                (* LPAREN *)
+      match pExportNames(r3) with
+      | (names, r4) =>
+        let r5 = advance(r4) in              (* RPAREN *)
+        (Import(mod, Just(names)), r5)
+      end
+    | _ => (Import(mod, Nothing), r1)
+    end
+  | _ => (Import("?", Nothing), r0)
+  end
+
+fn pImports(ts : List(Token)) : (List(Import), List(Token)) =
+  match ts with
+  | Cons(Tok(KImport, _, _, _), _) =>
+    match pImport(ts) with
+    | (i, r1) => match pImports(r1) with | (rest, r2) => (Cons(i, rest), r2) end
+    end
+  | _ => (Nil, ts)
+  end
+
+fn parseProgram(ts : List(Token)) : Prog =
+  match pModule(ts) with
+  | (name, r1) =>
+    match pImports(r1) with
+    | (imps, r2) =>
+      match pDecls(r2) with
+      | (decls, _) => Prog(name, imps, decls)
+      end
+    end
+  end
+
+
+(* ── Serialization: canonical S-expression, mirrored by parse_difftest.py. ─── *)
+
+fn sBool(b : Bool) : String = if b then "true" else "false"
+
+fn sVal(v : Val) : String =
+  match v with
+  | VInt(t)   => "(VInt " + t + ")"
+  | VFloat(t) => "(VFloat " + t + ")"
+  | VStr(s)   => "(VStr \"" + escape(s, 0, string_length(s)) + "\")"
+  | VBool(b)  => "(VBool " + sBool(b) + ")"
+  | VUnit     => "(VUnit)"
+  end
+
+fn sTy(t : Ty) : String =
+  match t with
+  | TName(n)        => "(TName " + n + ")"
+  | TApply(n, args) => "(TApply " + n + " " + sTyList(args) + ")"
+  | TFn(a, b)       => "(TFn " + sTy(a) + " " + sTy(b) + ")"
+  | TUnit           => "(TUnit)"
+  | TTuple(es)      => "(TTuple " + sTyList(es) + ")"
+  end
+
+fn sTyItems(ts : List(Ty)) : String =
+  match ts with
+  | Nil           => ""
+  | Cons(t, Nil)  => sTy(t)
+  | Cons(t, rest) => sTy(t) + " " + sTyItems(rest)
+  end
+fn sTyList(ts : List(Ty)) : String = "[" + sTyItems(ts) + "]"
+
+fn sMaybeTy(m : Maybe(Ty)) : String =
+  match m with
+  | Nothing => "_"
+  | Just(t) => sTy(t)
+  end
+
+fn sPat(p : Pat) : String =
+  match p with
+  | PWild         => "(PWild)"
+  | PVar(n)       => "(PVar " + n + ")"
+  | PLit(v)       => "(PLit " + sVal(v) + ")"
+  | PCon(n, args) => "(PCon " + n + " " + sPatList(args) + ")"
+  | PTuple(es)    => "(PTuple " + sPatList(es) + ")"
+  end
+
+fn sPatItems(ps : List(Pat)) : String =
+  match ps with
+  | Nil           => ""
+  | Cons(p, Nil)  => sPat(p)
+  | Cons(p, rest) => sPat(p) + " " + sPatItems(rest)
+  end
+fn sPatList(ps : List(Pat)) : String = "[" + sPatItems(ps) + "]"
+
+fn sExpr(e : Expr) : String =
+  match e with
+  | Lit(v)              => "(Lit " + sVal(v) + ")"
+  | Var(n)              => "(Var " + n + ")"
+  | Con(n)              => "(Con " + n + ")"
+  | TupleExpr(es)       => "(TupleExpr " + sExprList(es) + ")"
+  | Apply(f, args)      => "(Apply " + sExpr(f) + " " + sExprList(args) + ")"
+  | BinOp(op, l, r)     => "(BinOp " + op + " " + sExpr(l) + " " + sExpr(r) + ")"
+  | UnaryOp(op, x)      => "(UnaryOp " + op + " " + sExpr(x) + ")"
+  | LetExpr(n, a, v, b) => "(LetExpr " + n + " " + sMaybeTy(a) + " " + sExpr(v) + " " + sExpr(b) + ")"
+  | IfExpr(c, t, e)     => "(IfExpr " + sExpr(c) + " " + sExpr(t) + " " + sExpr(e) + ")"
+  | MatchExpr(s, arms)  => "(MatchExpr " + sExpr(s) + " " + sArmList(arms) + ")"
+  | Lambda(ps, b)       => "(Lambda " + sParamList(ps) + " " + sExpr(b) + ")"
+  end
+
+fn sExprItems(es : List(Expr)) : String =
+  match es with
+  | Nil           => ""
+  | Cons(e, Nil)  => sExpr(e)
+  | Cons(e, rest) => sExpr(e) + " " + sExprItems(rest)
+  end
+fn sExprList(es : List(Expr)) : String = "[" + sExprItems(es) + "]"
+
+fn sArm(a : Arm) : String =
+  match a with | Arm(p, e) => "(Arm " + sPat(p) + " " + sExpr(e) + ")" end
+fn sArmItems(as : List(Arm)) : String =
+  match as with
+  | Nil           => ""
+  | Cons(a, Nil)  => sArm(a)
+  | Cons(a, rest) => sArm(a) + " " + sArmItems(rest)
+  end
+fn sArmList(as : List(Arm)) : String = "[" + sArmItems(as) + "]"
+
+fn sParam(p : Param) : String =
+  match p with | Param(n, a) => "(Param " + n + " " + sMaybeTy(a) + ")" end
+fn sParamItems(ps : List(Param)) : String =
+  match ps with
+  | Nil           => ""
+  | Cons(p, Nil)  => sParam(p)
+  | Cons(p, rest) => sParam(p) + " " + sParamItems(rest)
+  end
+fn sParamList(ps : List(Param)) : String = "[" + sParamItems(ps) + "]"
+
+fn sBound(b : Bound) : String =
+  match b with | Bound(tr, v) => "(Bound " + tr + " " + v + ")" end
+fn sBoundItems(bs : List(Bound)) : String =
+  match bs with
+  | Nil           => ""
+  | Cons(b, Nil)  => sBound(b)
+  | Cons(b, rest) => sBound(b) + " " + sBoundItems(rest)
+  end
+fn sBoundList(bs : List(Bound)) : String = "[" + sBoundItems(bs) + "]"
+
+fn sVariant(v : Variant) : String =
+  match v with | Variant(n, payload) => "(Variant " + n + " " + sTyList(payload) + ")" end
+fn sVariantItems(vs : List(Variant)) : String =
+  match vs with
+  | Nil           => ""
+  | Cons(v, Nil)  => sVariant(v)
+  | Cons(v, rest) => sVariant(v) + " " + sVariantItems(rest)
+  end
+fn sVariantList(vs : List(Variant)) : String = "[" + sVariantItems(vs) + "]"
+
+fn sTMethod(m : TMethod) : String =
+  match m with | TMethod(n, t) => "(TMethod " + n + " " + sTy(t) + ")" end
+fn sTMethodItems(ms : List(TMethod)) : String =
+  match ms with
+  | Nil           => ""
+  | Cons(m, Nil)  => sTMethod(m)
+  | Cons(m, rest) => sTMethod(m) + " " + sTMethodItems(rest)
+  end
+fn sTMethodList(ms : List(TMethod)) : String = "[" + sTMethodItems(ms) + "]"
+
+fn sIMethod(m : IMethod) : String =
+  match m with
+  | IMethod(n, params, body) => "(IMethod " + n + " " + sParamList(params) + " " + sExpr(body) + ")"
+  end
+fn sIMethodItems(ms : List(IMethod)) : String =
+  match ms with
+  | Nil           => ""
+  | Cons(m, Nil)  => sIMethod(m)
+  | Cons(m, rest) => sIMethod(m) + " " + sIMethodItems(rest)
+  end
+fn sIMethodList(ms : List(IMethod)) : String = "[" + sIMethodItems(ms) + "]"
+
+fn sStrItems(ns : List(String)) : String =
+  match ns with
+  | Nil           => ""
+  | Cons(n, Nil)  => n
+  | Cons(n, rest) => n + " " + sStrItems(rest)
+  end
+fn sStrList(ns : List(String)) : String = "[" + sStrItems(ns) + "]"
+
+fn sTyBody(b : TyBody) : String =
+  match b with
+  | Alias(t)     => "(Alias " + sTy(t) + ")"
+  | Variants(vs) => "(Variants " + sVariantList(vs) + ")"
+  end
+
+fn sMaybeNames(m : Maybe(List(String))) : String =
+  match m with
+  | Nothing  => "_"
+  | Just(ns) => sStrList(ns)
+  end
+
+fn sDecl(d : Decl) : String =
+  match d with
+  | FnDecl(exp, n, bounds, params, ret, body) =>
+    "(FnDecl " + sBool(exp) + " " + n + " " + sBoundList(bounds) + " "
+      + sParamList(params) + " " + sMaybeTy(ret) + " " + sExpr(body) + ")"
+  | LetDecl(exp, n, ann, v) =>
+    "(LetDecl " + sBool(exp) + " " + n + " " + sMaybeTy(ann) + " " + sExpr(v) + ")"
+  | TypeDecl(exp, n, params, body) =>
+    "(TypeDecl " + sBool(exp) + " " + n + " " + sStrList(params) + " " + sTyBody(body) + ")"
+  | TraitDecl(exp, n, params, methods) =>
+    "(TraitDecl " + sBool(exp) + " " + n + " " + sStrList(params) + " " + sTMethodList(methods) + ")"
+  | ImplDecl(tn, targs, forty, methods) =>
+    "(ImplDecl " + tn + " " + sTyList(targs) + " " + sTy(forty) + " " + sIMethodList(methods) + ")"
+  end
+
+fn sImport(i : Import) : String =
+  match i with | Import(m, expo) => "(Import " + m + " " + sMaybeNames(expo) + ")" end
+
+(* Top level: one line per import and per decl for readable diffs. *)
+fn sImportLines(is : List(Import)) : String =
+  match is with
+  | Nil           => ""
+  | Cons(i, rest) => "\n" + sImport(i) + sImportLines(rest)
+  end
+
+fn sDeclLines(ds : List(Decl)) : String =
+  match ds with
+  | Nil           => ""
+  | Cons(d, rest) => "\n" + sDecl(d) + sDeclLines(rest)
+  end
+
+fn dumpProg(p : Prog) : String =
+  match p with
+  | Prog(name, imps, decls) =>
+    "(module " + name + ")" + sImportLines(imps) + sDeclLines(decls)
+  end
+
+
+(* ── Smoke driver (the harness replaces this main per input file). ─────────── *)
+
+fn main(io : IO) : IO =
+  let src = "module Demo\n\nfn add(x : Int, y : Int) : Int = x + y * 2" in
+  print(io, dumpProg(parseProgram(tokenize(src, string_length(src), P(0, 1, 1)))))

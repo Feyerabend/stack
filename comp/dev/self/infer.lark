@@ -1,0 +1,1348 @@
+(* infer.lark — Lark's type checker, written in Lark.
+   (SELFHOST milestone M3, third slice: the port of 07/src/infer.py.)
+
+   Hindley-Milner inference (Algorithm W) with affine (linear) use tracking and
+   trait-bound checking for `show`.  This is the mountain: it consumes parse.lark's
+   syntactic AST (Prog/Decl/Expr/Pat/Ty), the type vocabulary of types.lark
+   (Mono/Scheme/apply/unify/…), and the typed AST of tast.lark (TExpr/TDecl/…),
+   and produces, per top-level decl, its inferred signature.
+
+   Design notes
+   ────────────
+   • NO MUTATION, NO EXCEPTIONS.  infer.py mutates a `fresh` counter, a `tracked`
+     dict, and an `env` dict, and raises TypeError/AffineError/TraitBoundError.
+     Here everything is threaded functionally:
+        - `fresh`   : an Int, threaded in and out of every inference function.
+        - `tracked` : an assoc list List((String, Int)) (name → use count).
+        - errors    : each inference function returns a Result-like ADT
+                      (IResult / PatR / …) whose Err arm carries the message.
+        - `env`     : an assoc list List((String, Scheme)), rebuilt as it grows.
+     A substitution `Subst` is types.lark's Int-keyed red-black tree (empty =
+     SLeaf, was Nil); `Ok`/`Err` come from the built-in Result.
+   • CONCATENATION, not import: the M3 pipeline is one module
+     (lex + parse + types + tast + infer) — see SELFHOST §7.  Every function is
+     fully annotated so infer's own Pass 1.5 pre-registers the (heavily) mutually
+     recursive groups here (infer ↔ inferApply ↔ inferArms ↔ inferPat ↔ …).
+   • The observable output is `checkProgram`: a normalised top-level signature
+     block (module line + one line per decl), OR "type error: <msg>" on reject.
+     Type-variable names are canonicalised by first occurrence (α, β, γ …) so the
+     differential is independent of fresh-allocation order.
+
+   Run:  self/tests/infer_difftest.py  (make -C self infertest)   *)
+
+module Infer
+
+
+(* ── Small result / option ADTs (functional error + state threading) ──────── *)
+
+type IntOpt    = | IONone | IOSome of Int
+type SchemeOpt = | SNone  | SJust of Scheme
+
+(* infer(...) result: typed expr, its type, the subst, the next fresh, the tracked. *)
+type IResult =
+  | IErr of String
+  | IOk  of TExpr, Mono, Subst, Int, List((String, Int))
+
+(* inferPat(...) result: typed pat, its type, the local env, the subst, next fresh. *)
+type PatR =
+  | PErr of String
+  | POk  of TPat, Mono, List((String, Scheme)), Subst, Int
+
+(* a list of expressions inferred in sequence (tuples): typed, raw types, s, f, tr. *)
+type ListR =
+  | LErr of String
+  | LOk  of List(TExpr), List(Mono), Subst, Int, List((String, Int))
+
+(* application arguments: typed args, s, f, tr. *)
+type ApplyArgsR =
+  | AErr of String
+  | AOk  of List(TExpr), Subst, Int, List((String, Int))
+
+(* match arms: typed (pat,body) pairs, s, f, tr. *)
+type ArmsR =
+  | ArmErr of String
+  | ArmOk  of List((TPat, TExpr)), Subst, Int, List((String, Int))
+
+(* a checked fn/let decl: the typed decl, its generalised scheme, next fresh. *)
+type FnDeclR  = | FDErr of String | FDOk of TDecl, Scheme, Int
+type LetDeclR = | LDErr of String | LDOk of TDecl, Scheme, Int
+
+(* optional-return-annotation continuation: resolved type, subst, next fresh. *)
+type RetR = | RErr of String | ROk of Mono, Subst, Int
+
+(* fnTypeFromAnnotations helper: all params annotated?  monos + tvar env + fresh. *)
+type PMRes =
+  | PMNone of Int
+  | PMSome of List(Mono), List((String, Int)), Int
+
+(* pass 2 accumulators. *)
+type Pass2R    = | P2Err  of String | P2Ok  of List(String), List((String, Scheme)), Int
+type Pass2OneR = | P2OErr of String | P2OOk of Maybe(String), List((String, Scheme)), Int
+
+impl Copy for IntOpt     = {}
+impl Copy for SchemeOpt  = {}
+impl Copy for IResult    = {}
+impl Copy for PatR       = {}
+impl Copy for ListR      = {}
+impl Copy for ApplyArgsR = {}
+impl Copy for ArmsR      = {}
+impl Copy for FnDeclR    = {}
+impl Copy for LetDeclR   = {}
+impl Copy for RetR       = {}
+impl Copy for PMRes      = {}
+impl Copy for Pass2R     = {}
+impl Copy for Pass2OneR  = {}
+
+
+(* ── Generic list length (consumes; safe — see OPTIMIZE occurs-check note) ── *)
+
+fn listLen(xs : List(a)) : Int =
+  match xs with
+  | Nil        => 0
+  | Cons(_, r) => 1 + listLen(r)
+  end
+
+
+(* ── Environment: assoc list name → Scheme (dict semantics: newest wins) ──── *)
+
+fn envRemove(env : List((String, Scheme)), name : String) : List((String, Scheme)) =
+  match env with
+  | Nil => Nil
+  | Cons((k, v), rest) =>
+      if strEq(k, name) then envRemove(rest, name)
+      else Cons((k, v), envRemove(rest, name))
+  end
+
+fn envPut(env : List((String, Scheme)), name : String, sc : Scheme) : List((String, Scheme)) =
+  Cons((name, sc), envRemove(env, name))
+
+fn envGet(env : List((String, Scheme)), name : String) : SchemeOpt =
+  match env with
+  | Nil => SNone
+  | Cons((k, v), rest) => if strEq(k, name) then SJust(v) else envGet(rest, name)
+  end
+
+fn envHas(env : List((String, Scheme)), name : String) : Bool =
+  match envGet(env, name) with | SNone => false | SJust(_) => true end
+
+fn applyEnv(s : Subst, env : List((String, Scheme))) : List((String, Scheme)) =
+  match env with
+  | Nil => Nil
+  | Cons((k, sc), rest) => Cons((k, applyScheme(s, sc)), applyEnv(s, rest))
+  end
+
+fn appendEnv(a : List((String, Scheme)), b : List((String, Scheme))) : List((String, Scheme)) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, appendEnv(r, b)) end
+
+(* merge with `over` shadowing `base` (== {**base, **over}). *)
+fn mergeEnv(base : List((String, Scheme)), over : List((String, Scheme))) : List((String, Scheme)) =
+  appendEnv(over, base)
+
+fn envFreeVars(env : List((String, Scheme))) : List(Int) =
+  match env with
+  | Nil => Nil
+  | Cons((_, sc), rest) => unionInts(freeVarsScheme(sc), envFreeVars(rest))
+  end
+
+
+(* ── Affine tracking: assoc list name → use count ─────────────────────────── *)
+
+fn trkGet(t : List((String, Int)), name : String) : IntOpt =
+  match t with
+  | Nil => IONone
+  | Cons((k, c), rest) => if strEq(k, name) then IOSome(c) else trkGet(rest, name)
+  end
+
+fn trkRemove(t : List((String, Int)), name : String) : List((String, Int)) =
+  match t with
+  | Nil => Nil
+  | Cons((k, c), rest) =>
+      if strEq(k, name) then trkRemove(rest, name)
+      else Cons((k, c), trkRemove(rest, name))
+  end
+
+fn trkSet(t : List((String, Int)), name : String, c : Int) : List((String, Int)) =
+  Cons((name, c), trkRemove(t, name))
+
+
+(* ── Generalise / instantiate ─────────────────────────────────────────────── *)
+
+fn freshSubst(qs : List(Int), f : Int) : (Subst, Int) =
+  match qs with
+  | Nil => (SLeaf, f)
+  | Cons(q, rest) =>
+      match freshSubst(rest, f + 1) with
+      | (s, f2) => (subInsert(s, q, MVar(f)), f2)
+      end
+  end
+
+fn instantiate(f : Int, sc : Scheme) : (Mono, Int) =
+  match sc with
+  | Scheme(qs, body, cv) =>
+      match qs with
+      | Nil => (body, f)
+      | _   => match freshSubst(qs, f) with | (s, f2) => (apply(s, body), f2) end
+      end
+  end
+
+fn generalise(env : List((String, Scheme)), t : Mono) : Scheme =
+  Scheme(diffInts(freeVars(t), envFreeVars(env)), t, Nil)
+
+
+(* ── Syntactic type (parse.lark Ty) → monotype, threading tvar-env + fresh ── *)
+
+fn isLowerStr(s : String) : Bool =
+  if string_length(s) == 0 then false
+  else let c = string_index(s, 0) in c >= 97 and c <= 122
+
+fn tvGet(tv : List((String, Int)), name : String) : IntOpt =
+  match tv with
+  | Nil => IONone
+  | Cons((k, i), rest) => if strEq(k, name) then IOSome(i) else tvGet(rest, name)
+  end
+
+fn synToMono(t : Ty, tv : List((String, Int)), f : Int) : (Mono, List((String, Int)), Int) =
+  match t with
+  | TName(n) =>
+      if strEq(n, "()") then (MCon("()"), tv, f)
+      else if isLowerStr(n) then
+        match tvGet(tv, n) with
+        | IOSome(i) => (MVar(i), tv, f)
+        | IONone    => (MVar(f), Cons((n, f), tv), f + 1)
+        end
+      else (MCon(n), tv, f)
+  | TApply(n, args) =>
+      match synToMonoList(args, tv, f) with
+      | (ms, tv2, f2) => (MApp(n, ms), tv2, f2)
+      end
+  | TFn(p, r) =>
+      match synToMono(p, tv, f) with
+      | (mp, tv1, f1) =>
+          match synToMono(r, tv1, f1) with
+          | (mr, tv2, f2) => (MFn(mp, mr), tv2, f2)
+          end
+      end
+  | TUnit => (MCon("()"), tv, f)
+  | TTuple(es) =>
+      match synToMonoList(es, tv, f) with
+      | (ms, tv2, f2) => (MTup(ms), tv2, f2)
+      end
+  end
+
+fn synToMonoList(ts : List(Ty), tv : List((String, Int)), f : Int) : (List(Mono), List((String, Int)), Int) =
+  match ts with
+  | Nil => (Nil, tv, f)
+  | Cons(t, rest) =>
+      match synToMono(t, tv, f) with
+      | (m, tv2, f2) =>
+          match synToMonoList(rest, tv2, f2) with
+          | (ms, tv3, f3) => (Cons(m, ms), tv3, f3)
+          end
+      end
+  end
+
+
+(* ── Literal / operator types ─────────────────────────────────────────────── *)
+
+fn litType(v : Val) : Mono =
+  match v with
+  | VUnit     => MCon("()")
+  | VBool(_)  => MCon("Bool")
+  | VInt(_)   => MCon("Int")
+  | VFloat(_) => MCon("Float")
+  | VStr(_)   => MCon("String")
+  end
+
+fn numOp(f : Int) : (Mono, Int) = (MFn(MVar(f), MFn(MVar(f), MVar(f))), f + 1)
+fn cmpOp(f : Int) : (Mono, Int) = (MFn(MVar(f), MFn(MVar(f), MCon("Bool"))), f + 1)
+
+fn binopType(op : String, f : Int) : (Mono, Int) =
+  match op with
+  | "+"  => numOp(f) | "-"  => numOp(f) | "*"  => numOp(f) | "/"  => numOp(f)
+  | "==" => cmpOp(f) | "!=" => cmpOp(f) | "<"  => cmpOp(f) | "<=" => cmpOp(f)
+  | ">"  => cmpOp(f) | ">=" => cmpOp(f)
+  | "and" => (MFn(MCon("Bool"), MFn(MCon("Bool"), MCon("Bool"))), f)
+  | "or"  => (MFn(MCon("Bool"), MFn(MCon("Bool"), MCon("Bool"))), f)
+  | _    => numOp(f)
+  end
+
+
+(* ── apply subst to typed AST nodes (port of _apply_tpat / _apply_texpr) ──── *)
+
+fn applyTPatList(s : Subst, ps : List(TPat)) : List(TPat) =
+  match ps with | Nil => Nil | Cons(p, r) => Cons(applyTPat(s, p), applyTPatList(s, r)) end
+
+fn applyTPat(s : Subst, p : TPat) : TPat =
+  match p with
+  | TPWild(t)        => TPWild(apply(s, t))
+  | TPVar(n, t)      => TPVar(n, apply(s, t))
+  | TPLit(v, t)      => TPLit(v, apply(s, t))
+  | TPCon(n, args, t) => TPCon(n, applyTPatList(s, args), apply(s, t))
+  | TPTuple(es, t)   => TPTuple(applyTPatList(s, es), apply(s, t))
+  end
+
+fn applyTExprList(s : Subst, es : List(TExpr)) : List(TExpr) =
+  match es with | Nil => Nil | Cons(e, r) => Cons(applyTExpr(s, e), applyTExprList(s, r)) end
+
+fn applyTArms(s : Subst, arms : List((TPat, TExpr))) : List((TPat, TExpr)) =
+  match arms with
+  | Nil => Nil
+  | Cons((p, b), r) => Cons((applyTPat(s, p), applyTExpr(s, b)), applyTArms(s, r))
+  end
+
+fn applyTParams(s : Subst, ps : List((String, Mono))) : List((String, Mono)) =
+  match ps with | Nil => Nil | Cons((n, t), r) => Cons((n, apply(s, t)), applyTParams(s, r)) end
+
+fn applyTExpr(s : Subst, e : TExpr) : TExpr =
+  match e with
+  | TLit(v, t)          => TLit(v, apply(s, t))
+  | TVar(n, t)          => TVar(n, apply(s, t))
+  | TCon(n, t)          => TCon(n, apply(s, t))
+  | TTupleExpr(es, t)   => TTupleExpr(applyTExprList(s, es), apply(s, t))
+  | TApp(fnx, args, t)   => TApp(applyTExpr(s, fnx), applyTExprList(s, args), apply(s, t))
+  | TBinOp(op, l, r, t) => TBinOp(op, applyTExpr(s, l), applyTExpr(s, r), apply(s, t))
+  | TUnaryOp(op, o, t)  => TUnaryOp(op, applyTExpr(s, o), apply(s, t))
+  | TLetExpr(n, v, b, t) => TLetExpr(n, applyTExpr(s, v), applyTExpr(s, b), apply(s, t))
+  | TIfExpr(c, th, el, t) => TIfExpr(applyTExpr(s, c), applyTExpr(s, th), applyTExpr(s, el), apply(s, t))
+  | TMatchExpr(sc, arms, t) => TMatchExpr(applyTExpr(s, sc), applyTArms(s, arms), apply(s, t))
+  | TLambda(ps, b, t)   => TLambda(applyTParams(s, ps), applyTExpr(s, b), apply(s, t))
+  end
+
+
+(* ── Show-bound check (port of _show_satisfies / _check_show_bounds) ───────── *)
+
+fn tTypeOf(e : TExpr) : Mono =
+  match e with
+  | TLit(_, t) => t | TVar(_, t) => t | TCon(_, t) => t
+  | TTupleExpr(_, t) => t | TApp(_, _, t) => t | TBinOp(_, _, _, t) => t
+  | TUnaryOp(_, _, t) => t | TLetExpr(_, _, _, t) => t | TIfExpr(_, _, _, t) => t
+  | TMatchExpr(_, _, t) => t | TLambda(_, _, t) => t
+  end
+
+fn showSatisfies(t : Mono, show : List(String)) : Bool =
+  match t with
+  | MVar(_)   => false
+  | MCon(n)   => memberStr(n, show)
+  | MApp(h, _) => memberStr(h, show)
+  | MFn(_, _) => false
+  | MTup(_)   => false
+  end
+
+fn combineMaybe(a : Maybe(String), b : Maybe(String)) : Maybe(String) =
+  match a with | Just(_) => a | Nothing => b end
+
+fn showCheckCall(args : List(TExpr), show : List(String)) : Maybe(String) =
+  match args with
+  | Nil        => Nothing
+  | Cons(a0, _) =>
+      if showSatisfies(tTypeOf(a0), show) then Nothing
+      else Just("no Show instance for " + pretty(tTypeOf(a0)))
+  end
+
+fn showBoundsList(es : List(TExpr), show : List(String)) : Maybe(String) =
+  match es with
+  | Nil => Nothing
+  | Cons(e, r) => combineMaybe(showBounds(e, show), showBoundsList(r, show))
+  end
+
+fn showArms(arms : List((TPat, TExpr)), show : List(String)) : Maybe(String) =
+  match arms with
+  | Nil => Nothing
+  | Cons((_, b), r) => combineMaybe(showBounds(b, show), showArms(r, show))
+  end
+
+fn showBounds(e : TExpr, show : List(String)) : Maybe(String) =
+  match e with
+  | TApp(fnx, args, _) =>
+      let base = match fnx with
+                 | TVar(nm, _) => if strEq(nm, "show") then showCheckCall(args, show) else Nothing
+                 | _ => Nothing
+                 end in
+      combineMaybe(base, combineMaybe(showBounds(fnx, show), showBoundsList(args, show)))
+  | TTupleExpr(es, _)   => showBoundsList(es, show)
+  | TBinOp(_, l, r, _)  => combineMaybe(showBounds(l, show), showBounds(r, show))
+  | TUnaryOp(_, o, _)   => showBounds(o, show)
+  | TLetExpr(_, v, b, _) => combineMaybe(showBounds(v, show), showBounds(b, show))
+  | TIfExpr(c, th, el, _) => combineMaybe(showBounds(c, show), combineMaybe(showBounds(th, show), showBounds(el, show)))
+  | TMatchExpr(sc, arms, _) => combineMaybe(showBounds(sc, show), showArms(arms, show))
+  | TLambda(_, b, _)    => showBounds(b, show)
+  | TLit(_, _)          => Nothing
+  | TVar(_, _)          => Nothing
+  | TCon(_, _)          => Nothing
+  end
+
+
+(* ── Pattern inference (port of infer_pat) ────────────────────────────────── *)
+
+fn splitFn(t : Mono) : (List(Mono), Mono) =
+  match t with
+  | MFn(p, r) => match splitFn(r) with | (fs, res) => (Cons(p, fs), res) end
+  | _         => (Nil, t)
+  end
+
+fn snocMono(xs : List(Mono), x : Mono) : List(Mono) =
+  match xs with | Nil => Cons(x, Nil) | Cons(y, r) => Cons(y, snocMono(r, x)) end
+
+fn snocTPat(xs : List(TPat), x : TPat) : List(TPat) =
+  match xs with | Nil => Cons(x, Nil) | Cons(y, r) => Cons(y, snocTPat(r, x)) end
+
+fn applySchemeEnv(s : Subst, env : List((String, Scheme))) : List((String, Scheme)) =
+  applyEnv(s, env)
+
+(* merge a sub-pattern's bindings, rejecting a repeated variable. *)
+fn mergePatEnv(local : List((String, Scheme)), add : List((String, Scheme))) : Result(List((String, Scheme)), String) =
+  match add with
+  | Nil => Ok(local)
+  | Cons((k, v), rest) =>
+      if envHas(local, k) then Err("repeated pattern variable: '" + k + "'")
+      else mergePatEnv(Cons((k, v), local), rest)
+  end
+
+fn inferPat(pat : Pat, f : Int, env : List((String, Scheme))) : PatR =
+  match pat with
+  | PWild => let t = MVar(f) in POk(TPWild(t), t, Nil, SLeaf, f + 1)
+  | PVar(n) => let t = MVar(f) in POk(TPVar(n, t), t, Cons((n, Scheme(Nil, t, Nil)), Nil), SLeaf, f + 1)
+  | PLit(v) => let t = litType(v) in POk(TPLit(v, t), t, Nil, SLeaf, f)
+  | PCon(n, args) =>
+      match envGet(env, n) with
+      | SJust(sc) =>
+          match instantiate(f, sc) with
+          | (conT, f1) =>
+              match splitFn(conT) with
+              | (fields, conResult) =>
+                  if listLen(fields) == listLen(args) then
+                    inferPatConFields(fields, args, env, f1, SLeaf, Nil, Nil, conResult, n)
+                  else inferPatGeneric(args, env, f1, n)
+              end
+          end
+      | SNone => inferPatGeneric(args, env, f, n)
+      end
+  | PTuple(elems) => inferPatTuple(elems, env, f, SLeaf, Nil, Nil, Nil)
+  end
+
+fn inferPatConFields(fields : List(Mono), args : List(Pat), env : List((String, Scheme)),
+                     f : Int, s : Subst, local : List((String, Scheme)),
+                     typed : List(TPat), conResult : Mono, n : String) : PatR =
+  match (fields, args) with
+  | (Nil, Nil) =>
+      let resultT = apply(s, conResult) in
+      POk(TPCon(n, typed, resultT), resultT, applySchemeEnv(s, local), s, f)
+  | (Cons(ft, fr), Cons(a, ar)) =>
+      match inferPat(a, f, env) with
+      | PErr(m) => PErr(m)
+      | POk(tp, pt, env2, s2, f2) =>
+          let sc = compose(s2, s) in
+          match unify(apply(sc, pt), apply(sc, ft)) with
+          | Err(e) => PErr(e)
+          | Ok(s3) =>
+              let s4 = compose(s3, compose(s2, s)) in
+              match mergePatEnv(local, applySchemeEnv(s4, env2)) with
+              | Err(e2) => PErr(e2)
+              | Ok(local2) => inferPatConFields(fr, ar, env, f2, s4, local2, snocTPat(typed, applyTPat(s4, tp)), conResult, n)
+              end
+          end
+      end
+  | _ => PErr("constructor arity mismatch")
+  end
+
+fn inferPatGeneric(args : List(Pat), env : List((String, Scheme)), f : Int, n : String) : PatR =
+  inferPatGenFold(args, env, f + 1, SLeaf, Nil, Nil, MVar(f), n)
+
+fn inferPatGenFold(args : List(Pat), env : List((String, Scheme)), f : Int,
+                   s : Subst, local : List((String, Scheme)),
+                   typed : List(TPat), resultT : Mono, n : String) : PatR =
+  match args with
+  | Nil => POk(TPCon(n, typed, resultT), resultT, local, s, f)
+  | Cons(a, ar) =>
+      match inferPat(a, f, env) with
+      | PErr(m) => PErr(m)
+      | POk(tp, pt, env2, s2, f2) =>
+          let s3 = compose(s2, s) in
+          match mergePatEnv(local, env2) with
+          | Err(e) => PErr(e)
+          | Ok(local2) => inferPatGenFold(ar, env, f2, s3, local2, snocTPat(typed, tp), resultT, n)
+          end
+      end
+  end
+
+fn inferPatTuple(elems : List(Pat), env : List((String, Scheme)), f : Int,
+                 s : Subst, local : List((String, Scheme)),
+                 typed : List(TPat), etypes : List(Mono)) : PatR =
+  match elems with
+  | Nil => let t = MTup(etypes) in POk(TPTuple(typed, t), t, local, s, f)
+  | Cons(e, er) =>
+      match inferPat(e, f, env) with
+      | PErr(m) => PErr(m)
+      | POk(tp, pt, env2, s2, f2) =>
+          let s3 = compose(s2, s) in
+          match mergePatEnv(local, env2) with
+          | Err(e2) => PErr(e2)
+          | Ok(local2) => inferPatTuple(er, env, f2, s3, local2, snocTPat(typed, tp), snocMono(etypes, pt))
+          end
+      end
+  end
+
+
+(* ── Expression inference (port of infer) ─────────────────────────────────── *)
+
+fn curryFn(avs : List(Mono), res : Mono) : Mono =
+  match avs with | Nil => res | Cons(a, r) => MFn(a, curryFn(r, res)) end
+
+fn allocVars(n : Int, f : Int) : (List(Mono), Int) =
+  if n <= 0 then (Nil, f)
+  else match allocVars(n - 1, f + 1) with | (rest, f2) => (Cons(MVar(f), rest), f2) end
+
+fn infer(env : List((String, Scheme)), tracked : List((String, Int)), expr : Expr,
+         f : Int, copy : List(String)) : IResult =
+  match expr with
+  | Lit(v) => let t = litType(v) in IOk(TLit(v, t), t, SLeaf, f, tracked)
+  | Var(n) =>
+      match envGet(env, n) with
+      | SNone => IErr("unbound variable: '" + n + "'")
+      | SJust(sc) =>
+          match instantiate(f, sc) with
+          | (t, f1) =>
+              match trkGet(tracked, n) with
+              | IONone => IOk(TVar(n, t), t, SLeaf, f1, tracked)
+              | IOSome(c) =>
+                  if c + 1 > 1 then IErr("affine variable '" + n + "' used more than once")
+                  else IOk(TVar(n, t), t, SLeaf, f1, trkSet(tracked, n, c + 1))
+              end
+          end
+      end
+  | Con(n) =>
+      match envGet(env, n) with
+      | SNone => IErr("unbound constructor: '" + n + "'")
+      | SJust(sc) => match instantiate(f, sc) with | (t, f1) => IOk(TCon(n, t), t, SLeaf, f1, tracked) end
+      end
+  | TupleExpr(elems) =>
+      match inferSeq(env, tracked, elems, f, copy) with
+      | LErr(m) => IErr(m)
+      | LOk(tes, ts, s, f2, tr) => let tupT = MTup(applyList(s, ts)) in IOk(TTupleExpr(tes, tupT), tupT, s, f2, tr)
+      end
+  | Apply(fnE, args)         => inferApply(env, tracked, fnE, args, f, copy)
+  | BinOp(op, l, r)          => inferBinOp(env, tracked, op, l, r, f, copy)
+  | UnaryOp(op, x)           => inferUnary(env, tracked, op, x, f, copy)
+  | LetExpr(n, ann, val, body) => inferLet(env, tracked, n, ann, val, body, f, copy)
+  | IfExpr(c, th, el)        => inferIf(env, tracked, c, th, el, f, copy)
+  | MatchExpr(scrut, arms)   => inferMatch(env, tracked, scrut, arms, f, copy)
+  | Lambda(params, body)     => inferLambda(env, tracked, params, body, f, copy)
+  end
+
+(* infer a sequence of exprs, threading env-apply, subst, fresh, tracked. *)
+fn inferSeq(env : List((String, Scheme)), tracked : List((String, Int)), es : List(Expr),
+            f : Int, copy : List(String)) : ListR =
+  inferSeqAcc(env, tracked, es, f, copy, SLeaf)
+
+fn inferSeqAcc(env : List((String, Scheme)), tracked : List((String, Int)), es : List(Expr),
+               f : Int, copy : List(String), s : Subst) : ListR =
+  match es with
+  | Nil => LOk(Nil, Nil, s, f, tracked)
+  | Cons(e, rest) =>
+      match infer(applyEnv(s, env), tracked, e, f, copy) with
+      | IErr(m) => LErr(m)
+      | IOk(te, t, s2, f2, tr2) =>
+          let s3 = compose(s2, s) in
+          match inferSeqAcc(env, tr2, rest, f2, copy, s3) with
+          | LErr(m) => LErr(m)
+          | LOk(tes, ts, s4, f4, tr4) => LOk(Cons(te, tes), Cons(t, ts), s4, f4, tr4)
+          end
+      end
+  end
+
+fn inferApply(env : List((String, Scheme)), tracked : List((String, Int)), fnE : Expr,
+              args : List(Expr), f : Int, copy : List(String)) : IResult =
+  match infer(env, tracked, fnE, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(tf, fnT, s, f1, tr1) =>
+      match allocVars(listLen(args), f1) with
+      | (argVars, f2) =>
+          let resV = MVar(f2) in
+          let expected = curryFn(argVars, resV) in
+          match unify(apply(s, fnT), expected) with
+          | Err(e) => IErr(e)
+          | Ok(s2) =>
+              let s3 = compose(s2, s) in
+              match inferApplyArgs(env, tr1, argVars, args, f2 + 1, copy, s3) with
+              | AErr(m) => IErr(m)
+              | AOk(targs, s4, f4, tr4) => let finalT = apply(s4, resV) in IOk(TApp(tf, targs, finalT), finalT, s4, f4, tr4)
+              end
+          end
+      end
+  end
+
+fn inferApplyArgs(env : List((String, Scheme)), tracked : List((String, Int)), avs : List(Mono),
+                  args : List(Expr), f : Int, copy : List(String), s : Subst) : ApplyArgsR =
+  match (avs, args) with
+  | (Nil, Nil) => AOk(Nil, s, f, tracked)
+  | (Cons(av, avr), Cons(arg, argr)) =>
+      match infer(applyEnv(s, env), tracked, arg, f, copy) with
+      | IErr(m) => AErr(m)
+      | IOk(ta, at, s3, f3, tr3) =>
+          match unify(apply(s, at), apply(s, av)) with
+          | Err(e) => AErr(e)
+          | Ok(s4) =>
+              let s5 = compose(s4, compose(s3, s)) in
+              match inferApplyArgs(env, tr3, avr, argr, f3, copy, s5) with
+              | AErr(m) => AErr(m)
+              | AOk(rest, s6, f6, tr6) => AOk(Cons(ta, rest), s6, f6, tr6)
+              end
+          end
+      end
+  | _ => AErr("application arity mismatch")
+  end
+
+fn inferBinOp(env : List((String, Scheme)), tracked : List((String, Int)), op : String,
+              l : Expr, r : Expr, f : Int, copy : List(String)) : IResult =
+  match binopType(op, f) with
+  | (opT, f1) =>
+      match infer(env, tracked, l, f1, copy) with
+      | IErr(m) => IErr(m)
+      | IOk(tl, lt, s1, f2, tr2) =>
+          match infer(applyEnv(s1, env), tr2, r, f2, copy) with
+          | IErr(m) => IErr(m)
+          | IOk(trE, rt, s2, f3, tr3) =>
+              let s = compose(s2, s1) in
+              let resV = MVar(f3) in
+              let expected = MFn(apply(s, lt), MFn(apply(s, rt), resV)) in
+              match unify(apply(s, opT), expected) with
+              | Err(e) => IErr(e)
+              | Ok(s3) => let s4 = compose(s3, s) in let t = apply(s4, resV) in IOk(TBinOp(op, tl, trE, t), t, s4, f3 + 1, tr3)
+              end
+          end
+      end
+  end
+
+fn inferUnary(env : List((String, Scheme)), tracked : List((String, Int)), op : String,
+              x : Expr, f : Int, copy : List(String)) : IResult =
+  match infer(env, tracked, x, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(te, t, s, f1, tr1) =>
+      match op with
+      | "not" =>
+          match unify(apply(s, t), MCon("Bool")) with
+          | Err(e) => IErr(e)
+          | Ok(s2) => let s3 = compose(s2, s) in IOk(TUnaryOp(op, te, MCon("Bool")), MCon("Bool"), s3, f1, tr1)
+          end
+      | _ =>
+          let resV = MVar(f1) in
+          match unify(apply(s, t), resV) with
+          | Err(e) => IErr(e)
+          | Ok(s2) => let s3 = compose(s2, s) in let rt = apply(s3, resV) in IOk(TUnaryOp(op, te, rt), rt, s3, f1 + 1, tr1)
+          end
+      end
+  end
+
+fn inferLet(env : List((String, Scheme)), tracked : List((String, Int)), n : String,
+            ann : Maybe(Ty), val : Expr, body : Expr, f : Int, copy : List(String)) : IResult =
+  match infer(env, tracked, val, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(tv, vt, s1a, f1, trV) =>
+      let vt2a = apply(s1a, vt) in
+      match ann with
+      | Nothing => letFinish(env, trV, n, tv, vt2a, s1a, f1, copy, body)
+      | Just(annTy) =>
+          match synToMono(annTy, Nil, f1) with
+          | (annT, _, f2) =>
+              match unify(vt2a, annT) with
+              | Err(e) => IErr(e)
+              | Ok(s2) => let s1 = compose(s2, s1a) in letFinish(env, trV, n, tv, apply(s1, annT), s1, f2, copy, body)
+              end
+          end
+      end
+  end
+
+fn letFinish(env : List((String, Scheme)), trV : List((String, Int)), n : String,
+             tv : TExpr, vt2 : Mono, s1 : Subst, f : Int,
+             copy : List(String), body : Expr) : IResult =
+  let sc = generalise(applyEnv(s1, env), vt2) in
+  let env2 = envPut(env, n, sc) in
+  let oldc = trkGet(trV, n) in
+  let t1 = trkRemove(trV, n) in
+  let t2 = if isCopy(vt2, copy) then t1 else trkSet(t1, n, 0) in
+  match infer(env2, t2, body, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(tb, bt, s3, f3, trB) =>
+      let t3 = trkRemove(trB, n) in
+      let t4 = match oldc with | IOSome(c) => trkSet(t3, n, c) | IONone => t3 end in
+      let s = compose(s3, s1) in
+      let t = apply(s, bt) in
+      IOk(TLetExpr(n, tv, tb, t), t, s, f3, t4)
+  end
+
+fn inferIf(env : List((String, Scheme)), tracked : List((String, Int)), c : Expr,
+           th : Expr, el : Expr, f : Int, copy : List(String)) : IResult =
+  match infer(env, tracked, c, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(tc, ct, s1, f1, tr1) =>
+      match unify(apply(s1, ct), MCon("Bool")) with
+      | Err(e) => IErr(e)
+      | Ok(s2) =>
+          let sA = compose(s2, s1) in
+          match infer(applyEnv(sA, env), tr1, th, f1, copy) with
+          | IErr(m) => IErr(m)
+          | IOk(tt, ttt, s3, f2, tr2) =>
+              let sB = compose(s3, sA) in
+              match infer(applyEnv(sB, env), tr2, el, f2, copy) with
+              | IErr(m) => IErr(m)
+              | IOk(teE, ett, s4, f3, tr3) =>
+                  let sC = compose(s4, sB) in
+                  match unify(apply(sC, ttt), apply(sC, ett)) with
+                  | Err(e) => IErr(e)
+                  | Ok(s5) => let sD = compose(s5, sC) in let t = apply(sD, ttt) in IOk(TIfExpr(tc, tt, teE, t), t, sD, f3, tr3)
+                  end
+              end
+          end
+      end
+  end
+
+fn inferMatch(env : List((String, Scheme)), tracked : List((String, Int)), scrut : Expr,
+              arms : List(Arm), f : Int, copy : List(String)) : IResult =
+  match infer(env, tracked, scrut, f, copy) with
+  | IErr(m) => IErr(m)
+  | IOk(ts, st, s, f1, tr1) =>
+      let resV = MVar(f1) in
+      match inferArms(env, tr1, arms, st, resV, f1 + 1, copy, s) with
+      | ArmErr(m) => IErr(m)
+      | ArmOk(tarms, s2, f2, tr2) => let t = apply(s2, resV) in IOk(TMatchExpr(ts, tarms, t), t, s2, f2, tr2)
+      end
+  end
+
+fn inferArms(env : List((String, Scheme)), tracked : List((String, Int)), arms : List(Arm),
+             st : Mono, resV : Mono, f : Int, copy : List(String), s : Subst) : ArmsR =
+  match arms with
+  | Nil => ArmOk(Nil, s, f, tracked)
+  | Cons(Arm(pat, body), rest) =>
+      match inferPat(pat, f, env) with
+      | PErr(m) => ArmErr(m)
+      | POk(tp, pt, patEnv, sPat, f1) =>
+          let sa = compose(sPat, s) in
+          match unify(apply(sa, st), apply(sa, pt)) with
+          | Err(e) => ArmErr(e)
+          | Ok(s2) =>
+              let sb = compose(s2, sa) in
+              let armEnv = mergeEnv(applyEnv(sb, env), applySchemeEnv(sb, patEnv)) in
+              match infer(armEnv, tracked, body, f1, copy) with
+              | IErr(m) => ArmErr(m)
+              | IOk(ta, at, s3, f2, trA) =>
+                  match unify(apply(s3, apply(sb, at)), apply(s3, apply(sb, resV))) with
+                  | Err(e) => ArmErr(e)
+                  | Ok(s4) =>
+                      let sc = compose(s4, compose(s3, sb)) in
+                      match inferArms(env, trA, rest, st, resV, f2, copy, sc) with
+                      | ArmErr(m) => ArmErr(m)
+                      | ArmOk(tarms, s5, f5, tr5) => ArmOk(Cons((tp, ta), tarms), s5, f5, tr5)
+                      end
+                  end
+              end
+          end
+      end
+  end
+
+fn buildFnType(pts : List((String, Mono)), ret : Mono, s : Subst) : Mono =
+  match pts with
+  | Nil => ret
+  | Cons((_, pt), rest) => MFn(apply(s, pt), buildFnType(rest, ret, s))
+  end
+
+fn inferLambda(env : List((String, Scheme)), tracked : List((String, Int)), params : List(Param),
+               body : Expr, f : Int, copy : List(String)) : IResult =
+  match inferLambdaParams(params, env, tracked, f, copy) with
+  | (paramTypes, env2, tracked2, f1) =>
+      match infer(env2, tracked2, body, f1, copy) with
+      | IErr(m) => IErr(m)
+      | IOk(tb, bt, s, f2, _) =>
+          let fnT = buildFnType(paramTypes, apply(s, bt), s) in
+          IOk(TLambda(applyTParams(s, paramTypes), tb, fnT), fnT, s, f2, tracked)
+      end
+  end
+
+fn inferLambdaParams(params : List(Param), env : List((String, Scheme)), tracked : List((String, Int)),
+                     f : Int, copy : List(String)) : (List((String, Mono)), List((String, Scheme)), List((String, Int)), Int) =
+  match params with
+  | Nil => (Nil, env, tracked, f)
+  | Cons(Param(nm, ann), rest) =>
+      match ann with
+      | Just(annTy) => match synToMono(annTy, Nil, f) with | (pv, _, f1) => lambdaParamCont(nm, pv, rest, env, tracked, f1, copy) end
+      | Nothing => lambdaParamCont(nm, MVar(f), rest, env, tracked, f + 1, copy)
+      end
+  end
+
+fn lambdaParamCont(nm : String, pv : Mono, rest : List(Param), env : List((String, Scheme)),
+                   tracked : List((String, Int)), f : Int, copy : List(String)) : (List((String, Mono)), List((String, Scheme)), List((String, Int)), Int) =
+  let env2 = envPut(env, nm, Scheme(Nil, pv, Nil)) in
+  let tracked2 = if isCopy(pv, copy) then tracked else trkSet(tracked, nm, 0) in
+  match inferLambdaParams(rest, env2, tracked2, f, copy) with
+  | (pts, envF, trF, fF) => (Cons((nm, pv), pts), envF, trF, fF)
+  end
+
+
+(* ── Declaration checking (port of check_fn_decl / check_let_decl) ─────────── *)
+
+fn checkFnParams(params : List(Param), localEnv : List((String, Scheme)), tracked : List((String, Int)),
+                 tvenv : List((String, Int)), f : Int, copy : List(String))
+    : (List((String, Mono)), List((String, Scheme)), List((String, Int)), List((String, Int)), Int) =
+  match params with
+  | Nil => (Nil, localEnv, tracked, tvenv, f)
+  | Cons(Param(nm, ann), rest) =>
+      match ann with
+      | Just(annTy) => match synToMono(annTy, tvenv, f) with | (pv, tvenv2, f1) => fnParamCont(nm, pv, tvenv2, rest, localEnv, tracked, f1, copy) end
+      | Nothing => fnParamCont(nm, MVar(f), tvenv, rest, localEnv, tracked, f + 1, copy)
+      end
+  end
+
+fn fnParamCont(nm : String, pv : Mono, tvenv : List((String, Int)), rest : List(Param),
+               localEnv : List((String, Scheme)), tracked : List((String, Int)), f : Int, copy : List(String))
+    : (List((String, Mono)), List((String, Scheme)), List((String, Int)), List((String, Int)), Int) =
+  let env2 = envPut(localEnv, nm, Scheme(Nil, pv, Nil)) in
+  let tracked2 = if isCopy(pv, copy) then tracked else trkSet(tracked, nm, 0) in
+  match checkFnParams(rest, env2, tracked2, tvenv, f, copy) with
+  | (pts, envF, trF, tvF, fF) => (Cons((nm, pv), pts), envF, trF, tvF, fF)
+  end
+
+fn checkFnRet(ret : Maybe(Ty), tvenv : List((String, Int)), bt : Mono, s : Subst, f : Int) : RetR =
+  match ret with
+  | Nothing => ROk(apply(s, bt), s, f)
+  | Just(retTy) =>
+      match synToMono(retTy, tvenv, f) with
+      | (annT, _, f1) =>
+          match unify(apply(s, bt), annT) with
+          | Err(e) => RErr(e)
+          | Ok(s2) => let s3 = compose(s2, s) in ROk(apply(s3, annT), s3, f1)
+          end
+      end
+  end
+
+(* is every parameter annotated? *)
+fn allParamsAnn(ps : List(Param)) : Bool =
+  match ps with
+  | Nil => true
+  | Cons(Param(pn, ann), rest) =>
+      match ann with
+      | Nothing => false
+      | Just(t) => allParamsAnn(rest)
+      end
+  end
+
+(* the scheme the function's own name gets while its body is checked.
+
+   A complete signature is a licence to recurse polymorphically.  Pass 1.5 has
+   already registered the annotated type under `name`; generalise it, so that each
+   recursive call instantiates it afresh.  Bound to a bare monotype var instead,
+   every recursive call would have to agree about one unknown — and a polymorphic
+   function that recurses on its own result could not be typed at all. *)
+fn recScheme(env : List((String, Scheme)), name : String, params : List(Param),
+             ret : Maybe(Ty), recVar : Mono) : Scheme =
+  let annotated = match ret with
+                  | Nothing => false
+                  | Just(rt) => allParamsAnn(params)
+                  end in
+  if annotated then
+    match envGet(env, name) with
+    | SNone    => Scheme(Nil, recVar, Nil)
+    | SJust(sc) =>
+        match sc with
+        | Scheme(qs, body, cvs) => generalise(envRemove(env, name), body)
+        end
+    end
+  else Scheme(Nil, recVar, Nil)
+
+fn checkFnDecl(decl : Decl, env : List((String, Scheme)), f : Int, copy : List(String), show : List(String)) : FnDeclR =
+  match decl with
+  | FnDecl(exported, name, bounds, params, ret, body) =>
+      let recVar = MVar(f) in
+      let localEnv0 = envPut(env, name, recScheme(env, name, params, ret, recVar)) in
+      match checkFnParams(params, localEnv0, Nil, Nil, f + 1, copy) with
+      | (paramTypes, localEnv, tracked, tvenv, f1) =>
+          match infer(localEnv, tracked, body, f1, copy) with
+          | IErr(m) => FDErr(m)
+          | IOk(tbody, bt, s, f2, _) =>
+              match checkFnRet(ret, tvenv, bt, s, f2) with
+              | RErr(e) => FDErr(e)
+              | ROk(bt2, s5, f3) =>
+                  let fnT1 = apply(s5, buildFnType(paramTypes, bt2, s5)) in
+                  match unify(apply(s5, recVar), fnT1) with
+                  | Err(e) => FDErr(e)
+                  | Ok(s6) =>
+                      let s7 = compose(s6, s5) in
+                      let fnT = apply(s7, fnT1) in
+                      let sc = generalise(applyEnv(s7, env), fnT) in
+                      let typedParams = applyTParams(s7, paramTypes) in
+                      let tbody2 = applyTExpr(s7, tbody) in
+                      match showBounds(tbody2, show) with
+                      | Just(e) => FDErr(e)
+                      | Nothing => FDOk(TFnDecl(name, typedParams, tbody2, sc, exported), sc, f3)
+                      end
+                  end
+              end
+          end
+      end
+  | _ => FDErr("not a function declaration")
+  end
+
+fn checkLetAnn(ann : Maybe(Ty), t : Mono, s : Subst, f : Int) : RetR =
+  match ann with
+  | Nothing => ROk(t, s, f)
+  | Just(annTy) =>
+      match synToMono(annTy, Nil, f) with
+      | (annT, _, f1) =>
+          match unify(t, annT) with
+          | Err(e) => RErr(e)
+          | Ok(s2) => let s3 = compose(s2, s) in ROk(apply(s3, annT), s3, f1)
+          end
+      end
+  end
+
+fn checkLetDecl(decl : Decl, env : List((String, Scheme)), f : Int, copy : List(String), show : List(String)) : LetDeclR =
+  match decl with
+  | LetDecl(exported, name, ann, value) =>
+      match infer(env, Nil, value, f, copy) with
+      | IErr(m) => LDErr(m)
+      | IOk(tv, t0, s, f1, _) =>
+          match checkLetAnn(ann, apply(s, t0), s, f1) with
+          | RErr(e) => LDErr(e)
+          | ROk(t2, s2, f2) =>
+              let sc = generalise(applyEnv(s2, env), t2) in
+              let tv2 = applyTExpr(s2, tv) in
+              match showBounds(tv2, show) with
+              | Just(e) => LDErr(e)
+              | Nothing => LDOk(TLetDecl(name, tv2, sc, exported), sc, f2)
+              end
+          end
+      end
+  | _ => LDErr("not a let declaration")
+  end
+
+
+(* ── Type / trait / impl registration (port of the Pass-1 registrars) ─────── *)
+
+fn allocParamVars(params : List(String), f : Int) : (List((String, Int)), Int) =
+  match params with
+  | Nil => (Nil, f)
+  | Cons(p, rest) => match allocParamVars(rest, f + 1) with | (pv, f2) => (Cons((p, f), pv), f2) end
+  end
+
+fn pvarMonos(pvars : List((String, Int))) : List(Mono) =
+  match pvars with | Nil => Nil | Cons((_, id), rest) => Cons(MVar(id), pvarMonos(rest)) end
+
+fn buildResultT(name : String, pvars : List((String, Int))) : Mono =
+  match pvars with | Nil => MCon(name) | _ => MApp(name, pvarMonos(pvars)) end
+
+fn curryFields(fields : List(Mono), res : Mono) : Mono =
+  match fields with | Nil => res | Cons(ft, rest) => MFn(ft, curryFields(rest, res)) end
+
+fn registerOneVariant(vn : String, payload : List(Ty), pvars : List((String, Int)),
+                      resultT : Mono, env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match payload with
+  | Nil => (envPut(env, vn, Scheme(freeVars(resultT), resultT, Nil)), f)
+  | _ =>
+      match synToMonoList(payload, pvars, f) with
+      | (fieldMonos, _, f2) =>
+          let conT = curryFields(fieldMonos, resultT) in
+          (envPut(env, vn, Scheme(freeVars(conT), conT, Nil)), f2)
+      end
+  end
+
+fn registerVariants(vs : List(Variant), pvars : List((String, Int)), resultT : Mono,
+                    env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match vs with
+  | Nil => (env, f)
+  | Cons(Variant(vn, payload), rest) =>
+      match registerOneVariant(vn, payload, pvars, resultT, env, f) with
+      | (env2, f2) => registerVariants(rest, pvars, resultT, env2, f2)
+      end
+  end
+
+fn registerTypeDecl(decl : Decl, env : List((String, Scheme)), f : Int, copy : List(String)) : (List((String, Scheme)), Int, List(String)) =
+  match decl with
+  | TypeDecl(exported, name, params, body) =>
+      match body with
+      | Alias(_) => (env, f, copy)
+      | Variants(vs) =>
+          match allocParamVars(params, f) with
+          | (pvars, f1) =>
+              match registerVariants(vs, pvars, buildResultT(name, pvars), env, f1) with
+              | (env2, f2) => (env2, f2, copy)
+              end
+          end
+      end
+  | _ => (env, f, copy)
+  end
+
+fn registerTraitMethods(methods : List(TMethod), pvars : List((String, Int)),
+                        env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match methods with
+  | Nil => (env, f)
+  | Cons(TMethod(mname, ty), rest) =>
+      match synToMono(ty, pvars, f) with
+      | (methodT, _, f2) => registerTraitMethods(rest, pvars, envPut(env, mname, Scheme(freeVars(methodT), methodT, Nil)), f2)
+      end
+  end
+
+fn registerTraitDecl(decl : Decl, env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match decl with
+  | TraitDecl(exported, name, params, methods) =>
+      match allocParamVars(params, f) with
+      | (pvars, f1) => registerTraitMethods(methods, pvars, env, f1)
+      end
+  | _ => (env, f)
+  end
+
+fn forTypeName(forty : Ty) : String =
+  match forty with | TName(n) => n | TApply(n, _) => n | _ => "?" end
+
+fn paramMonos(params : List(Param), tvenv : List((String, Int)), f : Int) : PMRes =
+  match params with
+  | Nil => PMSome(Nil, tvenv, f)
+  | Cons(Param(nm, ann), rest) =>
+      match ann with
+      | Nothing => PMNone(f)
+      | Just(annTy) =>
+          match synToMono(annTy, tvenv, f) with
+          | (m, tvenv2, f1) =>
+              match paramMonos(rest, tvenv2, f1) with
+              | PMNone(f2) => PMNone(f2)
+              | PMSome(ms, tvenv3, f2) => PMSome(Cons(m, ms), tvenv3, f2)
+              end
+          end
+      end
+  end
+
+fn fnTypeFromAnnotations(decl : Decl, f : Int) : (Maybe(Mono), Int) =
+  match decl with
+  | FnDecl(exported, name, bounds, params, ret, body) =>
+      match ret with
+      | Nothing => (Nothing, f)
+      | Just(retTy) =>
+          match paramMonos(params, Nil, f) with
+          | PMNone(f2) => (Nothing, f2)
+          | PMSome(monos, tvenv, f2) =>
+              match synToMono(retTy, tvenv, f2) with
+              | (retT, _, f3) => (Just(curryFields(monos, retT)), f3)
+              end
+          end
+      end
+  | _ => (Nothing, f)
+  end
+
+
+(* ── Initial environment (port of _initial_env) ───────────────────────────── *)
+
+fn eCons(name : String, sc : Scheme, rest : List((String, Scheme))) : List((String, Scheme)) =
+  Cons((name, sc), rest)
+
+fn initialEnv(dummy : Int) : (List((String, Scheme)), List(String)) =
+  let a = MVar(0) in
+  let b = MVar(1) in
+  let io = MCon("IO") in
+  let str = MCon("String") in
+  let int = MCon("Int") in
+  let flt = MCon("Float") in
+  let bool = MCon("Bool") in
+  let env =
+    eCons("print",           Scheme(Nil, MFn(io, MFn(str, io)), Nil),
+    eCons("read",            Scheme(Nil, MFn(io, MTup(Cons(io, Cons(str, Nil)))), Nil),
+    eCons("read_all",        Scheme(Nil, MFn(io, MTup(Cons(io, Cons(str, Nil)))), Nil),
+    eCons("show",            Scheme(Cons(0, Nil), MFn(a, str), Nil),
+    eCons("int_to_float",    Scheme(Nil, MFn(int, flt), Nil),
+    eCons("float_to_int",    Scheme(Nil, MFn(flt, int), Nil),
+    eCons("float_to_bits",   Scheme(Nil, MFn(flt, int), Nil),
+    eCons("int_to_string",   Scheme(Nil, MFn(int, str), Nil),
+    eCons("float_to_string", Scheme(Nil, MFn(flt, str), Nil),
+    eCons("int_abs",         Scheme(Nil, MFn(int, int), Nil),
+    eCons("float_abs",       Scheme(Nil, MFn(flt, flt), Nil),
+    eCons("float_sqrt",      Scheme(Nil, MFn(flt, flt), Nil),
+    eCons("float_floor",     Scheme(Nil, MFn(flt, flt), Nil),
+    eCons("float_ceil",      Scheme(Nil, MFn(flt, flt), Nil),
+    eCons("string_length",   Scheme(Nil, MFn(str, int), Nil),
+    eCons("string_index",    Scheme(Nil, MFn(str, MFn(int, int)), Nil),
+    eCons("string_slice",    Scheme(Nil, MFn(str, MFn(int, MFn(int, str))), Nil),
+    eCons("char_to_string",  Scheme(Nil, MFn(int, str), Nil),
+    eCons("string_to_int",   Scheme(Nil, MFn(str, tResult(int, str)), Nil),
+    eCons("string_to_float", Scheme(Nil, MFn(str, tResult(flt, str)), Nil),
+    eCons("Nil",  Scheme(Cons(0, Nil), tList(a), Nil),
+    eCons("Cons", Scheme(Cons(0, Nil), MFn(a, MFn(tList(a), tList(a))), Nil),
+    eCons("Ok",   Scheme(Cons(0, Cons(1, Nil)), MFn(a, tResult(a, b)), Nil),
+    eCons("Err",  Scheme(Cons(0, Cons(1, Nil)), MFn(b, tResult(a, b)), Nil),
+    eCons("True",  Scheme(Nil, bool, Nil),
+    eCons("False", Scheme(Nil, bool, Nil),
+    Nil)))))))))))))))))))))))))) in
+  (env, Cons("Int", Cons("Float", Cons("Bool", Cons("String", Cons("()", Cons("List", Nil)))))))
+
+
+(* ── Passes (port of typecheck) ───────────────────────────────────────────── *)
+
+fn pass1One(d : Decl, env : List((String, Scheme)), f : Int, copy : List(String), show : List(String))
+    : (List((String, Scheme)), Int, List(String), List(String)) =
+  match d with
+  | TypeDecl(_, _, _, _) => match registerTypeDecl(d, env, f, copy) with | (e2, f2, c2) => (e2, f2, c2, show) end
+  | TraitDecl(_, _, _, _) => match registerTraitDecl(d, env, f) with | (e2, f2) => (e2, f2, copy, show) end
+  | ImplDecl(tname, _, forty, _) =>
+      if strEq(tname, "Copy") then (env, f, Cons(forTypeName(forty), copy), show)
+      else if strEq(tname, "Show") then (env, f, copy, Cons(forTypeName(forty), show))
+      else (env, f, copy, show)
+  | _ => (env, f, copy, show)
+  end
+
+fn pass1(decls : List(Decl), env : List((String, Scheme)), f : Int, copy : List(String), show : List(String))
+    : (List((String, Scheme)), Int, List(String), List(String)) =
+  match decls with
+  | Nil => (env, f, copy, show)
+  | Cons(d, rest) =>
+      match pass1One(d, env, f, copy, show) with
+      | (env2, f2, copy2, show2) => pass1(rest, env2, f2, copy2, show2)
+      end
+  end
+
+fn pass15One(d : Decl, env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match d with
+  | FnDecl(_, name, _, _, _, _) =>
+      if envHas(env, name) then (env, f)
+      else match fnTypeFromAnnotations(d, f) with
+           | (Nothing, f2) => (env, f2)
+           | (Just(annT), f2) => (envPut(env, name, Scheme(Nil, annT, Nil)), f2)
+           end
+  | _ => (env, f)
+  end
+
+fn pass15(decls : List(Decl), env : List((String, Scheme)), f : Int) : (List((String, Scheme)), Int) =
+  match decls with
+  | Nil => (env, f)
+  | Cons(d, rest) => match pass15One(d, env, f) with | (e2, f2) => pass15(rest, e2, f2) end
+  end
+
+fn checkImplMethods(methods : List(IMethod), env : List((String, Scheme)), f : Int,
+                    copy : List(String), show : List(String)) : Result(Int, String) =
+  match methods with
+  | Nil => Ok(f)
+  | Cons(IMethod(mname, params, body), rest) =>
+      match checkFnDecl(FnDecl(false, mname, Nil, params, Nothing, body), env, f, copy, show) with
+      | FDErr(m) => Err(m)
+      | FDOk(_, _, f2) => checkImplMethods(rest, env, f2, copy, show)
+      end
+  end
+
+fn sigOfFnLet(name : String, sc : Scheme) : String = name + " : " + normSchemeStr(sc)
+
+fn pass2One(d : Decl, env : List((String, Scheme)), f : Int, copy : List(String), show : List(String)) : Pass2OneR =
+  match d with
+  | FnDecl(_, name, _, _, _, _) =>
+      match checkFnDecl(d, env, f, copy, show) with
+      | FDErr(m) => P2OErr(m)
+      | FDOk(_, sc, f2) => P2OOk(Just(sigOfFnLet(name, sc)), envPut(env, name, sc), f2)
+      end
+  | LetDecl(_, name, _, _) =>
+      match checkLetDecl(d, env, f, copy, show) with
+      | LDErr(m) => P2OErr(m)
+      | LDOk(_, sc, f2) => P2OOk(Just(sigOfFnLet(name, sc)), envPut(env, name, sc), f2)
+      end
+  | TypeDecl(_, name, _, _) => P2OOk(Just("type " + name), env, f)
+  | TraitDecl(_, _, _, _) => P2OOk(Nothing, env, f)
+  | ImplDecl(tname, _, forty, methods) =>
+      match checkImplMethods(methods, env, f, copy, show) with
+      | Err(m) => P2OErr(m)
+      | Ok(f2) => P2OOk(Just("impl " + tname + " for " + forTypeName(forty)), env, f2)
+      end
+  end
+
+fn pass2(decls : List(Decl), env : List((String, Scheme)), f : Int, copy : List(String), show : List(String)) : Pass2R =
+  match decls with
+  | Nil => P2Ok(Nil, env, f)
+  | Cons(d, rest) =>
+      match pass2One(d, env, f, copy, show) with
+      | P2OErr(m) => P2Err(m)
+      | P2OOk(mline, env2, f2) =>
+          match pass2(rest, env2, f2, copy, show) with
+          | P2Err(m) => P2Err(m)
+          | P2Ok(lines, envF, fF) =>
+              match mline with
+              | Just(l) => P2Ok(Cons(l, lines), envF, fF)
+              | Nothing => P2Ok(lines, envF, fF)
+              end
+          end
+      end
+  end
+
+
+(* ── Normalised signature printer (var ids → α,β,γ by first occurrence) ───── *)
+
+fn appendInt(xs : List(Int), x : Int) : List(Int) =
+  match xs with | Nil => Cons(x, Nil) | Cons(y, r) => Cons(y, appendInt(r, x)) end
+
+fn addVar(acc : List(Int), i : Int) : List(Int) =
+  if memberInt(i, acc) then acc else appendInt(acc, i)
+
+fn collectVarsList(ts : List(Mono), acc : List(Int)) : List(Int) =
+  match ts with | Nil => acc | Cons(t, rest) => collectVarsList(rest, collectVars(t, acc)) end
+
+fn collectVars(t : Mono, acc : List(Int)) : List(Int) =
+  match t with
+  | MVar(i)    => addVar(acc, i)
+  | MCon(_)    => acc
+  | MApp(_, as_) => collectVarsList(as_, acc)
+  | MFn(p, r)  => collectVars(r, collectVars(p, acc))
+  | MTup(es)   => collectVarsList(es, acc)
+  end
+
+fn indexOfInt(x : Int, xs : List(Int), k : Int) : Int =
+  match xs with | Nil => 0 | Cons(y, r) => if x == y then k else indexOfInt(x, r, k + 1) end
+
+fn pnArgs(ts : List(Mono), ids : List(Int)) : String =
+  match ts with
+  | Nil          => ""
+  | Cons(t, Nil) => pnP(t, ids, false)
+  | Cons(t, rest) => pnP(t, ids, false) + ", " + pnArgs(rest, ids)
+  end
+
+fn pnInner(t : Mono, ids : List(Int)) : String =
+  match t with
+  | MVar(i)    => greek(indexOfInt(i, ids, 0))
+  | MCon(n)    => n
+  | MApp(h, as_) => match as_ with | Nil => h | _ => h + "(" + pnArgs(as_, ids) + ")" end
+  | MFn(p, r)  => pnP(p, ids, true) + " -> " + pnP(r, ids, false)
+  | MTup(es)   => "(" + pnArgs(es, ids) + ")"
+  end
+
+fn pnP(t : Mono, ids : List(Int), paren : Bool) : String =
+  match t with
+  | MFn(p, r) => if paren then "(" + pnInner(t, ids) + ")" else pnInner(t, ids)
+  | _         => pnInner(t, ids)
+  end
+
+fn normSchemeStr(sc : Scheme) : String =
+  match sc with | Scheme(qs, body, cv) => pnP(body, collectVars(body, Nil), false) end
+
+
+(* ── Entry point ──────────────────────────────────────────────────────────── *)
+
+fn joinLines(ls : List(String)) : String =
+  match ls with
+  | Nil           => ""
+  | Cons(l, Nil)  => l
+  | Cons(l, rest) => l + "\n" + joinLines(rest)
+  end
+
+fn checkProgram(prog : Prog) : String =
+  match prog with
+  | Prog(modName, imports, decls) =>
+      match initialEnv(0) with
+      | (env0, copy0) =>
+          let show0 = Cons("Int", Cons("Float", Cons("Bool", Cons("String", Nil)))) in
+          match pass1(decls, env0, 0, copy0, show0) with
+          | (env1, f1, copy1, show1) =>
+              match pass15(decls, env1, f1) with
+              | (env2, f2) =>
+                  match pass2(decls, env2, f2, copy1, show1) with
+                  | P2Err(m) => "type error: " + m
+                  | P2Ok(lines, _, _) => joinLines(Cons("(module " + modName + ")", lines))
+                  end
+              end
+          end
+      end
+  end
+
+
+(* ── Typed-AST entry: produce a TProgram for the lowerer (port of infer.py's
+      `typecheck`).  checkProgram above only type-checks and prints signatures —
+      it discards the typed decls checkFnDecl/checkLetDecl build.  inferProgram
+      keeps them, assembling the TProgram the M7 middle end (lower→opt→emit_tac_c)
+      consumes.  Mirrors typecheck's Pass 2: FnDecl/LetDecl → the checked TDecl,
+      TypeDecl → TTypeDecl (variants via synToMono — lower reads only the ctor
+      NAMES, so the payload monos need not match the oracle's fresh ids),
+      ImplDecl → TImplDecl with its methods' TFnDecls, TraitDecl → dropped.  No
+      Pass 0 (imports): the assembled compiler is a single module. ───────────── *)
+
+type ImplCR  = | ICErr of String | ICOk of List(TDecl), Int
+type Pass2CR = | P2CErr of String | P2COk of List(TDecl), List((String, Scheme)), Int
+
+fn buildVariants(vs : List(Variant), tve : List((String, Int)), f : Int) : (List(TVariant), Int) =
+  match vs with
+  | Nil => (Nil, f)
+  | Cons(Variant(vn, payload), rest) =>
+      match synToMonoList(payload, tve, f) with
+      | (monos, tve2, f2) =>
+          match buildVariants(rest, tve2, f2) with
+          | (tvs, f3) => (Cons(TVariant(vn, monos), tvs), f3)
+          end
+      end
+  end
+
+fn checkImplMethodsC(methods : List(IMethod), env : List((String, Scheme)), f : Int,
+                     copy : List(String), show : List(String)) : ImplCR =
+  match methods with
+  | Nil => ICOk(Nil, f)
+  | Cons(IMethod(mname, params, body), rest) =>
+      match checkFnDecl(FnDecl(false, mname, Nil, params, Nothing, body), env, f, copy, show) with
+      | FDErr(m) => ICErr(m)
+      | FDOk(tdecl, _, f2) =>
+          match checkImplMethodsC(rest, env, f2, copy, show) with
+          | ICErr(m) => ICErr(m)
+          | ICOk(tds, f3) => ICOk(Cons(tdecl, tds), f3)
+          end
+      end
+  end
+
+fn p2cCons(td : TDecl, r : Pass2CR) : Pass2CR =
+  match r with
+  | P2CErr(m) => P2CErr(m)
+  | P2COk(tds, env, f) => P2COk(Cons(td, tds), env, f)
+  end
+
+fn pass2Collect(decls : List(Decl), env : List((String, Scheme)), f : Int,
+                copy : List(String), show : List(String)) : Pass2CR =
+  match decls with
+  | Nil => P2COk(Nil, env, f)
+  | Cons(d, rest) =>
+      match d with
+      | FnDecl(_, name, _, _, _, _) =>
+          match checkFnDecl(d, env, f, copy, show) with
+          | FDErr(m) => P2CErr(m)
+          | FDOk(tdecl, sc, f2) => p2cCons(tdecl, pass2Collect(rest, envPut(env, name, sc), f2, copy, show))
+          end
+      | LetDecl(_, name, _, _) =>
+          match checkLetDecl(d, env, f, copy, show) with
+          | LDErr(m) => P2CErr(m)
+          | LDOk(tdecl, sc, f2) => p2cCons(tdecl, pass2Collect(rest, envPut(env, name, sc), f2, copy, show))
+          end
+      | TypeDecl(exported, name, params, body) =>
+          match body with
+          | Alias(_) => p2cCons(TTypeDecl(name, params, Nothing, exported), pass2Collect(rest, env, f, copy, show))
+          | Variants(vs) =>
+              match buildVariants(vs, Nil, f) with
+              | (tvs, f2) => p2cCons(TTypeDecl(name, params, Just(tvs), exported), pass2Collect(rest, env, f2, copy, show))
+              end
+          end
+      | TraitDecl(_, _, _, _) => pass2Collect(rest, env, f, copy, show)
+      | ImplDecl(tname, _, forty, methods) =>
+          match checkImplMethodsC(methods, env, f, copy, show) with
+          | ICErr(m) => P2CErr(m)
+          | ICOk(tds, f2) => p2cCons(TImplDecl(tname, forTypeName(forty), tds), pass2Collect(rest, env, f2, copy, show))
+          end
+      end
+  end
+
+fn inferProgram(prog : Prog) : Result(TProgram, String) =
+  match prog with
+  | Prog(modName, imports, decls) =>
+      match initialEnv(0) with
+      | (env0, copy0) =>
+          let show0 = Cons("Int", Cons("Float", Cons("Bool", Cons("String", Nil)))) in
+          match pass1(decls, env0, 0, copy0, show0) with
+          | (env1, f1, copy1, show1) =>
+              match pass15(decls, env1, f1) with
+              | (env2, f2) =>
+                  match pass2Collect(decls, env2, f2, copy1, show1) with
+                  | P2CErr(m) => Err(m)
+                  | P2COk(tds, _, _) => Ok(TProgram(modName, tds))
+                  end
+              end
+          end
+      end
+  end
+
+
+(* ── Smoke driver (concatenated with lex+parse+types+tast — see infer_smoke) ─ *)
+
+fn main(io : IO) : IO =
+  let src = "module Demo\n\nfn double(x : Int) : Int = x + x\n\nfn apply2(g : (Int) -> Int, y : Int) : Int = g(g(y))\n\nfn main(io : IO) : IO = print(io, int_to_string(apply2(double, 21)))" in
+  print(io, checkProgram(parseProgram(tokenize(src, string_length(src), P(0, 1, 1)))))

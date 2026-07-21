@@ -1,0 +1,69 @@
+(* lex_smoke.lark — M0 smoke test for the self-hosting effort.
+
+   Proves the four new runtime prims (string_index, string_slice,
+   char_to_string, string_to_int) are enough to write a lexer *in Lark*:
+   a cursor walks an Int index over a (Copy) source String, classifies each
+   codepoint by range comparison, and slices whole lexemes.  No new language
+   features — this is Lark as it stands, which is the M1 bet.
+
+   Note the IO discipline (see LOG.md / SELFHOST §7): the affine checker sums a
+   variable's uses across `if` branches and `match` arms, so an affine value
+   like `io` cannot be threaded through branching.  Following the corpus
+   convention, the lexer is therefore *pure* — it builds the whole output
+   String and `main` prints it once.
+
+   Run:  python3 ../07/src/cek.py lex_smoke.lark
+   Expected output:
+     ID(foo)
+     NUM(123)
+     OP(+)
+     ID(bar42)
+     done *)
+
+module LexSmoke
+
+type Result a b =
+  | Ok  of a
+  | Err of b
+
+(* -- Character classes: codepoint range comparison, no new prims needed. -- *)
+
+fn is_digit(c : Int) : Bool = c >= 48 and c <= 57
+
+fn is_alpha(c : Int) : Bool =
+  (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+
+fn is_alnum(c : Int) : Bool = is_alpha(c) or is_digit(c)
+
+fn is_space(c : Int) : Bool = c == 32 or c == 9 or c == 10
+
+(* Scan forward from i while pred holds over the codepoint; return end index. *)
+fn scan_while(src : String, i : Int, n : Int, pred : Int -> Bool) : Int =
+  if i >= n then i
+  else if pred(string_index(src, i)) then scan_while(src, i + 1, n, pred)
+  else i
+
+fn show_int(r : Result(Int, String)) : String =
+  match r with
+  | Ok(n)  => int_to_string(n)
+  | Err(_) => "?"
+  end
+
+(* Pure lexer: recurse on a cursor, accumulating one "TOKEN\n" per lexeme. *)
+fn lex(src : String, i : Int, n : Int) : String =
+  if i >= n then "done"
+  else
+    let c = string_index(src, i) in
+    if is_space(c) then lex(src, i + 1, n)
+    else if is_alpha(c) then
+      let j = scan_while(src, i, n, is_alnum) in
+      "ID(" + string_slice(src, i, j) + ")\n" + lex(src, j, n)
+    else if is_digit(c) then
+      let j = scan_while(src, i, n, is_digit) in
+      "NUM(" + show_int(string_to_int(string_slice(src, i, j))) + ")\n" + lex(src, j, n)
+    else
+      "OP(" + char_to_string(c) + ")\n" + lex(src, i + 1, n)
+
+fn main(io : IO) : IO =
+  let src = "foo 123 + bar42" in
+  print(io, lex(src, 0, string_length(src)))

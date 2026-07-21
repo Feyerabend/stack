@@ -1,0 +1,874 @@
+(* emit_tac_c.lark — Lark's TAC → C emitter, written in Lark.
+   (SELFHOST milestone M7, slice 3 — the port of 07/src/emit_tac_c.py.)
+
+   O5′ / M7 builds a self-hosted OPTIMIZING C-compiler.  lower.lark turns the
+   typed AST into flat TAC (tac.lark), opt.lark will rewrite it, and THIS module
+   emits a self-contained C file from that TAC — the missing "true self-
+   optimizing fixpoint" backend leg (the optimizer and the C fixpoint share one
+   backend, unlike the RV32 assembler path).
+
+   Pipeline position (per emit_tac_c.py):
+       tast.lark → lower.lark → tac.lark → (opt.lark) → emit_tac_c.lark → C text
+
+   Design notes
+   ────────────
+   • This is a COMPONENT.  It consumes tac.lark's IR (Tmp / ConstVal / Operand /
+     Instr / Function / TAC) and never touches the typed AST — emit_tac_c reads
+     only the TAC's structure, names and literals.  As with M2/M4/M5/M7.2, the
+     differential harness assembles the pipeline by CONCATENATION (lex + parse +
+     tac + emit_tac_c + a generated main); it does NOT type-check standalone.
+     Run path: `python3 tests/emit_tac_c_difftest.py`.
+   • PURE, no mutation.  emit_tac_c.py's CEmitter carries one piece of mutable
+     state — `strlits`, the interned string-literal table filled DURING emission
+     and read AFTER (the STR[] table precedes the function bodies in the output).
+     Here it is a threaded `List(String)` in first-seen (= index) order: every
+     emit* that can touch a string Const returns `(…, table)`.  The read-only
+     tables (tag ids, defined-fn names, global names) ride in a `Ctx` record.
+   • BYTE ORDER is the whole game.  The emitter builds all function bodies FIRST
+     (accumulating strlits), THEN renders the STR[] table + its initialiser from
+     the final table, THEN assembles: preamble, STR[] decl, globals, prototypes,
+     strlit init, bodies, main — exactly emit_tac_c.py's `parts` sequence, joined
+     with "\n" (balanced join, §8a, to dodge the O(n²) arena wall) + one trailing
+     "\n".  The self-contained C preamble is one verbatim string constant
+     (`etcPreambleRaw`), matching the oracle's `_PREAMBLE` element for element.
+   • The machine word is `intptr_t` (`lkw`); floats are packed as their f32 bit
+     pattern.  A float literal's bits come from `string_to_float` + `float_to_bits`
+     (the M5 idiom); an integer Const's digits pass straight through.
+   • NAME MANGLING mirrors `_mang`: any non-[A-Za-z0-9_] byte → `_hh_` (lowercase
+     hex).  C-string escaping mirrors `_cstr`: octal `\NNN` for bytes outside the
+     printable ASCII range (the self-host corpus is ASCII, where a codepoint IS
+     its byte — the UTF-8/codepoint caveat matches char_to_string's).            *)
+
+module EmitTacC
+
+
+(* ── Small generic list helpers ───────────────────────────────────────────── *)
+(* etcLen is polymorphic (List(a) is Copy when a is — infer's is_copy); reused
+   for String / Operand / Function lists alike. *)
+
+fn etcLen(xs : List(a)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + etcLen(r) end
+
+(* String-monomorphic reverse: a polymorphic List(a) accumulator-reverse trips
+   the frozen infer's occurs gap (same reason emit_c.lark's ecRev is monomorphic,
+   SELFHOST §7).  etcLen above stays polymorphic — only the reverse pattern bites. *)
+fn etcRev(xs : List(String), acc : List(String)) : List(String) =
+  match xs with | Nil => acc | Cons(x, r) => etcRev(r, Cons(x, acc)) end
+
+
+(* ── String equality / ordering (string `==` is unimplemented in cek.binop) ── *)
+
+fn etcStrEqGo(a : String, b : String, i : Int, n : Int) : Bool =
+  if i >= n then true
+  else if string_index(a, i) == string_index(b, i) then etcStrEqGo(a, b, i + 1, n)
+  else false
+
+fn etcStrEq(a : String, b : String) : Bool =
+  let la = string_length(a) in
+  let lb = string_length(b) in
+  if la == lb then etcStrEqGo(a, b, 0, la) else false
+
+(* Python string `<`: lexicographic by codepoint, a proper prefix is smaller. *)
+fn etcStrLtGo(a : String, b : String, i : Int, la : Int, lb : Int) : Bool =
+  if i >= la then (if i >= lb then false else true)
+  else if i >= lb then false
+  else
+    let ca = string_index(a, i) in
+    let cb = string_index(b, i) in
+    if ca < cb then true
+    else if ca > cb then false
+    else etcStrLtGo(a, b, i + 1, la, lb)
+
+fn etcStrLt(a : String, b : String) : Bool =
+  etcStrLtGo(a, b, 0, string_length(a), string_length(b))
+
+fn etcMember(x : String, xs : List(String)) : Bool =
+  match xs with
+  | Nil          => false
+  | Cons(y, r)   => if etcStrEq(x, y) then true else etcMember(x, r)
+  end
+
+(* nub keeping first occurrence (order irrelevant — always sorted afterward). *)
+fn etcNubGo(xs : List(String), seen : List(String)) : List(String) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => if etcMember(x, seen) then etcNubGo(r, seen)
+                  else Cons(x, etcNubGo(r, Cons(x, seen)))
+  end
+
+fn etcDedupe(xs : List(String)) : List(String) = etcNubGo(xs, Nil)
+
+fn etcInsert(x : String, xs : List(String)) : List(String) =
+  match xs with
+  | Nil        => Cons(x, Nil)
+  | Cons(y, r) => if etcStrLt(x, y) then Cons(x, Cons(y, r)) else Cons(y, etcInsert(x, r))
+  end
+
+fn etcSort(xs : List(String)) : List(String) =
+  match xs with | Nil => Nil | Cons(x, r) => etcInsert(x, etcSort(r)) end
+
+
+(* ── Hex (name mangling) + octal (C string escapes) ───────────────────────── *)
+
+fn etcHexDigit(d : Int) : String =                    (* lowercase, matches _mang *)
+  if d < 10 then char_to_string(48 + d) else char_to_string(87 + d)
+
+fn etcHexRaw(n : Int) : String =                      (* n >= 0, unpadded *)
+  if n < 16 then etcHexDigit(n)
+  else etcHexRaw(n / 16) + etcHexDigit(n - (n / 16) * 16)
+
+fn etcOctDigit(d : Int) : String = char_to_string(48 + d)
+
+(* 3-digit zero-padded octal; n in 0..511 covers every byte. *)
+fn etcOct3(n : Int) : String =
+  let d0 = n - (n / 8) * 8 in
+  let n1 = n / 8 in
+  let d1 = n1 - (n1 / 8) * 8 in
+  let d2 = n1 / 8 in
+  etcOctDigit(d2) + etcOctDigit(d1) + etcOctDigit(d0)
+
+
+(* ── Name mangling (port of _mang) ────────────────────────────────────────── *)
+
+fn etcIsIdentByte(c : Int) : Bool =
+  (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+
+fn etcMangChar(c : Int) : String =
+  if etcIsIdentByte(c) then char_to_string(c) else "_" + etcHexRaw(c) + "_"
+
+fn etcMangGo(s : String, i : Int, n : Int) : String =
+  if i >= n then "" else etcMangChar(string_index(s, i)) + etcMangGo(s, i + 1, n)
+
+fn etcMang(s : String) : String = etcMangGo(s, 0, string_length(s))
+
+
+(* ── C string literal (port of _cstr; octal-escaped bytes) ────────────────── *)
+
+fn etcCStrChar(c : Int) : String =
+  if c == 34 then "\\\""            (* " *)
+  else if c == 92 then "\\\\"       (* \ *)
+  else if c == 10 then "\\n"
+  else if c == 9  then "\\t"
+  else if c == 13 then "\\r"
+  else if c >= 32 and c < 127 then char_to_string(c)
+  else "\\" + etcOct3(c)
+
+fn etcCStrGo(s : String, i : Int, n : Int, acc : String) : String =
+  if i >= n then acc
+  else etcCStrGo(s, i + 1, n, acc + etcCStrChar(string_index(s, i)))
+
+fn etcCStr(s : String) : String = "\"" + etcCStrGo(s, 0, string_length(s), "") + "\""
+
+(* A float literal's f32 bit pattern (the M5 float_to_bits idiom). *)
+fn etcFloatBits(txt : String) : Int =
+  match string_to_float(txt) with | Ok(f) => float_to_bits(f) | Err(_) => 0 end
+
+
+(* ── Emitter context (the read-only tables) ───────────────────────────────── *)
+
+(* tag ids (assoc name→id, from IAlloc tags), defined-fn names, global names, and
+   the current function's IGetTag-dst tmp names (set per function in etcFnLines;
+   an `==`/`!=` against a string Const whose LHS is one of these is a tag test,
+   otherwise it is a genuine string compare). *)
+type Ctx = | Ctx of List((String, Int)), List(String), List(String), List(String)
+impl Copy for Ctx = {}
+
+fn etcCtxTags(c : Ctx)    : List((String, Int)) = match c with | Ctx(t, _, _, _) => t end
+fn ctxDefined(c : Ctx) : List(String)        = match c with | Ctx(_, d, _, _) => d end
+fn ctxGlobals(c : Ctx) : List(String)        = match c with | Ctx(_, _, g, _) => g end
+fn etcCtxTagTmps(c : Ctx) : List(String)     = match c with | Ctx(_, _, _, tt) => tt end
+
+fn etcTagId(pairs : List((String, Int)), name : String, dflt : Int) : Int =
+  match pairs with
+  | Nil              => dflt
+  | Cons((k, v), r)  => if etcStrEq(k, name) then v else etcTagId(r, name, dflt)
+  end
+
+(* C name for a call/def target (port of cfn). *)
+fn etcCfn(ctx : Ctx, name : String) : String =
+  if etcStrEq(name, "main") then "lark_main"
+  else if etcMember(name, ctxDefined(ctx)) then "lk_" + etcMang(name)
+  else name
+
+(* C name for a value (port of vname). *)
+fn etcVname(ctx : Ctx, name : String) : String =
+  if etcMember(name, ctxGlobals(ctx)) then "g_" + etcMang(name)
+  else "v_" + etcMang(name)
+
+fn etcTmpName(t : Tmp) : String = match t with | Tmp(n) => n end
+
+
+(* ── String-literal interning (port of _strlit; the one threaded table) ───── *)
+
+fn etcIndexOf(xs : List(String), s : String, i : Int) : Int =
+  match xs with
+  | Nil        => 0 - 1
+  | Cons(x, r) => if etcStrEq(x, s) then i else etcIndexOf(r, s, i + 1)
+  end
+
+fn etcIntern(table : List(String), s : String) : (Int, List(String)) =
+  let idx = etcIndexOf(table, s, 0) in
+  if idx == 0 - 1 then (etcLen(table), tacSnocStr(table, s))
+  else (idx, table)
+
+
+(* ── Value expressions (port of vref) ─────────────────────────────────────── *)
+
+fn etcVref(ctx : Ctx, v : Operand, table : List(String)) : (String, List(String)) =
+  match v with
+  | OTmp(t)   => (etcVname(ctx, etcTmpName(t)), table)
+  | OConst(c) =>
+      match c with
+      | CUnit     => ("(lkw)0", table)
+      | CBool(b)  => (if b then "(lkw)1" else "(lkw)0", table)
+      | CInt(s)   => ("(lkw)(" + s + "LL)", table)
+      | CFloat(s) => ("(lkw)" + int_to_string(etcFloatBits(s)) + "uLL", table)
+      | CStr(s)   =>
+          match etcIntern(table, s) with
+          | (idx, table1) => ("((lkw)STR[" + int_to_string(idx) + "])", table1)
+          end
+      end
+  end
+
+fn etcVrefList(ctx : Ctx, ops : List(Operand), table : List(String)) : (List(String), List(String)) =
+  match ops with
+  | Nil          => (Nil, table)
+  | Cons(o, rest) =>
+      match etcVref(ctx, o, table) with
+      | (s, t1) =>
+          match etcVrefList(ctx, rest, t1) with
+          | (ss, t2) => (Cons(s, ss), t2)
+          end
+      end
+  end
+
+
+(* ── Binary operators (port of _binop) ────────────────────────────────────── *)
+
+fn etcOpArith(op : String) : Bool =
+  etcStrEq(op, "+") or etcStrEq(op, "-") or etcStrEq(op, "*") or etcStrEq(op, "/") or etcStrEq(op, "%")
+
+fn etcOpCmp(op : String) : Bool =
+  etcStrEq(op, "<") or etcStrEq(op, ">") or etcStrEq(op, "<=") or etcStrEq(op, ">=")
+
+fn etcBinop(ctx : Ctx, op : String, l : Operand, r : Operand, table : List(String)) : (String, List(String)) =
+  match etcVref(ctx, l, table) with
+  | (lc, t1) =>
+      if etcOpArith(op) then
+        match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " " + op + " " + rc + ")", t2) end
+      else if etcStrEq(op, "&&") then
+        match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " & " + rc + ")", t2) end
+      else if etcStrEq(op, "||") then
+        match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " | " + rc + ")", t2) end
+      else if etcOpCmp(op) then
+        match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " " + op + " " + rc + ")", t2) end
+      else if etcStrEq(op, "==") or etcStrEq(op, "!=") then
+        (* An `==`/`!=` whose RHS is a string Const is either a constructor-tag test
+           (LHS is an integer tag from IGetTag, RHS names the constructor) or a
+           genuine string-literal comparison (e.g. lexer keyword_kind).  Distinguish
+           by the LHS: a tag test's LHS is always an IGetTag dst (etcCtxTagTmps). *)
+        match r with
+        | OConst(CStr(sv)) =>
+            match l with
+            | OTmp(ln) =>
+                if etcMember(etcTmpName(ln), etcCtxTagTmps(ctx)) then
+                  (* constructor-tag test — mirror asm._instr, tag_ids.get(name,-1) *)
+                  let tid = etcTagId(etcCtxTags(ctx), sv, 0 - 1) in
+                  ("(" + lc + " " + op + " " + int_to_string(tid) + ")   /* tag " + sv + " */", t1)
+                else
+                  match etcVref(ctx, r, t1) with
+                  | (rc, t2) =>
+                      let eq = "__lark_streq(" + lc + ", " + rc + ")" in
+                      (if etcStrEq(op, "==") then eq else "(!" + eq + ")", t2)
+                  end
+            | _ =>
+                let tid = etcTagId(etcCtxTags(ctx), sv, 0 - 1) in
+                ("(" + lc + " " + op + " " + int_to_string(tid) + ")   /* tag " + sv + " */", t1)
+            end
+        | _ =>
+            match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " " + op + " " + rc + ")", t2) end
+        end
+      else
+        match etcVref(ctx, r, t1) with | (rc, t2) => ("(" + lc + " " + op + " " + rc + ")", t2) end
+  end
+
+
+(* ── Instruction emission (port of emit_instr) ────────────────────────────── *)
+
+(* "    _p[i+1] = <field>;" lines for IAlloc fields / IAllocClosure captures. *)
+fn etcFieldLines(ctx : Ctx, fields : List(Operand), idx : Int, table : List(String)) : (List(String), List(String)) =
+  match fields with
+  | Nil          => (Nil, table)
+  | Cons(f, rest) =>
+      match etcVref(ctx, f, table) with
+      | (s, t1) =>
+          let line = "    _p[" + int_to_string(idx + 1) + "] = " + s + ";" in
+          match etcFieldLines(ctx, rest, idx + 1, t1) with
+          | (more, t2) => (Cons(line, more), t2)
+          end
+      end
+  end
+
+fn etcInstr(ctx : Ctx, ins : Instr, table : List(String)) : (List(String), List(String)) =
+  match ins with
+  | ILabel(lbl) => (Cons("  L_" + etcMang(lbl) + ": ;", Nil), table)
+  | IJump(lbl)  => (Cons("  goto L_" + etcMang(lbl) + ";", Nil), table)
+  | ICondJump(c, tl, fl) =>
+      match etcVref(ctx, c, table) with
+      | (cs, t1) =>
+          (Cons("  if (" + cs + ") goto L_" + etcMang(tl) + "; else goto L_" + etcMang(fl) + ";", Nil), t1)
+      end
+  | IAssign(d, src) =>
+      match etcVref(ctx, src, table) with
+      | (ss, t1) => (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = " + ss + ";", Nil), t1)
+      end
+  | IBinOp(d, op, l, r) =>
+      match etcBinop(ctx, op, l, r, table) with
+      | (e, t1) => (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = " + e + ";", Nil), t1)
+      end
+  | IUnary(d, op, src) =>
+      match etcVref(ctx, src, table) with
+      | (s, t1) =>
+          let e = if etcStrEq(op, "-") then "(-" + s + ")" else "(" + s + " ^ 1)" in
+          (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = " + e + ";", Nil), t1)
+      end
+  | ICall(md, callee, args) =>
+      match etcVrefList(ctx, args, table) with
+      | (argss, t1) =>
+          let call = etcCfn(ctx, callee) + "(" + tacJoin(", ", argss) + ")" in
+          match md with
+          | Nothing => (Cons("  " + call + ";", Nil), t1)
+          | Just(d) => (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = " + call + ";", Nil), t1)
+          end
+      end
+  | IClosureCall(d, fv, arg) =>
+      match etcVref(ctx, fv, table) with
+      | (cs, t1) =>
+          match etcVref(ctx, arg, t1) with
+          | (as0, t2) =>
+              let dn = etcVname(ctx, etcTmpName(d)) in
+              (Cons("  { lark_ptr _c = (lark_ptr)" + cs + ";",
+               Cons("    lkw (*_f)(lkw, lkw) = (lkw (*)(lkw, lkw))_c[0];",
+               Cons("    " + dn + " = _f((lkw)_c, " + as0 + "); }", Nil))), t2)
+          end
+      end
+  | IReturn(mv) =>
+      match mv with
+      | Nothing => (Cons("  return (lkw)0;", Nil), table)
+      | Just(v) =>
+          match etcVref(ctx, v, table) with
+          | (vs, t1) => (Cons("  return " + vs + ";", Nil), t1)
+          end
+      end
+  | IAlloc(d, tag, fields) =>
+      let n = 1 + etcLen(fields) in
+      let tagId = if etcStrEq(tag, "()") then 0 else etcTagId(etcCtxTags(ctx), tag, 0) in
+      match etcFieldLines(ctx, fields, 0, table) with
+      | (fieldLines, t1) =>
+          let hd = Cons("  { lark_ptr _p = __heap_alloc(" + int_to_string(n) + ");",
+                   Cons("    _p[0] = " + int_to_string(tagId) + ";", Nil)) in
+          let tl = Cons("    " + etcVname(ctx, etcTmpName(d)) + " = (lkw)_p; }", Nil) in
+          (tacAppendStr(hd, tacAppendStr(fieldLines, tl)), t1)
+      end
+  | IGetTag(d, src) =>
+      match etcVref(ctx, src, table) with
+      | (s, t1) => (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = ((lark_ptr)" + s + ")[0];", Nil), t1)
+      end
+  | IGetField(d, src, idx) =>
+      match etcVref(ctx, src, table) with
+      | (s, t1) => (Cons("  " + etcVname(ctx, etcTmpName(d)) + " = ((lark_ptr)" + s + ")[" + int_to_string(idx + 1) + "];", Nil), t1)
+      end
+  | IAllocClosure(d, callee, caps) =>
+      let n = 1 + etcLen(caps) in
+      match etcFieldLines(ctx, caps, 0, table) with
+      | (capLines, t1) =>
+          let hd = Cons("  { lark_ptr _p = __heap_alloc(" + int_to_string(n) + ");",
+                   Cons("    _p[0] = (lkw)&" + etcCfn(ctx, callee) + ";", Nil)) in
+          let tl = Cons("    " + etcVname(ctx, etcTmpName(d)) + " = (lkw)_p; }", Nil) in
+          (tacAppendStr(hd, tacAppendStr(capLines, tl)), t1)
+      end
+  end
+
+fn etcInstrs(ctx : Ctx, inss : List(Instr), table : List(String)) : (List(String), List(String)) =
+  match inss with
+  | Nil          => (Nil, table)
+  | Cons(i, rest) =>
+      match etcInstr(ctx, i, table) with
+      | (ls, t1) =>
+          match etcInstrs(ctx, rest, t1) with
+          | (more, t2) => (tacAppendStr(ls, more), t2)
+          end
+      end
+  end
+
+
+(* ── Local-temp declarations (port of _emit_fn's locals sweep) ────────────── *)
+
+(* The dst Tmp name an instruction writes, if any (port of _defs). *)
+fn etcDefs(i : Instr) : Maybe(String) =
+  match i with
+  | IAssign(d, _)          => Just(etcTmpName(d))
+  | IBinOp(d, _, _, _)     => Just(etcTmpName(d))
+  | IUnary(d, _, _)        => Just(etcTmpName(d))
+  | ICall(md, _, _)        => match md with | Nothing => Nothing | Just(d) => Just(etcTmpName(d)) end
+  | IClosureCall(d, _, _)  => Just(etcTmpName(d))
+  | IReturn(_)             => Nothing
+  | ILabel(_)              => Nothing
+  | IJump(_)               => Nothing
+  | ICondJump(_, _, _)     => Nothing
+  | IAlloc(d, _, _)        => Just(etcTmpName(d))
+  | IGetTag(d, _)          => Just(etcTmpName(d))
+  | IGetField(d, _, _)     => Just(etcTmpName(d))
+  | IAllocClosure(d, _, _) => Just(etcTmpName(d))
+  end
+
+(* Collect written temps in first-seen order, skipping params and globals. *)
+fn etcLocalsGo(ctx : Ctx, inss : List(Instr), seen : List(String), acc : List(String)) : List(String) =
+  match inss with
+  | Nil          => etcRev(acc, Nil)
+  | Cons(i, rest) =>
+      match etcDefs(i) with
+      | Nothing => etcLocalsGo(ctx, rest, seen, acc)
+      | Just(d) =>
+          if etcMember(d, seen) or etcMember(d, ctxGlobals(ctx)) then etcLocalsGo(ctx, rest, seen, acc)
+          else etcLocalsGo(ctx, rest, Cons(d, seen), Cons(d, acc))
+      end
+  end
+
+fn etcLocalDecls(ctx : Ctx, locals : List(String)) : List(String) =
+  match locals with
+  | Nil        => Nil
+  | Cons(n, r) => Cons("lkw " + etcVname(ctx, n) + " = 0", etcLocalDecls(ctx, r))
+  end
+
+
+(* ── Parameter lists / prototypes ─────────────────────────────────────────── *)
+
+fn etcParamDeclList(ctx : Ctx, params : List(String)) : List(String) =
+  match params with
+  | Nil        => Nil
+  | Cons(p, r) => Cons("lkw " + etcVname(ctx, p), etcParamDeclList(ctx, r))
+  end
+
+fn etcParamDecls(ctx : Ctx, params : List(String)) : String =
+  match params with
+  | Nil => "void"
+  | _   => tacJoin(", ", etcParamDeclList(ctx, params))
+  end
+
+fn etcProto(ctx : Ctx, f : Function) : String =
+  match f with
+  | Function(name, params, _, _) =>
+      "static lkw " + etcCfn(ctx, name) + "(" + etcParamDecls(ctx, params) + ");"
+  end
+
+fn etcProtos(ctx : Ctx, funcs : List(Function)) : List(String) =
+  match funcs with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(etcProto(ctx, f), etcProtos(ctx, r))
+  end
+
+
+(* ── One function body (port of _emit_fn) ─────────────────────────────────── *)
+
+(* Tmp names that are the dst of an IGetTag (integer constructor tags). *)
+fn etcTagTmps(inss : List(Instr)) : List(String) =
+  match inss with
+  | Nil          => Nil
+  | Cons(i, rest) =>
+      match i with
+      | IGetTag(d, _) => Cons(etcTmpName(d), etcTagTmps(rest))
+      | _             => etcTagTmps(rest)
+      end
+  end
+
+fn etcFnLines(ctx : Ctx, f : Function, table : List(String)) : (List(String), List(String)) =
+  match f with
+  | Function(name, params, body, _) =>
+      let head = "static lkw " + etcCfn(ctx, name) + "(" + etcParamDecls(ctx, params) + ") {" in
+      let locals = etcLocalsGo(ctx, body, params, Nil) in
+      let ctx2 = Ctx(etcCtxTags(ctx), ctxDefined(ctx), ctxGlobals(ctx), etcTagTmps(body)) in
+      let declLines =
+        match locals with
+        | Nil => Nil
+        | _   => Cons("  " + tacJoin("; ", etcLocalDecls(ctx, locals)) + ";", Nil)
+        end in
+      match etcInstrs(ctx2, body, table) with
+      | (bodyLines, t1) =>
+          let out =
+            tacAppendStr(Cons(head, Nil),
+            tacAppendStr(declLines,
+            tacAppendStr(bodyLines,
+              Cons("  return (lkw)0;", Cons("}", Nil))))) in
+          (out, t1)
+      end
+  end
+
+(* All bodies, each followed by a blank line (bodies.extend(...); append("")). *)
+fn etcBodies(ctx : Ctx, funcs : List(Function), table : List(String)) : (List(String), List(String)) =
+  match funcs with
+  | Nil        => (Nil, table)
+  | Cons(f, r) =>
+      match etcFnLines(ctx, f, table) with
+      | (lines, t1) =>
+          match etcBodies(ctx, r, t1) with
+          | (more, t2) => (tacAppendStr(lines, Cons("", more)), t2)
+          end
+      end
+  end
+
+
+(* ── Function de-duplication (port of _functions: last-wins, first-position) ─ *)
+
+fn etcFnName(f : Function) : String = match f with | Function(n, _, _, _) => n end
+
+fn dfUpsert(pairs : List((String, Function)), name : String, f : Function) : List((String, Function)) =
+  match pairs with
+  | Nil             => Cons((name, f), Nil)
+  | Cons((k, v), r) => if etcStrEq(k, name) then Cons((name, f), r) else Cons((k, v), dfUpsert(r, name, f))
+  end
+
+fn dfBuild(fns : List(Function), acc : List((String, Function))) : List((String, Function)) =
+  match fns with
+  | Nil        => acc
+  | Cons(f, r) => dfBuild(r, dfUpsert(acc, etcFnName(f), f))
+  end
+
+fn dfValues(pairs : List((String, Function))) : List(Function) =
+  match pairs with | Nil => Nil | Cons((_, v), r) => Cons(v, dfValues(r)) end
+
+fn etcDedupeFns(fns : List(Function)) : List(Function) = dfValues(dfBuild(fns, Nil))
+
+fn etcFnNames(fns : List(Function)) : List(String) =
+  match fns with | Nil => Nil | Cons(f, r) => Cons(etcFnName(f), etcFnNames(r)) end
+
+
+(* ── Constructor-tag collection (port of CEmitter.__init__'s tag scan) ─────── *)
+
+fn etcTagsInstr(i : Instr) : List(String) =
+  match i with
+  | IAlloc(_, tag, _) => if etcStrEq(tag, "()") then Nil else Cons(tag, Nil)
+  | _                 => Nil
+  end
+
+fn etcTagsBody(inss : List(Instr)) : List(String) =
+  match inss with
+  | Nil        => Nil
+  | Cons(i, r) => tacAppendStr(etcTagsInstr(i), etcTagsBody(r))
+  end
+
+fn etcTagsAll(fns : List(Function)) : List(String) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => match f with | Function(_, _, body, _) => tacAppendStr(etcTagsBody(body), etcTagsAll(r)) end
+  end
+
+fn etcTagAssocGo(xs : List(String), i : Int) : List((String, Int)) =
+  match xs with | Nil => Nil | Cons(t, r) => Cons((t, i), etcTagAssocGo(r, i + 1)) end
+
+fn etcTagAssoc(sortedTags : List(String)) : List((String, Int)) = etcTagAssocGo(sortedTags, 0)
+
+
+(* ── Global declarations + string-literal table (port of emit's tail) ─────── *)
+
+fn etcGDecls(sortedGlobals : List(String)) : List(String) =
+  match sortedGlobals with
+  | Nil        => Nil
+  | Cons(n, r) => Cons("static lkw g_" + etcMang(n) + " = 0;", etcGDecls(r))
+  end
+
+fn etcStrArr(table : List(String)) : String =
+  let n = etcLen(table) in
+  if n == 0 then "static lark_ptr STR[1];"
+  else "static lark_ptr STR[" + int_to_string(n) + "];"
+
+fn etcStrinitGo(table : List(String), i : Int) : List(String) =
+  match table with
+  | Nil        => Nil
+  | Cons(s, r) => Cons("  STR[" + int_to_string(i) + "] = lark_alloc_string(" + etcCStr(s) + ");", etcStrinitGo(r, i + 1))
+  end
+
+fn etcStrinit(table : List(String)) : List(String) =
+  Cons("static void __strlit_init(void) {", tacAppendStr(etcStrinitGo(table, 0), Cons("}", Nil)))
+
+fn etcMainLines(hasGinit : Bool) : List(String) =
+  Cons("int main(void) {",
+  Cons("  __strlit_init();",
+  Cons((if hasGinit then "  lk___global_init__();" else "  /* no top-level lets */"),
+  Cons("  lark_main((lkw)0);",
+  Cons("  return 0;",
+  Cons("}", Nil))))))
+
+
+(* ── Balanced "\n" join (port of emit_c.lark ecJoinNL — dodges the arena wall) *)
+
+fn etcJoinPairs(ls : List(String)) : List(String) =
+  match ls with
+  | Nil                    => Nil
+  | Cons(a, Nil)           => Cons(a, Nil)
+  | Cons(a, Cons(b, rest)) => Cons(a + "\n" + b, etcJoinPairs(rest))
+  end
+
+fn etcJoinNL(ls : List(String)) : String =
+  match ls with
+  | Nil          => ""
+  | Cons(l, Nil) => l
+  | _            => etcJoinNL(etcJoinPairs(ls))
+  end
+
+
+(* ── The self-contained C preamble (verbatim; matches _PREAMBLE) ──────────── *)
+
+let etcPreambleRaw : String = "/* Generated by emit_tac_c.py — self-contained; compile with:
+ *   clang -O2 -fwrapv out.c -o out
+ * (-fwrapv makes signed Int overflow wrap two's-complement, matching the VM.) */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
+
+typedef intptr_t lkw;      /* machine word: holds ints, float-bits, or pointers */
+typedef lkw*     lark_ptr;
+
+/* ── Bump heap (no GC) ─────────────────────────────────────────────────────── */
+#ifndef LARK_HEAP_BYTES
+#  define LARK_HEAP_BYTES (256u * 1024u * 1024u)
+#endif
+static char*  _heap = 0;
+static size_t _hp   = 0;
+
+__attribute__((noreturn)) void __lark_match_fail(void) {
+    fputs(\"lark: non-exhaustive pattern match\\n\", stderr);
+    abort();
+}
+
+lark_ptr __heap_alloc(long n_words) {
+    if (!_heap) { _heap = (char*)malloc(LARK_HEAP_BYTES);
+                  if (!_heap) { fputs(\"lark: heap oom\\n\", stderr); abort(); } }
+    size_t bytes = (size_t)n_words * sizeof(lkw);
+    bytes = (bytes + (sizeof(lkw) - 1)) & ~((size_t)sizeof(lkw) - 1);
+    if (_hp + bytes > LARK_HEAP_BYTES) { fputs(\"lark: heap overflow\\n\", stderr); abort(); }
+    lark_ptr p = (lark_ptr)(_heap + _hp);
+    _hp += bytes;
+    return p;
+}
+
+static const char* lark_str_data(lkw s) { return (const char*)(((lark_ptr)s) + 1); }
+
+lark_ptr lark_alloc_string(const char* text) {
+    size_t len = strlen(text);
+    size_t data_words = (len + 1 + sizeof(lkw) - 1) / sizeof(lkw);
+    lark_ptr p = __heap_alloc(1 + (long)data_words);
+    p[0] = (lkw)len;
+    memcpy((char*)(p + 1), text, len + 1);
+    return p;
+}
+
+/* ── Strings ───────────────────────────────────────────────────────────────── */
+static lkw __str_concat(lkw a, lkw b) {
+    lark_ptr pa = (lark_ptr)a, pb = (lark_ptr)b;
+    size_t la = (size_t)pa[0], lb = (size_t)pb[0], total = la + lb;
+    size_t data_words = (total + 1 + sizeof(lkw) - 1) / sizeof(lkw);
+    lark_ptr r = __heap_alloc(1 + (long)data_words);
+    r[0] = (lkw)total;
+    char* dst = (char*)(r + 1);
+    memcpy(dst, lark_str_data(a), la);
+    memcpy(dst + la, lark_str_data(b), lb);
+    dst[total] = '\\0';
+    return (lkw)r;
+}
+static lkw string_length(lkw s) { return ((lark_ptr)s)[0]; }
+static int __lark_streq(lkw a, lkw b) {
+    return strcmp(lark_str_data(a), lark_str_data(b)) == 0;
+}
+
+/* ── Float helpers (float32 bits packed in an lkw) ─────────────────────────── */
+static float  _lf(lkw b) { uint32_t u = (uint32_t)b; float f; memcpy(&f, &u, 4); return f; }
+static lkw    _fl(float f) { uint32_t u; memcpy(&u, &f, 4); return (lkw)u; }
+
+static lkw __float_add(lkw a, lkw b) { return _fl(_lf(a) + _lf(b)); }
+static lkw __float_sub(lkw a, lkw b) { return _fl(_lf(a) - _lf(b)); }
+static lkw __float_mul(lkw a, lkw b) { return _fl(_lf(a) * _lf(b)); }
+static lkw __float_div(lkw a, lkw b) {
+    float d = _lf(b);
+    return _fl(d == 0.0f ? __builtin_nanf(\"\") : _lf(a) / d);
+}
+static lkw __float_lt(lkw a, lkw b) { return _lf(a) <  _lf(b) ? 1 : 0; }
+static lkw __float_le(lkw a, lkw b) { return _lf(a) <= _lf(b) ? 1 : 0; }
+static lkw __float_gt(lkw a, lkw b) { return _lf(a) >  _lf(b) ? 1 : 0; }
+static lkw __float_ge(lkw a, lkw b) { return _lf(a) >= _lf(b) ? 1 : 0; }
+
+/* ── Show / conversion ─────────────────────────────────────────────────────── */
+static lkw show(lkw n) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), \"%lld\", (long long)n);
+    return (lkw)lark_alloc_string(buf);
+}
+static lkw __show_float(lkw bits) {
+    float f = _lf(bits);
+    char buf[40];
+    snprintf(buf, sizeof(buf), \"%.7g\", (double)f);
+    char* dot = strchr(buf, '.');
+    if (dot && !strpbrk(buf, \"eEni\")) {
+        char* end = buf + strlen(buf) - 1;
+        while (end > dot + 1 && *end == '0') *end-- = '\\0';
+    }
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'n') && !strchr(buf, 'i')) {
+        size_t n = strlen(buf);
+        buf[n] = '.'; buf[n+1] = '0'; buf[n+2] = '\\0';
+    }
+    return (lkw)lark_alloc_string(buf);
+}
+static lkw __show_bool(lkw b) { return (lkw)lark_alloc_string(b ? \"true\" : \"false\"); }
+static lkw int_to_float(lkw n)   { return _fl((float)(long long)n); }
+static lkw float_to_int(lkw b)   { return (lkw)(long long)_lf(b); }   /* trunc toward zero */
+static lkw int_to_string(lkw n)  { return show(n); }
+static lkw float_to_string(lkw b){ return __show_float(b); }
+static lkw float_to_bits(lkw b)  { return (lkw)(uint32_t)b; }
+
+/* ── Math ──────────────────────────────────────────────────────────────────── */
+static lkw int_abs(lkw n)    { return n < 0 ? -n : n; }
+static lkw float_abs(lkw b)  { return (lkw)((uint32_t)b & 0x7FFFFFFFu); }
+static lkw float_sqrt(lkw b) { return _fl(sqrtf(_lf(b))); }
+static lkw float_floor(lkw b){ return _fl(floorf(_lf(b))); }
+static lkw float_ceil(lkw b) { return _fl(ceilf(_lf(b))); }
+
+/* ── String primitives ─────────────────────────────────────────────────────── */
+static lkw string_index(lkw s, lkw idx) {
+    const char* d = lark_str_data(s);
+    long n = (long)((lark_ptr)s)[0], i = (long)idx;
+    return (i >= 0 && i < n) ? (lkw)(unsigned char)d[i] : (lkw)-1;
+}
+static lkw string_slice(lkw s, lkw lo, lkw hi) {
+    const char* d = lark_str_data(s);
+    long n = (long)((lark_ptr)s)[0];
+    long a = (long)lo, b = (long)hi;
+    if (a < 0) a = 0; if (a > n) a = n;
+    if (b < 0) b = 0; if (b > n) b = n;
+    long m = (a < b) ? (b - a) : 0;
+    size_t data_words = ((size_t)m + 1 + sizeof(lkw) - 1) / sizeof(lkw);
+    lark_ptr p = __heap_alloc(1 + (long)data_words);
+    p[0] = (lkw)m;
+    if (m > 0) memcpy((char*)(p + 1), d + a, (size_t)m);
+    ((char*)(p + 1))[m] = '\\0';
+    return (lkw)p;
+}
+static lkw char_to_string(lkw cp) {
+    char buf[2]; buf[0] = (char)((unsigned)cp & 0xFF); buf[1] = '\\0';
+    return (lkw)lark_alloc_string(buf);
+}
+
+/* string_to_int/float → 3-word record [tag-slot, flag@1, payload@2] (see
+ * lower._lower_string_to_result: it reads flag via IGetField idx 0 → word1,
+ * payload via idx 1 → word2, then wraps into Ok/Err). */
+static lkw __string_to_int_raw(lkw s) {
+    const char* d = lark_str_data(s);
+    lark_ptr rec = __heap_alloc(3); rec[0] = 0;
+    size_t n = strlen(d); int ok = (n > 0); long long val = 0; size_t i = 0;
+    int neg = 0;
+    if (ok && (d[0] == '+' || d[0] == '-')) { neg = (d[0] == '-'); i = 1; if (i == n) ok = 0; }
+    for (; ok && i < n; i++) {
+        if (d[i] < '0' || d[i] > '9') { ok = 0; break; }
+        val = val * 10 + (d[i] - '0');
+    }
+    if (ok) {
+        long long r = neg ? -val : val;
+        r = (long long)((int32_t)r);        /* wrap to i32, matching the VM */
+        rec[1] = 1; rec[2] = (lkw)r;
+    } else {
+        rec[1] = 0; rec[2] = (lkw)lark_alloc_string(\"string_to_int: not an integer\");
+    }
+    return (lkw)rec;
+}
+static lkw __string_to_float_raw(lkw s) {
+    const char* d = lark_str_data(s);
+    lark_ptr rec = __heap_alloc(3); rec[0] = 0;
+    size_t n = strlen(d), i = 0, before = 0, after = 0; int ok = (n > 0);
+    if (ok && (d[0] == '+' || d[0] == '-')) i = 1;
+    while (i < n && d[i] >= '0' && d[i] <= '9') { i++; before++; }
+    if (before == 0 || i >= n || d[i] != '.') ok = 0;
+    else {
+        i++;
+        while (i < n && d[i] >= '0' && d[i] <= '9') { i++; after++; }
+        if (after == 0 || i != n) ok = 0;
+    }
+    if (ok) { rec[1] = 1; rec[2] = _fl((float)atof(d)); }
+    else    { rec[1] = 0; rec[2] = (lkw)lark_alloc_string(\"string_to_float: not a float\"); }
+    return (lkw)rec;
+}
+
+/* ── I/O ───────────────────────────────────────────────────────────────────── */
+static lkw print(lkw io, lkw s) { puts(lark_str_data(s)); return io; }
+static lkw read(lkw io) {
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), stdin)) buf[0] = '\\0';
+    else { size_t n = strlen(buf); if (n && buf[n-1] == '\\n') buf[n-1] = '\\0'; }
+    lark_ptr str = lark_alloc_string(buf);
+    lark_ptr tup = __heap_alloc(3);
+    tup[0] = 0; tup[1] = io; tup[2] = (lkw)str;
+    return (lkw)tup;
+}
+static lkw read_all(lkw io) {
+    size_t cap = 65536, len = 0;
+    char* tmp = (char*)malloc(cap);
+    if (!tmp) { fputs(\"lark: read_all oom\\n\", stderr); abort(); }
+    size_t r; char chunk[65536];
+    while ((r = fread(chunk, 1, sizeof(chunk), stdin)) > 0) {
+        if (len + r + 1 > cap) {
+            while (len + r + 1 > cap) cap *= 2;
+            char* grown = (char*)realloc(tmp, cap);
+            if (!grown) { fputs(\"lark: read_all oom\\n\", stderr); abort(); }
+            tmp = grown;
+        }
+        memcpy(tmp + len, chunk, r);
+        len += r;
+    }
+    tmp[len] = '\\0';
+    lark_ptr str = lark_alloc_string(tmp);
+    free(tmp);
+    lark_ptr tup = __heap_alloc(3);
+    tup[0] = 0; tup[1] = io; tup[2] = (lkw)str;
+    return (lkw)tup;
+}
+"
+
+
+(* ── Whole-program assembly (port of CEmitter.emit) ───────────────────────── *)
+
+fn emitTacC(tac : TAC) : String =
+  match tac with
+  | TAC(functions, globalNames) =>
+      let tags     = etcTagAssoc(etcSort(etcDedupe(etcTagsAll(functions)))) in
+      let defined  = etcFnNames(functions) in
+      let sortedGl = etcSort(etcDedupe(globalNames)) in
+      let ctx      = Ctx(tags, defined, globalNames, Nil) in
+      let funcs    = etcDedupeFns(functions) in
+      match etcBodies(ctx, funcs, Nil) with
+      | (bodyParts, table) =>
+          let protos   = etcProtos(ctx, funcs) in
+          let gdecls   = etcGDecls(sortedGl) in
+          let strArr   = etcStrArr(table) in
+          let strinit  = etcStrinit(table) in
+          let hasGinit = etcMember("__global_init__", defined) in
+          let mainL    = etcMainLines(hasGinit) in
+          let parts =
+            Cons(etcPreambleRaw,
+            Cons(strArr,
+            Cons("",
+              tacAppendStr(gdecls,
+              Cons("",
+              tacAppendStr(protos,
+              Cons("",
+              tacAppendStr(strinit,
+              Cons("",
+              tacAppendStr(bodyParts, mainL)))))))))) in
+          etcJoinNL(parts) + "\n"
+      end
+  end
+
+
+(* ── Smoke driver (stripped at MAIN_MARKER by the differential harness) ─────── *)
+
+fn main(io : IO) : IO =
+  print(io, "emit_tac_c.lark is a component — run tests/emit_tac_c_difftest.py")
