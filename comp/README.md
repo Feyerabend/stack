@@ -107,9 +107,9 @@ and what the code does.
 ### Further reading
 
 - `book/PLAN.md` — the book's status ledger, wave order, and definition of done
-- `[AIMS.md](./AIMS.md)` — the teaching aim the whole book is measured against
-- `dev/formal/proof/README.md` — the lcore MLTT kernel and the soundness proof
-- `[ORACLE.md](./ORACLE.md)` — the frozen reference and every change made to it since the freeze
+- [AIMS.md](./AIMS.md) — the teaching aim the whole book is measured against
+- [dev/formal/proof/README.md](./dev/formal/proof/README.md) — the lcore MLTT kernel and the soundness proof
+- [ORACLE.md](./ORACLE.md) — the frozen reference and every change made to it since the freeze
 
 ### License
 
