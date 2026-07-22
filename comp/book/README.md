@@ -14,12 +14,12 @@ make itself faster, and make promises about the programs written in it.
 
 It is organized in three orthogonal parts, each answering a question that stands on its own:
   
-  - Part I — A Language That Builds Itself. Lark's reference implementation is rewritten
+  - __Part I__ — A Language That Builds Itself. Lark's reference implementation is rewritten
   from a readable Python "oracle" into Lark itself, until the language is strong enough to
   compile its own construction — self-hosting as a demonstration of expressive power.
-  - Part II — The Same Meaning, Faster. An optimizer is added, with every optimized program
+  - __Part II__ — The Same Meaning, Faster. An optimizer is added, with every optimized program
   held against the meaning of the un-optimized one — speed at fixed meaning.
-  - Part III — What the Machine Can Promise. The type system is extended until it can state
+  - __Part III__ — What the Machine Can Promise. The type system is extended until it can state
   and check properties of a program's behaviour — this divisor is never zero, this index 
   is in range, this tree stays sorted — and then the same machinery is turned on the
   language itself to prove its soundness.
