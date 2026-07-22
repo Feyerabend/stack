@@ -1,0 +1,15 @@
+# Harness scratch drivers.  A differential concatenates the modules it needs into a
+# generated Lark program next to itself, runs it, and unlinks it in a `finally` — so
+# these exist only while a test runs, or after one was interrupted.  They are never
+# source: the optimizing compiler's driver alone is over 7,000 lines.
+#
+# The `_` prefix is load-bearing, not decoration.  `lextest` and `parsetest` lex and
+# parse every `.lark` file in the strand, *including the compiler's own source*, and
+# they skip `_`-prefixed names.  Without that a harness sweeps its own scratch driver
+# into its own corpus — and a concurrent run deletes it mid-sweep.  (Listing the
+# drivers by name, as this file used to, missed the ones added later.)
+_*.lark
+
+# Python's bytecode cache, written into harness/ and oracle/ whenever a test runs.
+__pycache__/
+*.pyc

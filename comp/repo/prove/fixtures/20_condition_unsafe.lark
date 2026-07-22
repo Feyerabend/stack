@@ -1,0 +1,36 @@
+(* 20 — the mutant.  The guard is gone, and the divisions sit where they always sat: in a
+   condition, in a `not`, under a minus.  Nothing else changes.
+
+   Old verdict (measured, at 570f095): `ok: 0 obligation(s) proved`, exit 0 — and then
+   `ZeroDivisionError`.  Not one obligation.  The checker had walked the whole program and
+   raised nothing, because every division in it was in a position it TRANSLATED rather than
+   VISITED, and a translation asks for nothing.
+
+   This is the failure mode that should frighten a verification project more than a wrong
+   proof does.  A wrong proof is a bad answer to a question that was asked.  This is the
+   question never being asked — and the report says `ok` either way.  `0 obligation(s)
+   proved` was there in the output the whole time, and it reads like success.
+
+   It is worth saying what found it.  Not a human: nobody writes `if (x / y) < x` on
+   purpose, and nobody auditing this checker (I audited it twice) thought to look in a Bool.
+   `08/tests/adversary.py`, generating programs and RUNNING the ones the checker proved,
+   found it in a few hundred cases — because a random program does not know which positions
+   are supposed to be interesting.
+
+   New verdict: 4 of 4 unproved — one per division, and every one of them `d /= 0` or
+   `y /= 0` with nothing standing behind it, which is the truth. *)
+
+module ConditionUnsafe
+
+fn divides(d : Int, n : Int) : Bool =
+  n / d * d == n
+
+fn classify(x : Int, y : Int) : Int =
+  if (x / y) < x then 1
+  else if not ((x / y) > 100) then 2
+  else if -(x / y) < 0 then 3
+  else 4
+
+fn main(io : IO) : IO =
+  let io = print(io, show(divides(0, 9))) in
+  print(io, show(classify(50, 0)))

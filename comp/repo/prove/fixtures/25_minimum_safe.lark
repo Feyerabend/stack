@@ -1,0 +1,54 @@
+module MinimumSafe
+
+(* `min` and `max` as UNINTERPRETED symbols with their defining
+   axioms, and NOTHING more.  This is the smallest sound rung of the min/max fork: no
+   new decision procedure, no structural reasoning about `min`, no `if`/nested-match
+   in the predicate fragment.  A `min(a, b)` is a term the solver cannot compute, and
+   the only things it is told about that term are the three facts that are TRUE of the
+   primitive at run time:
+
+       min(a, b) <= a        min(a, b) <= b        min(a, b) == a  or  min(a, b) == b
+
+   (dually for `max`).  They are asserted at each `min`/`max` application the obligation
+   actually MENTIONS — the same quantifier-free instantiation-at-mentioned-terms
+   discipline a later version used for measures and a later version/`string_length` use through
+   `result_axioms`.  There is no schema, no trigger, no quantifier; `min`/`max` reach
+   the logic exactly as `string_length` does — a `_builtin_contracts` entry selfifies
+   the result to the UF term `{v | v == min(a, b)}`, and a `PRIMITIVE_AXIOMS` entry
+   carries the three facts.  The soundness guard is the one the first version already installed for
+   `string_length`: a program that declares its OWN `min` gets the axiom DROPPED (an
+   axiom is about the primitive, not about the name), so `16_axiom`'s hole stays shut.
+
+   Each of the three functions exercises one part of the axiom, and the middle one is
+   the reason the DISJUNCTION exists:
+
+     - `min_le` needs the two `<=` facts, and nothing else.
+     - `min_pos` needs the DISJUNCTION.  The two `<=` facts give an UPPER bound and say
+       nothing that keeps `min(a, b)` above zero; the only thing that proves
+       `min(a, b) > 0` from `a > 0 and b > 0` is that the result IS one of the two.
+     - `max_ge` is the dual, the two `>=` facts.
+
+   `main` takes `min` of two positives across a function boundary and divides by it, so
+   the division `100 / m` is safe BECAUSE the disjunction kept the minimum positive.
+
+   Its mutant, 25_minimum_unsafe.lark, calls `min_pos(5, 0)`: the argument `0` fails
+   the `{v | v > 0}` precondition, the obligation goes UNPROVED, and were it admitted
+   `min(5, 0)` is `0` and `main` would divide 100 by it.
+
+   It RUNS: `min`/`max` are ordinary builtins at run time, and the refinement is ghost.
+
+   Expected output:
+     50 *)
+
+fn min_le(a : Int, b : Int) : {v : Int | v <= a and v <= b} =
+  min(a, b)
+
+fn min_pos(a : {v : Int | v > 0}, b : {v : Int | v > 0}) : {v : Int | v > 0} =
+  min(a, b)
+
+fn max_ge(a : Int, b : Int) : {v : Int | v >= a and v >= b} =
+  max(a, b)
+
+fn main(io : IO) : IO =
+  let m = min_pos(5, 2) in
+  print(io, show(100 / m))

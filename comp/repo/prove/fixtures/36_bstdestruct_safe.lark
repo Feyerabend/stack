@@ -1,0 +1,92 @@
+module BstDestructSafe
+
+(* the DESTRUCTING binary search tree, the rung 35 left open.
+
+   35 proved a bst only in the BUILDING direction: its `bst` matched both children
+   (a nested match, two deep), so its equation fired only at the CONCRETE subfields of
+   a constructed tree.  Over an OPAQUE `bst(t)` the nested guards declined, and a
+   consumer could read no order back out — the destructing elegance of `23_boolmeasure`
+   was blocked, and 35 named that a boundary.
+
+   The way past it is not bound invariants on `minv`/`maxv` (those would have to hold of
+   EVERY tree, and `minv(t) <= maxv(t)` is false for an unordered one).  It is to make
+   `bst` a SINGLE match on `t`, pushing "every value in the left child is below the
+   root" into an EXTRA-PARAMETER measure:
+
+       lt(t, b)  <=>  every value in t is < b
+       gt(t, b)  <=>  every value in t is > b
+       bst(Node(l, x, r))  <=>  lt(l, x) and gt(r, x) and bst(l) and bst(r)
+
+   `bst` is now unguarded, so its equation fires on `Node(l, x, r)` even when l, x, r
+   are OPAQUE match binders — and out come `bst(l)`, `bst(r)`, `lt(l, x)`, `gt(r, x)`,
+   the facts a consumer descends on.  The price is `lt`/`gt`: an extra-parameter
+   measure's equation is about an APPLICATION (the bound `b` lives only there), so it
+   fires DEMAND-DRIVEN, following the first argument's structure with `b` fixed.
+
+   This file proves BOTH directions:
+     • build      — a constructed six-node tree satisfies `bst` (building, as 35).
+     • leftsub    — from an OPAQUE `bst(t)`, the left child is itself a `bst`
+                    (destructing: the sub-structure `bst(l)` read out of the whole).
+     • descend    — and it is recursive: peeling the left spine needs `bst(l)` at
+                    every step, which only the destructing direction supplies.
+
+   And it RUNS: `lt`/`gt`/`bst` are ghost, erased before the CEK machine sees a thing.
+
+   Expected output:
+     3
+     1 *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure lt(t : Tree, b : Int) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => x < b and lt(l, b) and lt(r, b)
+  end
+
+measure gt(t : Tree, b : Int) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => x > b and gt(l, b) and gt(r, b)
+  end
+
+measure bst(t : Tree) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => lt(l, x) and gt(r, x) and bst(l) and bst(r)
+  end
+
+(* BUILDING: a constructed ordered tree is a bst. *)
+fn build(t : {q : Tree | bst(q)}) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, x, r) => x
+  end
+
+(* DESTRUCTING: from an opaque bst, the left child is a bst — bst(l) read out of it. *)
+fn leftsub(t : {q : Tree | bst(q)}) : {r : Tree | bst(r)} =
+  match t with
+  | Leaf          => Leaf
+  | Node(l, x, r) => l
+  end
+
+(* DESTRUCTING, recursively: descend the left spine, counting depth.  Each step owes a
+   bst for the child it recurses on, and that bst is the one the parent's opaque bst
+   yields on the way in. *)
+fn descend(t : {q : Tree | bst(q)}) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, x, r) => 1 + descend(l)
+  end
+
+fn main(io : IO) : IO =
+  let a =
+    Node(Node(Leaf, 1, Node(Leaf, 2, Leaf)),
+         3,
+         Node(Node(Leaf, 4, Leaf), 5, Node(Leaf, 6, Leaf))) in
+  let b =
+    Node(Node(Leaf, 1, Node(Leaf, 2, Leaf)),
+         3,
+         Node(Node(Leaf, 4, Leaf), 5, Node(Leaf, 6, Leaf))) in
+  let io = print(io, show(build(a))) in
+  print(io, show(descend(leftsub(b))))

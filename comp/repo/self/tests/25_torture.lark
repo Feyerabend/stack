@@ -1,0 +1,186 @@
+(* Test 25 — Deep integration ("torture") test: one program that wires many
+   features together, built as an observable-equivalence WITNESS for the
+   optimizer.  The 01–24 corpus files each probe a
+   single feature in isolation — the deepest is only ~60 lines — so they are a
+   shallow guard for an O1 pass that mutates TAC codegen.  This file exercises,
+   in one run: recursive parametric ADTs (List) + nested ADTs (Tree), closures
+   with capture, higher-order map/fold/filter, trait dispatch (Area), a Stdlib
+   import + Option, the string-decomposition prims (string_index / string_slice /
+   char_to_string / string_to_int + its Ok/Err lowering / float_to_bits),
+   integer + float32 arithmetic, and algebraic-identity-shaped expressions the
+   O1 passes target.  It runs on the 64 KB RV32 VM and all three backends (CEK,
+   TAC interp, RV32) must agree.  When an O1 pass changes emitted code, THIS
+   file's -O0 output sha is the deep guard `optbench --levels 0,1` checks.
+
+   Expected output:
+     55
+     10
+     2 4 6 8 10
+     2,4,6,8,10,12,14,16,18,20
+     120
+     4
+     15
+     16
+     42
+     43
+     1024
+     8
+     12.0
+     12.56636
+     104
+     world
+     AB
+     Ok:42
+     Err
+     1065353216
+     11 *)
+
+module Torture
+
+import Stdlib exposing (
+  Option, None, Some, unwrap_or, map_opt, and_then,
+  pow_int, min_int, max_int, clamp_int
+)
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Int) = {}
+
+type Tree =
+  | Leaf
+  | Node of Tree, Int, Tree
+
+impl Copy for Tree = {}
+
+type Shape =
+  | Rect   of Float, Float
+  | Circle of Float
+
+type Result a b =
+  | Ok  of a
+  | Err of b
+
+trait Area a = {
+  fn area : a -> Float
+}
+
+impl Area for Shape = {
+  fn area(s) =
+    match s with
+    | Rect(w, h) => w * h
+    | Circle(r)  => 3.14159 * r * r
+    end
+}
+
+(* ── list toolkit ─────────────────────────────────────────────── *)
+
+fn range(lo : Int, hi : Int) : List(Int) =
+  if lo >= hi then Nil else Cons(lo, range(lo + 1, hi))
+
+fn foldl(f : Int -> Int -> Int, acc : Int, xs : List(Int)) : Int =
+  match xs with
+  | Nil           => acc
+  | Cons(x, rest) => foldl(f, f(acc, x), rest)
+  end
+
+fn map(f : Int -> Int, xs : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => Cons(f(x), map(f, rest))
+  end
+
+fn filter(p : Int -> Bool, xs : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => if p(x) then Cons(x, filter(p, rest)) else filter(p, rest)
+  end
+
+fn sum_list(xs : List(Int)) : Int = foldl(fn(a, b) => a + b, 0, xs)
+fn length(xs : List(Int)) : Int   = foldl(fn(a, _) => a + 1, 0, xs)
+
+fn join(sep : String, xs : List(Int)) : String =
+  match xs with
+  | Nil           => ""
+  | Cons(x, Nil)  => int_to_string(x)
+  | Cons(x, rest) => int_to_string(x) + sep + join(sep, rest)
+  end
+
+(* ── tree toolkit ─────────────────────────────────────────────── *)
+
+fn build_tree(lo : Int, hi : Int) : Tree =
+  if lo >= hi then Leaf
+  else
+    let mid = (lo + hi) / 2 in
+    Node(build_tree(lo, mid), mid, build_tree(mid + 1, hi))
+
+fn tree_sum(t : Tree) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, x, r) => tree_sum(l) + x + tree_sum(r)
+  end
+
+fn tree_depth(t : Tree) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, _, r) =>
+    let ld = tree_depth(l) in
+    let rd = tree_depth(r) in
+    if ld > rd then ld + 1 else rd + 1
+  end
+
+(* ── closures ─────────────────────────────────────────────────── *)
+
+fn adder(n : Int) : Int -> Int = fn(x : Int) => n + x
+fn compose(f : Int -> Int, g : Int -> Int) : Int -> Int = fn(x : Int) => f(g(x))
+
+(* ── algebraic-identity bait for the O1 passes (== 2*x) ───────── *)
+
+fn ident(x : Int) : Int =
+  ((x + 0) * 1) + (x - x) + (x * 2) - x
+
+(* ── string-prim Result handling ──────────────────────────────── *)
+
+fn show_result(r : Result(Int, String)) : String =
+  match r with
+  | Ok(n)  => "Ok:" + int_to_string(n)
+  | Err(_) => "Err"
+  end
+
+fn main(io : IO) : IO =
+  (* lists *)
+  let xs    = range(1, 11) in
+  let io    = print(io, int_to_string(sum_list(xs))) in
+  let io    = print(io, int_to_string(length(xs))) in
+  let evens = filter(fn(x) => (x - (x / 2) * 2) == 0, xs) in
+  let io    = print(io, join(" ", evens)) in
+  let dbl   = map(fn(x) => x * 2, xs) in
+  let io    = print(io, join(",", dbl)) in
+  (* tree *)
+  let t     = build_tree(1, 16) in
+  let io    = print(io, int_to_string(tree_sum(t))) in
+  let io    = print(io, int_to_string(tree_depth(t))) in
+  (* closures *)
+  let add5  = adder(5) in
+  let io    = print(io, int_to_string(add5(10))) in
+  let io    = print(io, int_to_string(compose(fn(x) => x * 2, add5)(3))) in
+  (* algebraic identities *)
+  let io    = print(io, int_to_string(ident(21))) in
+  (* Stdlib + Option *)
+  let o     = Some(21) in
+  let io    = print(io, int_to_string(unwrap_or(map_opt(fn(x) => x + 1, and_then(fn(x) => Some(x * 2), o)), 0))) in
+  let io    = print(io, int_to_string(pow_int(2, 10))) in
+  let io    = print(io, int_to_string(clamp_int(99, min_int(0, 5), max_int(3, 8)))) in
+  (* trait dispatch *)
+  let io    = print(io, show(area(Rect(3.0, 4.0)))) in
+  let io    = print(io, show(area(Circle(2.0)))) in
+  (* string prims *)
+  let s     = "hello world" in
+  let io    = print(io, int_to_string(string_index(s, 0))) in
+  let io    = print(io, string_slice(s, 6, 11)) in
+  let io    = print(io, char_to_string(65) + char_to_string(66)) in
+  let io    = print(io, show_result(string_to_int("42"))) in
+  let io    = print(io, show_result(string_to_int("bad"))) in
+  let io    = print(io, int_to_string(float_to_bits(1.0))) in
+  print(io, int_to_string(string_length(s)))

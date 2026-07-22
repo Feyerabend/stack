@@ -1,0 +1,6 @@
+(* Error test 08 — Trait bound violation: show applied to a function type
+   Expected: TraitBoundError — 'show' requires Show, but functions have no instance *)
+
+module ShowFn
+
+fn bad_show(f : Int -> Int) : String = show(f)

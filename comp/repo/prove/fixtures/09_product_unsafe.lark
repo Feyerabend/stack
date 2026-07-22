@@ -1,0 +1,21 @@
+module ProductUnsafe
+
+(* The mutant of 09_product_safe: one real bug, one character of it.
+
+   `bounds` now returns a right edge ONE PAST the end of the string, and says so
+   truthfully in its own contract — the helper is internally consistent, and it
+   type-checks.  The lie is only visible at the CALLER, where `string_slice`'s
+   precondition `b <= string_length(s)` meets a `b` that is `string_length(s) + 1`.
+
+   This is the shape of a real off-by-one: no single function is wrong, the
+   INTERFACE between two of them is.  The checker discharges the other three
+   obligations and fails exactly the one that is false — it does not reject the
+   call wholesale, and it does not blame `a`, which is fine. *)
+
+fn bounds(s : String) : ({v : Int | v == 0}, {v : Int | v == string_length(s) + 1}) =
+  (0, string_length(s) + 1)
+
+fn whole(s : String) : String =
+  match bounds(s) with
+  | (a, b) => string_slice(s, a, b)
+  end

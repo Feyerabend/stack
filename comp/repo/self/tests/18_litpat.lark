@@ -1,0 +1,33 @@
+(* Test 18 — Literal patterns and Bool patterns
+   Covers: TPLit (Int literal) in match arms, TPCon True/False patterns,
+           wildcard fallthrough, nested if/match interaction.
+   Expected output:
+     zero
+     one
+     many
+     yes
+     no *)
+
+module LitPat
+
+impl Copy for Bool = {}
+
+fn describe(n : Int) : String =
+  match n with
+  | 0 => "zero"
+  | 1 => "one"
+  | _ => "many"
+  end
+
+fn yesno(b : Bool) : String =
+  match b with
+  | True  => "yes"
+  | False => "no"
+  end
+
+fn main(io : IO) : IO =
+  let io = print(io, describe(0)) in
+  let io = print(io, describe(1)) in
+  let io = print(io, describe(99)) in
+  let io = print(io, yesno(True)) in
+  print(io, yesno(False))

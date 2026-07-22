@@ -1,0 +1,334 @@
+(* tac.lark — Lark's three-address-code IR, written in Lark.
+   (the port of oracle/tac.py.)
+
+   This strand builds a self-hosted OPTIMIZING C-compiler: lower.lark turns the
+   typed AST (tast.lark) into this flat TAC, opt.lark rewrites it, and
+   emit_tac_c.lark emits C from it.  This slice is the IR vocabulary + its
+   pretty-printer + the Function counter helpers — pure data, no lowering yet.
+
+   Pipeline position (per tac.py):
+       tast.lark  →  lower.lark  →  tac.lark  →  emit_tac_c.lark  →  C text
+
+   Design notes
+   ────────────
+   • RENAMED type: tac.py's value union `Val` (Tmp | Const) becomes `Operand`
+     here.  parse.lark ALREADY owns `type Val` (VInt/VFloat/VStr/VBool/VUnit,
+     the literal payload), and the optimizing pipeline is assembled by CONCATENATION
+     (lex+parse+…+tac), so the two would clash — same reason types.lark
+     M-prefixes its monotypes and tast.lark renamed TApply→TApp (a known wart of the language).
+     The constructor names `Tmp`/`Const` do NOT clash (parse's Val ctors are
+     V-prefixed), so they are kept verbatim.
+   • Const's payload models tac.py's raw scalar union `int|float|bool|str|None`
+     as an explicit ADT `ConstVal` (CInt/CFloat/CStr/CBool/CUnit).  Ints and
+     floats are carried as their SOURCE STRING (as parse.lark's VInt/VFloat do),
+     so pretty-printing an int is passthrough; float repr is the one place the
+     lowerer differential may need canonicalisation (Python `repr(float)` ≠ the raw
+     lexeme in general — flagged, deferred to the lowerer, matches the C emitter's float lesson).
+     CStr covers BOTH string literals AND constructor-tag names — tac.py makes
+     no distinction (`Const(str)`), disambiguating by context at an `==` tag test
+     (see lower.py / emit_tac_c.py); preserving that ambiguity keeps the port
+     faithful downstream.
+   • `dst` fields are a `Tmp` (its own type, as in tac.py's dataclasses), not an
+     Operand; only src/arg/field positions are `Operand`.  Optional results use
+     parse.lark's `Maybe` (ICall dst = Maybe(Tmp); IReturn val = Maybe(Operand)).
+   • Copy impls on every IR type: lower.lark / opt.lark reuse subtrees across
+     match arms and branches, which the affine checker would otherwise reject;
+     Copy impls are name-only (free) — the same move tast.lark/parse.lark make.
+
+   Run (smoke):  see harness/tac_smoke.py   (make tacsmoke)          *)
+
+module Tac
+
+
+(* ── Values (port of tac.py Tmp / Const / Val) ────────────────────────────── *)
+
+(* A named temporary — the result of every computation. *)
+type Tmp = | Tmp of String
+
+(* A compile-time constant.  Mirrors tac.py's raw `int|float|bool|str|None`
+   union; ints/floats keep their source-string form (like parse.lark's Val). *)
+type ConstVal =
+  | CInt   of String          (* integer literal, rendered as its digits       *)
+  | CFloat of String          (* float literal (see header: repr caveat) *)
+  | CStr   of String          (* string literal OR constructor-tag name        *)
+  | CBool  of Bool            (* rendered "true" / "false"                      *)
+  | CUnit                     (* the unit constant, rendered "()"               *)
+
+(* tac.py's `Val = Union[Tmp, Const]`, renamed to dodge parse.lark's `Val`. *)
+type Operand =
+  | OTmp   of Tmp
+  | OConst of ConstVal
+
+
+(* ── Instructions (port of tac.py's 13 Instr dataclasses) ─────────────────── *)
+(* Field order follows the dataclasses exactly.  `dst` is always a `Tmp`; other
+   value positions are `Operand`.  ICall's dst is Maybe(Tmp) (Nothing = result
+   unused); IReturn's val is Maybe(Operand) (Nothing = unit return). *)
+
+type Instr =
+  | IAssign       of Tmp, Operand                    (* dst = src               *)
+  | IBinOp        of Tmp, String, Operand, Operand   (* dst = l op r            *)
+  | IUnary        of Tmp, String, Operand            (* dst = op src            *)
+  | ICall         of Maybe(Tmp), String, List(Operand) (* dst = fn(args)        *)
+  | IClosureCall  of Tmp, Operand, Operand           (* dst = fn(arg), curried  *)
+  | IReturn       of Maybe(Operand)                  (* return val              *)
+  | ILabel        of String                          (* label:                  *)
+  | IJump         of String                          (* goto label              *)
+  | ICondJump     of Operand, String, String         (* if cond goto T else F   *)
+  | IAlloc        of Tmp, String, List(Operand)      (* dst = alloc tag(fields) *)
+  | IGetTag       of Tmp, Operand                    (* dst = tag(src)          *)
+  | IGetField     of Tmp, Operand, Int               (* dst = src[idx]          *)
+  | IAllocClosure of Tmp, String, List(Operand)      (* dst = closure(fn; caps) *)
+
+
+(* ── Function and module (port of tac.py Function / TAC) ───────────────────── *)
+
+(* name, params, body (definition order), fresh-name counter.  tac.py's mutable
+   `fresh`/`label`/`emit` become the pure helpers `tacFresh`/`tacLabel`/`tacEmit`
+   below (they thread an updated Function). *)
+type Function = | Function of String, List(String), List(Instr), Int
+
+(* The whole program: functions in definition order + the global-name set
+   (List(String) here; only the backend consults it, pretty ignores it). *)
+type TAC = | TAC of List(Function), List(String)
+
+
+(* ── Copy impls (reuse across match arms / branches — see header) ─────────── *)
+
+impl Copy for Tmp      = {}
+impl Copy for ConstVal = {}
+impl Copy for Operand  = {}
+impl Copy for Instr    = {}
+impl Copy for Function = {}
+impl Copy for TAC      = {}
+
+
+(* ── Small list/string helpers (tac-prefixed to avoid concat collisions) ──── *)
+
+fn tacJoin(sep : String, xs : List(String)) : String =
+  match xs with
+  | Nil           => ""
+  | Cons(x, rest) =>
+      match rest with
+      | Nil => x
+      | _   => x + sep + tacJoin(sep, rest)
+      end
+  end
+
+fn tacSnocInstr(xs : List(Instr), x : Instr) : List(Instr) =
+  match xs with
+  | Nil           => Cons(x, Nil)
+  | Cons(h, rest) => Cons(h, tacSnocInstr(rest, x))
+  end
+
+fn tacSnocStr(xs : List(String), x : String) : List(String) =
+  match xs with
+  | Nil           => Cons(x, Nil)
+  | Cons(h, rest) => Cons(h, tacSnocStr(rest, x))
+  end
+
+fn tacAppendStr(a : List(String), b : List(String)) : List(String) =
+  match a with
+  | Nil           => b
+  | Cons(h, rest) => Cons(h, tacAppendStr(rest, b))
+  end
+
+
+(* ── Constant-string repr (Python `repr(str)`) ────────────────────────────── *)
+(* tac.py renders string Consts via `repr()`.  Python's repr chooses its quote
+   character: single quotes by default, but double quotes when the string
+   contains a `'` and no `"` (so the single quotes need no escaping).  Inside the
+   chosen delimiter it escapes the backslash, the delimiter itself, and \n/\t/\r.
+   We reproduce that quote-selection exactly (09_parser emits `expected ')'`,
+   which Python reprs as "expected ')'").  Python additionally \xNN-escapes
+   non-printable bytes — deferred, no corpus program needs it. *)
+
+fn tacContainsChar(s : String, c : Int, i : Int, n : Int) : Bool =
+  if i >= n then false
+  else if string_index(s, i) == c then true
+  else tacContainsChar(s, c, i + 1, n)
+
+(* escSingle = escape single quotes (true under a '…' delimiter, false under "…"). *)
+fn tacReprGo(s : String, i : Int, n : Int, escSingle : Bool) : String =
+  if i >= n then ""
+  else
+    let c    = string_index(s, i) in
+    let rest = tacReprGo(s, i + 1, n, escSingle) in
+    if c == 92 then "\\\\" + rest                       (* backslash    *)
+    else if c == 39 and escSingle then "\\'" + rest     (* single quote *)
+    else if c == 10 then "\\n" + rest
+    else if c == 9  then "\\t" + rest
+    else if c == 13 then "\\r" + rest
+    else char_to_string(c) + rest
+
+fn tacReprStr(s : String) : String =
+  let n    = string_length(s) in
+  let hasS = tacContainsChar(s, 39, 0, n) in
+  let hasD = tacContainsChar(s, 34, 0, n) in
+  let useDouble = if hasS then (if hasD then false else true) else false in
+  if useDouble then "\"" + tacReprGo(s, 0, n, false) + "\""
+  else "'" + tacReprGo(s, 0, n, true) + "'"
+
+
+(* ── Pretty printer (byte-for-byte port of tac.py pretty / _instr_str) ────── *)
+
+fn showTmp(t : Tmp) : String =
+  match t with | Tmp(n) => n end
+
+fn showConstVal(c : ConstVal) : String =
+  match c with
+  | CUnit     => "()"
+  | CBool(b)  => if b then "true" else "false"
+  | CInt(s)   => s
+  | CFloat(s) => s
+  | CStr(s)   => tacReprStr(s)
+  end
+
+fn showOperand(v : Operand) : String =
+  match v with
+  | OTmp(t)   => showTmp(t)
+  | OConst(c) => showConstVal(c)
+  end
+
+fn showOperands(xs : List(Operand)) : String =
+  match xs with
+  | Nil           => ""
+  | Cons(x, rest) =>
+      match rest with
+      | Nil => showOperand(x)
+      | _   => showOperand(x) + ", " + showOperands(rest)
+      end
+  end
+
+fn showInstr(i : Instr) : String =
+  match i with
+  | ILabel(n)             => n + ":"
+  | IAssign(d, s)         => "    " + showTmp(d) + " = " + showOperand(s)
+  | IBinOp(d, op, l, r)   =>
+      "    " + showTmp(d) + " = " + showOperand(l) + " " + op + " " + showOperand(r)
+  | IUnary(d, op, s)      => "    " + showTmp(d) + " = " + op + showOperand(s)
+  | ICall(md, f, args)    =>
+      match md with
+      | Nothing => "    call " + f + "(" + showOperands(args) + ")"
+      | Just(d) => "    " + showTmp(d) + " = call " + f + "(" + showOperands(args) + ")"
+      end
+  | IClosureCall(d, fv, a) =>
+      "    " + showTmp(d) + " = " + showOperand(fv) + "(" + showOperand(a) + ")"
+  | IReturn(mv)           =>
+      match mv with
+      | Nothing => "    return"
+      | Just(v) => "    return " + showOperand(v)
+      end
+  | IJump(l)              => "    jump " + l
+  | ICondJump(c, t, f)    =>
+      "    if " + showOperand(c) + " jump " + t + " else " + f
+  | IAlloc(d, tag, fs)    =>
+      match fs with
+      | Nil => "    " + showTmp(d) + " = alloc " + tag
+      | _   => "    " + showTmp(d) + " = alloc " + tag + "(" + showOperands(fs) + ")"
+      end
+  | IGetTag(d, s)         => "    " + showTmp(d) + " = tag(" + showOperand(s) + ")"
+  | IGetField(d, s, idx)  =>
+      "    " + showTmp(d) + " = " + showOperand(s) + "[" + int_to_string(idx) + "]"
+  | IAllocClosure(d, f, caps) =>
+      match caps with
+      | Nil => "    " + showTmp(d) + " = closure(" + f + ")"
+      | _   => "    " + showTmp(d) + " = closure(" + f + "; " + showOperands(caps) + ")"
+      end
+  end
+
+fn showInstrs(xs : List(Instr)) : List(String) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => Cons(showInstr(x), showInstrs(rest))
+  end
+
+(* One function's parts: header line, then instr lines, then a trailing "" —
+   exactly tac.py's per-function `parts.append(...)` sequence.  Joining all
+   parts with "\n" reproduces the blank line between functions + one final \n. *)
+fn fnParts(f : Function) : List(String) =
+  match f with
+  | Function(nm, ps, body, _) =>
+      let header = "fn " + nm + "(" + tacJoin(", ", ps) + "):" in
+      Cons(header, tacSnocStr(showInstrs(body), ""))
+  end
+
+fn allParts(fs : List(Function)) : List(String) =
+  match fs with
+  | Nil           => Nil
+  | Cons(f, rest) => tacAppendStr(fnParts(f), allParts(rest))
+  end
+
+(* Named `tacPretty` (not `pretty`) so the concatenation can also include
+   types.lark, whose Mono pretty-printer already owns the name `pretty`. *)
+fn tacPretty(t : TAC) : String =
+  match t with
+  | TAC(fns, _) => tacJoin("\n", allParts(fns))
+  end
+
+
+(* ── Function counter helpers (pure ports of tac.py fresh/label/emit) ─────── *)
+(* Each threads an updated Function.  fresh/label bump the shared counter (the
+   backend relies on labels and temporaries drawing from ONE monotonic counter).  tacEmit appends (tac.py uses list.append); lower.lark may
+   prefer reverse-accumulate to dodge the O(n²) snoc — its choice. *)
+
+fn tacFresh(f : Function, hint : String) : (Tmp, Function) =
+  match f with
+  | Function(nm, ps, body, ctr) =>
+      (Tmp(hint + int_to_string(ctr)), Function(nm, ps, body, ctr + 1))
+  end
+
+fn tacLabel(f : Function, hint : String) : (String, Function) =
+  match f with
+  | Function(nm, ps, body, ctr) =>
+      ("." + hint + int_to_string(ctr), Function(nm, ps, body, ctr + 1))
+  end
+
+fn tacEmit(f : Function, i : Instr) : Function =
+  match f with
+  | Function(nm, ps, body, ctr) => Function(nm, ps, tacSnocInstr(body, i), ctr)
+  end
+
+
+(* ── Smoke driver (concatenated with lex + parse — see tac_smoke.py) ──────── *)
+(* Rebuilds, by hand, the exact program captured from tac.py's own pretty()
+   (see tac_smoke.py for the golden bytes) — exercising every Instr shape, both
+   Operand cases, every ConstVal, empty vs non-empty field/capture lists, and
+   the fresh/emit helpers.  A byte-match against the oracle is the check. *)
+
+fn main(io : IO) : IO =
+  (* fn add(a, b):  t0 = a + b ;  return t0        (fresh drives t0)          *)
+  let add0 = Function("add", Cons("a", Cons("b", Nil)), Nil, 0) in
+  match tacFresh(add0, "t") with
+  | (t0, add1) =>
+      let add2 = tacEmit(add1, IBinOp(t0, "+", OTmp(Tmp("a")), OTmp(Tmp("b")))) in
+      let add  = tacEmit(add2, IReturn(Just(OTmp(t0)))) in
+
+      (* fn main():  every remaining instruction shape *)
+      let g0 = Function("main", Nil, Nil, 0) in
+      match tacFresh(g0, "t") with
+      | (r, g1) =>
+          let g2  = tacEmit(g1,  ILabel(".L0")) in
+          let g3  = tacEmit(g2,  IAssign(r, OConst(CInt("42")))) in
+          let g4  = tacEmit(g3,  ICall(Nothing, "print",
+                       Cons(OTmp(Tmp("io")), Cons(OConst(CStr("hi")), Nil)))) in
+          let g5  = tacEmit(g4,  ICall(Just(r), "add",
+                       Cons(OConst(CInt("1")), Cons(OConst(CInt("2")), Nil)))) in
+          let g6  = tacEmit(g5,  IAlloc(Tmp("c"), "Red", Nil)) in
+          let g7  = tacEmit(g6,  IAlloc(Tmp("p"), "()",
+                       Cons(OTmp(Tmp("a")), Cons(OConst(CBool(true)), Nil)))) in
+          let g8  = tacEmit(g7,  IGetTag(Tmp("tg"), OTmp(Tmp("c")))) in
+          let g9  = tacEmit(g8,  IGetField(Tmp("fld"), OTmp(Tmp("p")), 1)) in
+          let g10 = tacEmit(g9,  ICondJump(OConst(CBool(false)), ".T", ".F")) in
+          let g11 = tacEmit(g10, IAllocClosure(Tmp("cl0"), "f", Nil)) in
+          let g12 = tacEmit(g11, IAllocClosure(Tmp("cl1"), "g",
+                       Cons(OTmp(Tmp("a")), Nil))) in
+          let g13 = tacEmit(g12, IClosureCall(Tmp("z"), OTmp(Tmp("cl1")),
+                       OConst(CUnit))) in
+          let g14 = tacEmit(g13, IUnary(Tmp("n"), "-", OTmp(Tmp("x")))) in
+          let main = tacEmit(g14, IReturn(Nothing)) in
+
+          let prog = TAC(Cons(add, Cons(main, Nil)), Nil) in
+          print(io, tacPretty(prog))
+      end
+  end

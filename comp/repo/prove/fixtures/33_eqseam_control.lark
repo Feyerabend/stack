@@ -1,0 +1,28 @@
+module EqSeamControl
+
+(* THE CONTROL for the equality seam — what a String CAN do, so that the two seam
+   files beside it (33_eqseam_string, 33_eqseam_fun) are read as a boundary and not a
+   bug.  A String is an OTHER value: the checker cannot look inside it, but it is a
+   first-class citizen of the logic all the same — nameable, congruent, and reasoned
+   about THROUGH THE OPERATIONS THE MACHINE ACTUALLY IMPLEMENTS.  `string_length` is
+   one of those: it returns an Int, the checker knows it is non-negative (a primitive
+   axiom), and a guard on it discharges a division exactly as an Int guard would.
+
+     if string_length(s) != 0 then div(100, string_length(s)) else dflt
+
+   The two occurrences of `string_length(s)` are ONE uninterpreted term, so the guard's
+   `!= 0` is the divisor's `!= 0` by congruence — the same term, not two.  This proves
+   AND runs (string_length("abc") is 3, so 100 / 3 is 33), which is the whole point of a
+   control: the seam is not that Strings are second-class.  Strings flow, carry facts,
+   and pay their way.  The seam is one operation only — `==` — and the next two files
+   are exactly that operation.
+
+   Expected: proved (2), and it runs → 33. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn len_div(s : String, dflt : Int) : Int =
+  if string_length(s) != 0 then div(100, string_length(s)) else dflt
+
+fn main(io : IO) : IO =
+  print(io, show(len_div("abc", 0)))

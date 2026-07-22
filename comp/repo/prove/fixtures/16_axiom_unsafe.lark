@@ -1,0 +1,36 @@
+module AxiomUnsafe
+
+(* THE FOURTH FALSE PROOF, and the fixture that stops it coming back.  Before the fix
+   `refine.py` reported
+
+     ok: 2 obligation(s) proved
+
+   and then the program divided by zero.
+
+   The mutation is one declaration — and it is not even a mutation of the code that
+   was verified.  `safe` is `16_axiom_safe`'s function, unchanged, and its obligation
+   is discharged by the same axiom as before: `string_length(s) >= 0`, so the divisor
+   is at least 4.
+
+   Only `string_length` is no longer the primitive.  The program declares one of its
+   own, returning -4, and the declaration overrides the builtin everywhere the program
+   can see — including at run time, where the divisor is -4 + 4 = 0.
+
+   The axiom was written down about a NAME, and the name had changed hands.  That is
+   `15_shadow`'s mistake at a longer range: there a local `let` captured the symbol a
+   contract was written against, here a global `fn` captures the symbol an AXIOM was
+   written about, and an axiom is worse, because nobody has to call it for it to fire.
+   The checker now keeps `NONNEG_UF` only for names the program leaves alone, so the
+   axiom is not available here at all, and the verdict is `cannot prove` — which is the
+   truth: about this `string_length` the logic knows nothing whatever.
+
+   The bug is real: run this and it raises ZeroDivisionError. *)
+
+fn div(a : Int, b : {v : Int | v > 0}) : Int = a / b
+
+(* the capture.  A perfectly well-typed declaration, and the axiom is false of it. *)
+fn string_length(s : String) : Int = 0 - 4
+
+fn safe(s : String) : Int = div(100, string_length(s) + 4)
+
+fn main(io : IO) : IO = print(io, show(safe("abc")))

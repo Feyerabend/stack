@@ -1,0 +1,51 @@
+module AffineBorrow
+
+(* The borrow idiom that fixes 07_affine_guard's affine error: the guard returns
+   the value it inspected, so nothing is consumed twice.  The affine checker is
+   satisfied — and under the first version the REFINEMENT checker still could not discharge the
+   bound, because `b2` and `n` came out of a TUPLE pattern and the first version had no refined
+   tuple components.  The two facts were true and the checker could not see that
+   they were about the same buffer.
+
+   This file is the THERMOMETER, and it has moved once per rung — 0 of 3, then 1,
+   then 3 — which is what makes it a test and not a comment.
+
+   a later version PROVED THE CONSUMER.  `size_of`'s contract promises `n == size(b)` and
+   `size(b2) == size(b)`; the pattern `| (n, b2) =>` delivers both facts into the
+   arm, the guard adds `n > 0`, and `take(b2, 0)`'s precondition follows.  That
+   obligation — the one this file was written for — was discharged, and no further:
+   checking `size_of`'s own BODY needs `size(Buf(n)) == n`, that taking a buffer
+   apart and putting it back together does not change its size, and nothing in the
+   logic said so.  The two goals left over were the two halves of one missing
+   equation.  Refined products let a fact TRAVEL; only a measure can CREATE one.
+
+   a later version SUPPLIED THE EQUATION, AND THE DIFF IS ONE WORD.  `size` below stopped being
+   an `fn` and became the `measure` it always was — legal, because it is only ever
+   NAMED in predicates and never called at run time — and the two halves arrive from
+   the two hooks the rung is made of:
+
+     Buf(n) in the body   the value it BUILDS is a term, so `size(Buf(n)) == n` is
+                          instantiated at it and the postcondition is earned.
+     | Buf(n) =>          the value it TAKES APART is a term too: the arm assumes
+                          b == Buf(n), and the equation follows from that.
+
+   Compare 05_buf_safe.lark, which is the same buffer, the same `size`, the same
+   body — and leaves it an ordinary `fn`.  It proved what it proves at the first version and proves
+   no more today.  The difference between the two files is not what the function
+   computes.  It is whether the logic is allowed to know. *)
+
+type Buf = | Buf of Int
+
+measure size(b : Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn take(b: Buf, i: {v: Int | v >= 0 and v < size(b)}) : Int =
+  match b with | Buf(n) => n + i end
+
+fn size_of(b: Buf) : ({v: Int | v == size(b)}, {v: Buf | size(v) == size(b)}) =
+  match b with | Buf(n) => (n, Buf(n)) end
+
+fn guarded(b: Buf) : Int =
+  match size_of(b) with
+  | (n, b2) => if n > 0 then take(b2, 0) else 0
+  end

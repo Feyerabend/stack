@@ -1,0 +1,34 @@
+module FloatMeasureReject
+
+(* A THIRD CONTEXT, A THIRD REFUSAL — and the one that is doubly barred.  A measure's
+   arm becomes an AXIOM the checker instantiates at concrete terms; its
+   body must therefore be a term the logic can name.  A measure that RETURNS a Float
+   field asks the logic to name a Float, and the logic will not.
+
+     measure bx(b : Box) : Int = match b with | B(g) => g end
+
+   The arm `g` is a Float, so it is not expressible in the predicate language, and the
+   measure is rejected where it is declared — the same principle as 30, one context
+   over.  The suite already pins this message once (11_measure_fragment, a non-Float
+   arm outside the fragment); this file is the FLOAT face of it, kept for the interlude
+   because a Float-in-a-measure is the pedagogically clearest case and because it names
+   the contexts side by side: a Float is refused in a predicate (30), refused in a
+   measure arm (here), and silenced in a program (13, 19, 29).
+
+   This one is belt-and-suspenders, and that is worth seeing: even if a Float were made
+   speakable, this arm would not become a false proof — it would only trade one refusal
+   for another ("not an integer"), because a measure's result must be Int or Bool and a
+   Float is neither.  Two independent guards stand between a Float and a measure axiom,
+   which is the right number for a statement the checker takes ON FAITH.
+
+   Expected: refinement error — the arm is not expressible in the predicate language. *)
+
+type Box = | B of Float
+
+measure bx(b : Box) : Int =
+  match b with
+  | B(g) => g
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(0))

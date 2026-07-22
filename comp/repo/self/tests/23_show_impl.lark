@@ -1,0 +1,34 @@
+(* Test 23 — User-defined impl Show for an ADT alongside primitive show
+   Covers: impl Show for user type, dispatch to user show method,
+           primitive show (Int/Float/Bool) still works after impl Show is registered
+   Expected output:
+     Red
+     Green
+     Blue
+     42
+     3.14
+     true *)
+
+module ShowImpl
+
+type Color =
+  | Red
+  | Green
+  | Blue
+
+impl Show for Color = {
+  fn show(c) =
+    match c with
+    | Red   => "Red"
+    | Green => "Green"
+    | Blue  => "Blue"
+    end
+}
+
+fn main(io : IO) : IO =
+  let io = print(io, show(Red))   in
+  let io = print(io, show(Green)) in
+  let io = print(io, show(Blue))  in
+  let io = print(io, show(42))    in
+  let io = print(io, show(3.14))  in
+  print(io, show(true))

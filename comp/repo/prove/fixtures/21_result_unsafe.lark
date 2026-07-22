@@ -1,0 +1,53 @@
+module ResultUnsafe
+
+(* The mutant of 21_result_safe.lark, and it is a later version's DONE-WHEN: a bogus result
+   declaration must be REJECTED.
+
+   One character moved:
+
+       measure len(xs : List(Int)) : {v : Int | v > 0}
+                                                  ^
+
+   A length is not positive.  `len(Nil)` is 0, and the arm that says so is right
+   there in the declaration, three lines down.  So the induction fails at exactly one
+   place — the 'Nil' arm, whose obligation is `len(Nil) > 0` with `len(Nil) == 0` in
+   its hypotheses — and the 'Cons' arm still proves, because `1 + len(rest) > 0`
+   follows from the induction hypothesis `len(rest) > 0`.  A false claim about a
+   recursive definition is usually false at the BASE case, and the base case is where
+   the checker catches it.
+
+   THIS IS THE DETONATION, NOT A STYLE COMPLAINT.  Admit the declaration and the
+   program is not merely over-promising: it DIVIDES BY ZERO.  `avg` divides by `n`,
+   where `n == len(xs)`, and the only thing standing between that division and a
+   crash is the claim `len(xs) > 0` — which the checker would happily assert at the
+   opaque parameter `xs`, discharging the obligation, printing `ok`, exiting 0.  Then
+   `main` passes `Nil`, `len(Nil)` is 0, and the machine divides 100 by 0.
+
+   So this file is what the induction is FOR.  It is also the reason `run()` withholds
+   a measure's own result refinement from its own induction VCs: hand the 'Nil' arm
+   the axiom it is trying to prove and it discharges itself, the declaration passes,
+   and the checker has proved a division by zero.  Assuming the conclusion is not a
+   subtle bug — it is the entire difference between an induction and a lie. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : {v : Int | v > 0} =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+fn size(xs : List(Int)) : {v : Int | v == len(xs)} =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) =>
+      let n = size(rest) in
+      1 + n
+  end
+
+fn avg(xs : List(Int), total : Int) : Int =
+  let n = size(xs) in
+  total / n
+
+fn main(io : IO) : IO =
+  print(io, show(avg(Nil, 100)))

@@ -1,0 +1,41 @@
+(* 19 — the mutant.  One line different from the safe file: the integer guard is gone, and
+   the `else` branch of a FLOAT comparison is left to carry the division by itself.
+
+     if nan == nan then 0 else 100 / x        with x = 0
+
+   The old checker proved it: `ok: 1 obligation(s) proved`, exit 0.  (Measured, at 5da6252.)
+
+   Not by proving `x /= 0`.  By finding the path condition ¬(nan == nan) UNSATISFIABLE.
+   Reflexivity is a theorem of equality, so an else-branch guarded by a failed
+   self-comparison is DEAD CODE in the logic — and dead code proves everything.
+
+   Then it runs.  NaN is not equal to itself.  The dead branch is the one the machine takes.
+   Lark divides 100 by 0.
+
+   This is the sharpest form of the lesson, and the reason FLOAT is a SORT rather than
+   a warning.  It was never that the checker knew something false about Floats.  It is that
+   it was ALLOWED TO SPEAK about them — and every true thing it can say about an ordinary
+   value (`a == a`; if `a /= b` then `a` and `b` differ) becomes false the moment the value
+   is a Float.  The fix is not a cleverer fact about NaN.  The fix is silence.
+
+   And silence has to reach the ELSE branch too, which is exactly what a contradiction among
+   the hypotheses quietly denies.  A checker that will not speak about a value, but still
+   believes the NEGATION of something it cannot say, has not stopped talking — it has only
+   stopped being audible.
+
+   New verdict: the guard is untranslatable, so it constrains neither branch, and the goal
+   `x /= 0` stands there with nothing to prove it — which is the truth. *)
+
+module FloatLitUnsafe
+
+fn ratio(a : Float, b : Float) : Float =
+  a / b
+
+fn nan_guard(x : Int) : Int =
+  let nan = 0.0 / 0.0 in
+  if nan == nan then 0
+  else 100 / x
+
+fn main(io : IO) : IO =
+  let io = print(io, show(ratio(7.0, 2.0))) in
+  print(io, show(nan_guard(0)))

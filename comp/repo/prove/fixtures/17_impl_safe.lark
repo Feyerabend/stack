@@ -1,0 +1,63 @@
+(* 17 — AN IMPL BODY IS A BODY.  (the refinement work)
+
+   `refine.py` imported `ImplDecl` and never matched it, so for four rungs an impl
+   body was never walked: put `n / 0` inside one, with nobody reading the trait, and
+   the checker printed `ok: 2 obligation(s) proved`, exit 0.  It was not a false proof
+   — the refinement on a trait method was DROPPED rather than trusted, so a lying impl
+   could not discharge anyone's goal, and the checker was sound BY LUCK.  It was
+   something a verifier is even less allowed to be: silently under-verifying.  A count
+   that does not include the obligation is a WRONG REPORT, not a weak answer.  07's own
+   corpus uses impls.
+
+   The count is the tell.  Under the old checker this file has ONE obligation — and it
+   FAILS: `share` cannot divide, because the contract it needs was thrown away.  The
+   three obligations inside the impl were never asked about at all.  Now there are four
+   and all four are proved.  Too weak outside, blind inside; both were the same bug.
+
+   The fix has two halves and they are one decision:
+
+     - `weight`'s body must MEET the trait's contract, arm by arm: 1 > 0 and 5 > 0.
+     - BECAUSE it must, a caller may READ that contract.  `share` — an ordinary
+       function, outside the impl entirely — divides by a coin's weight and is
+       believed.  A contract the callers read and nobody checks is exactly the false
+       proof a later version was about, so the reading is earned by the checking and not one
+       rung before.
+
+   And `split` is both at once: an impl body that is checked, and that discharges its
+   own division by reading the trait it is declared inside.
+
+   The `let` is not decoration either.  A call's postcondition reaches the logic
+   through a NAME — `let w = weight(c)` binds the fact `w > 0`, and it is `w` that the
+   divisor mentions.  a later version's rule, one rung down. *)
+
+module ImplSafe
+
+type Coin =
+  | Penny
+  | Dime
+
+impl Copy for Coin = {}
+
+trait Weigh a = {
+  fn weight : a -> {v : Int | v > 0}
+  fn split  : a -> Int
+}
+
+impl Weigh for Coin = {
+  fn weight(c) =
+    match c with
+    | Penny => 1
+    | Dime  => 5
+    end
+
+  fn split(c) =
+    let w = weight(c) in
+    100 / w
+}
+
+fn share(total : Int, c : Coin) : Int =
+  let w = weight(c) in
+  total / w
+
+fn main(io : IO) : IO =
+  print(io, show(share(50, Dime) + split(Penny)))

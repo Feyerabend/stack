@@ -1,0 +1,576 @@
+-- lark-refine.lcore
+--
+-- V3: Soundness of refinement subtyping over the existing operational
+-- metatheory (lark-typing/subst/step/preservation). Checked by lcore
+-- (proof/code/core/).
+--
+-- Rungs closed in this file:
+--   V3-SPINE — base-Int subtyping ⇒ semantic implication (2026-07-16)
+--   V3-MONO  — monotonicity in the step budget, le_trans via J (2026-07-16)
+--   V3-TFN   — function-type refinements: the relation goes RECURSIVE,
+--              Sub grows the contravariant/covariant arrow rule (2026-07-16)
+--   V3-FUND  — the FUNDAMENTAL LEMMA, Pitch 1: a refined typing judgment
+--              (HasR) and the theorem that every derivation lands in the
+--              relation, for the λ-introduction-free fragment (2026-07-16)
+--
+-- Run: cd proof/code/core && cat ../../lark/lark-typing.lcore ../../lark/lark-subst.lcore ../../lark/lark-step.lcore ../../lark/lark-preservation.lcore ../../lark/lark-refine.lcore | grep -v '^--' | grep -v '^[[:space:]]*$' | ./lcore
+--
+-- CORRESPONDENCE TABLE
+-- ====================
+--
+--   Checker concept (08/src)         lcore proof              meaning here
+--   ──────────────────────────────── ──────────────────────── ─────────────────────
+--   {v : Int | p}  (refined base)    RInt p  (p : Nat → Bool) shallow predicate on
+--                                                             the literal's payload
+--   {x:A|p} -> {v:B|q} (refined fn)  RFn ra rb                refinements ride the
+--                                                             arrow, recursively
+--   erasure  (a mention is not use)  the INDEX of RTy : Ty →  a refined type IS its
+--                                      Type                   erased type + riders
+--   "solver proves p ⇒ q"            imp : Π(n : Nat).        the evidence the
+--                                      IsTrue (p n) →         SubBase leaf carries
+--                                      IsTrue (q n)
+--   subtyping derivation             Sub t r r'               the CALCULUS object
+--   fn subtyping (contra/cov)        SubFn                    domain premise FLIPS
+--   V⟦{Int|p}⟧ v                     SemV TInt (RInt p) v     v is a literal whose
+--                                                             payload satisfies p
+--   V⟦A→B⟧ f                         SemV _ (RFn ra rb) f     f is a value; good
+--                                                             args go to good calls
+--   E_k⟦A⟧ e                         SemE t r k e             e reaches a V-good
+--                                                             value within k steps
+--   subtyping ⇒ semantic implication sub_sound_v / sub_sound  THE lemma, V/E level
+--   refined typing context           RCtx / rlookup           riders on Γ, looked
+--                                                             up by POSITION
+--   "the environment is good"        GoodEnv / glookup        each entry SemV-good
+--                                                             at its rider
+--   refine.py's judgment             HasR                     the refined typing
+--                                                             derivation, riding
+--                                                             the intrinsic Expr
+--   "checked programs are safe"      fund                     THE FUNDAMENTAL
+--                                                             LEMMA: every HasR
+--                                                             derivation lands in
+--                                                             the relation
+--
+-- SCOPE (the ratified decisions, PROVE.md §4 V3):
+--   (a) This proves the CALCULUS — Sub, not refine.py. The gap from these
+--       rules to the running Python is stated, not hidden.
+--   (b) The semantics is a STEP-INDEXED relation over Steps/IsVal from the
+--       existing metatheory. THE INDEX IS INERT INSIDE SemV AT THIS RUNG
+--       (ratified 2026-07-16): the ∃-form SemE ("reaches a good value
+--       WITHIN k") cannot budget the arrow clause honestly — Π j ≤ k over
+--       the application fails at j = 0, since β alone costs a step while
+--       the domain hypothesis is satisfiable at any index. So the arrow
+--       clause carries an EXISTENTIAL budget (Σ k'), SemV never consults
+--       k, and the spine's Le/SemE machinery survives verbatim. The index
+--       becomes load-bearing at the DESCEND rung, when general recursion
+--       forces SemV to recurse on k and E flips to the ∀/safety form —
+--       that rebuild is named here, not smuggled.
+--   (c) Simplifications, all named:
+--         · payloads are Nat, not ℤ (Lark's logic is ℤ; ℤ arrives with
+--           measures, as does arithmetic beyond the literal itself)
+--         · predicates are SHALLOW (Nat → Bool), not a syntactic predicate
+--           language; SubBase's imp models "the solver discharged p ⇒ q"
+--         · two subtyping rules (base, arrow); refined pairs/sums later
+--   (d) FUND is PITCH 1 of a two-pitch summit (ratified 2026-07-16):
+--       HasR covers RT_Int/RT_Bool/RT_Var/RT_App/RT_If/RT_Sub — NO RT_Lam,
+--       NO RT_Let. Both fall to the SUBSTITUTION LEMMA: the β-redex the Lam
+--       clause creates is  sub_ground (sub_open body (var, weakened env)) w,
+--       the IH speaks of  sub_ground body (w, env),  and equating them
+--       bottoms out at facts about the KERNEL primitive weaken, which is
+--       opaque to lcore reasoning on neutral terms (its cutoff is not even
+--       exposed). Pitch 2 = that lemma, likely with kernel support — its own
+--       rung. Function types still flow through everything at Pitch 1: they
+--       enter as HYPOTHESES (GoodEnv entries), so higher-order USE is proven
+--       (RT_App is the hard case: congruence lifts + budget arithmetic).
+--       Also named: RT_If is NOT path-sensitive (RBool carries no predicate;
+--       the checker's path condition is not yet modeled), and fund's budget
+--       is EXISTENTIAL (Σ k — the inert-index decision, note (b)).
+--
+-- WHAT IS PROVED HERE:
+--   1. IsTrue — reflection of Bool into Type. COMPLETE.
+--   2. Le — order on step budgets. COMPLETE.
+--   3. StepsN — step-COUNTED reduction (Steps with a fuel index). COMPLETE.
+--   4. RTy — refined types, INDEXED BY THEIR ERASURE (RTy : Ty → Type):
+--      erasure is definitional, no transport anywhere. COMPLETE.
+--   5. SemV — the logical relation, now RECURSIVE (indrec RTy, large
+--      elimination): RInt = payload triple; RFn = IsVal + applicative
+--      clause using both IHs. SemE/SemEV — the ∃-form wrapper. COMPLETE.
+--   6. Sub — the calculus: SubBase (solver leaf) and SubFn, domain premise
+--      CONTRAVARIANT, codomain premise covariant. COMPLETE.
+--   7. sub_sound_v / sub_sound — Sub t r r' → SemV/SemE implication, by
+--      indrec Sub; the SubFn case fires both IHs in OPPOSITE directions.
+--      COMPLETE.
+--   8. Smoke tests — base rung intact (ge2 <: ge1 over a stepping if);
+--      idInt proven at {ge2}→{ge2} with the domain hypothesis REUSED as
+--      the result witness (β fires, sub_ground computes to the neutral
+--      argument); constTwo proven at {ge1}→{ge2} and carried across
+--      SubFn imp21 imp21 to {ge2}→{ge1} — ONE implication exercising BOTH
+--      variances; the carried function still computes when applied.
+--   9. MONOTONICITY: le_refl, le_inv (inversion via a natrec-computed
+--      motive), le_trans (indrec + J-transport), and sem_e_mono — budget
+--      widening, now GENERIC in the value relation. The "downward closure
+--      of the indexed SemV" seam named at the spine MOVES to the descend
+--      rung along with the index itself. COMPLETE.
+--  10. BUDGET ARITHMETIC: plus, le_succ_r, le_plus_r, le_plus_mono, and
+--      steps_append (reductions concatenate, budgets add). COMPLETE.
+--  11. CONGRUENCE LIFTS: lift_app1 / lift_app2 / lift_if — StepsN lifted
+--      through the CBV evaluation frames. lift_app1 and lift_if need the
+--      COERCION-MOTIVE technique (le_inv's computed-motive trick lifted
+--      from Nat to Ty: the motive quantifies an Id Ty t1 (TFn a b) resp.
+--      Id Ty t1 TBool so the conclusion is stateable at abstract t1; at
+--      every use site the Id is refl and coe_e/step_coe compute away).
+--      lift_app2 needs no coercion — its frame is parametric in the
+--      stepping type — but carries the IsVal of the function. COMPLETE.
+--  12. REFINED CONTEXTS: RCtx (riders on Γ, a telescope like SemCtx),
+--      rlookup (positional lookup, the sem_lookup motive trick), GoodEnv
+--      (every env entry SemV-good at its rider), glookup. COMPLETE.
+--  13. HasR — the refined typing judgment, riding the intrinsic Expr the
+--      way RTy rides Ty (a derivation ON a well-typed term, = refine.py's
+--      second pass over the typed tree). Six rules; subsumption is a RULE
+--      (RT_Sub), not implicit — the negative control shows RT_App refuses
+--      an untightened argument. COMPLETE for the Pitch-1 fragment.
+--  14. fund — THE FUNDAMENTAL LEMMA (Pitch 1): every HasR derivation lands
+--      in the relation —  HasR g rg t r e → Π env. GoodEnv g rg env →
+--      Σ k. SemE t r k (sub_ground e env).  By indrec HasR; the App case
+--      composes both IHs' reductions with the applicative clause of the
+--      function's SemV; the If case J-transports along the RBool pinning
+--      and boolrec-selects the branch; the Sub case is one sub_sound call
+--      — the whole ladder below this line, load-bearing at the summit.
+--      COMPLETE for the Pitch-1 fragment.
+
+-- ── IsTrue : Bool → Type ──────────────────────────────────────────────────────
+-- IsTrue true = Unit, IsTrue false = Empty.
+-- The bridge from the shallow predicate's Bool verdict to a provable Type.
+
+:let IsTrue = (\b. boolrec (\_. Type : Π(_ : Bool). Type_1) Unit Empty b : Bool → Type)
+
+-- ── Le : order on step budgets ────────────────────────────────────────────────
+-- Le j k  witnesses j ≤ k. Keeps the index honest: SemE k only accepts
+-- reductions that fit the budget, so k genuinely bounds the observation.
+
+data Le : Nat → Nat → Type where LeZ : Π(n : Nat). Le zero n ; LeS : Π(m : Nat). Π(n : Nat). Le m n → Le (succ m) (succ n)
+
+-- ── StepsN : step-counted reduction ───────────────────────────────────────────
+-- StepsN k t e e'  =  e reduces to e' in exactly k steps.
+-- Steps (lark-preservation) forgets the count; the index k here is what the
+-- step-indexed relation measures. Same constructors, plus the counter.
+
+data StepsN : Π(k : Nat). Π(t : Ty). Expr empty t → Expr empty t → Type where SN_refl : Π(t : Ty). Π(e : Expr empty t). StepsN zero t e e ; SN_cons : Π(k : Nat). Π(t : Ty). Π(e : Expr empty t). Π(e' : Expr empty t). Π(e'' : Expr empty t). Step t e e' → StepsN k t e' e'' → StepsN (succ k) t e e''
+
+-- ── RTy : refined types, indexed by their erasure ─────────────────────────────
+-- A refined type IS its erased type plus riders — V1's "a mention is not a
+-- use" as the shape of the encoding. Because the erasure is the INDEX,
+-- Sub t r r' relates refinements of the SAME erased type definitionally:
+-- no transport, anywhere. (The negative control for this seam: a Sub over
+-- mismatched erasures is ill-INDEXED, refused by the kernel.)
+-- RBool (added at the FUND rung) is the trivial rider on TBool: it carries
+-- no predicate — its SemV clause just PINS the value to a boolean literal,
+-- which is exactly what the fundamental lemma's If case needs to fire
+-- StepIfTrue/StepIfFalse. No Sub rule mentions it: bool subtyping does not
+-- exist in the calculus, so none is modeled.
+
+data RTy : Ty → Type where RInt : Π(p : Π(_ : Nat). Bool). RTy TInt ; RBool : RTy TBool ; RFn : Π(a : Ty). Π(b : Ty). RTy a → RTy b → RTy (TFn a b)
+
+-- ── SemEV : the expression relation, generic in the value relation ────────────
+-- SemEV t V k e  =  within budget k, e reaches a value satisfying V.
+-- Generic in V so SemV's RFn case can apply it to the codomain IH before
+-- SemV itself is fully defined — this is how the relation ties its own
+-- recursive knot without mutual recursion.
+
+:let SemEV = (\t. \V. \k. \e. Σ(j : Nat). Σ(_ : Le j k). Σ(v : Expr empty t). Σ(_ : StepsN j t e v). V v : Π(t : Ty). Π(V : Π(_ : Expr empty t). Type). Π(k : Nat). Π(e : Expr empty t). Type)
+
+-- ── SemV : the value relation, RECURSIVE on RTy ───────────────────────────────
+-- By indrec RTy (large elimination — the motive lands in Type):
+--   RInt p     v = v IS the literal ELitInt n (pinned by Id) and p n holds.
+--   RBool      v = v IS the literal ELitBool b, for some b (pinned by Id).
+--   RFn ra rb  f = f IS a value (IsVal — canonical forms will make it a
+--                  lambda), and for every argument w good at ra, the
+--                  application f w reaches, under SOME budget (Σ k' — the
+--                  inert-index decision, header note (b)), a value good
+--                  at rb. The IHs iha/ihb ARE the sub-relations: this is
+--                  where the relation goes recursive.
+
+:let SemV = (\t. \r. indrec RTy (\t1. \r1. Π(_ : Expr empty t1). Type : Π(t1 : Ty). Π(_ : RTy t1). Type_1) (\p. \v. Σ(n : Nat). Σ(_ : Id (Expr empty TInt) v (ELitInt empty n)). IsTrue (p n) : Π(p : Π(_ : Nat). Bool). Π(v : Expr empty TInt). Type) (\v. Σ(b : Bool). Id (Expr empty TBool) v (ELitBool empty b) : Π(v : Expr empty TBool). Type) (\a. \b. \ra. \iha. \rb. \ihb. \f. Σ(_ : IsVal (TFn a b) f). Π(w : Expr empty a). Π(_ : iha w). Σ(k' : Nat). SemEV b ihb k' (EApp empty a b f w) : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(iha : Π(_ : Expr empty a). Type). Π(rb : RTy b). Π(ihb : Π(_ : Expr empty b). Type). Π(f : Expr empty (TFn a b)). Type) r : Π(t : Ty). Π(r : RTy t). Π(_ : Expr empty t). Type)
+:i SemV
+
+-- ── SemE : the expression relation at a refined type ──────────────────────────
+
+:let SemE = (\t. \r. \k. \e. SemEV t (SemV t r) k e : Π(t : Ty). Π(r : RTy t). Π(k : Nat). Π(e : Expr empty t). Type)
+
+-- ── Sub : refinement subtyping derivations (the calculus) ─────────────────────
+-- SubBase — the solver leaf: base-Int subtyping justified by an implication
+--   between the predicates; imp models "the QF-UFLIA core discharged p ⇒ q".
+-- SubFn — the arrow rule: DOMAIN PREMISE FLIPPED (Sub a ra' ra — the
+--   supertype's domain must imply the subtype's), codomain straight.
+--   Both indexed by the shared erasure, so the rule cannot even be STATED
+--   across mismatched erased types.
+
+data Sub : Π(t : Ty). RTy t → RTy t → Type where SubBase : Π(p : Π(_ : Nat). Bool). Π(q : Π(_ : Nat). Bool). Π(imp : Π(n : Nat). Π(_ : IsTrue (p n)). IsTrue (q n)). Sub TInt (RInt p) (RInt q) ; SubFn : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(ra' : RTy a). Π(rb : RTy b). Π(rb' : RTy b). Sub a ra' ra → Sub b rb rb' → Sub (TFn a b) (RFn a b ra rb) (RFn a b ra' rb')
+
+-- ── sem_ev_imp : implication lifts through the expression relation ────────────
+-- Generic: any pointwise implication of value relations carries through
+-- SemEV; the step-index bookkeeping (j, Le j k, the reduction) passes
+-- untouched. (This is the spine's sem_e_imp, generalized to serve both
+-- sub_sound and the SubFn case's codomain rewrite. NB: the second relation
+-- is named Q, not W — W is a token lcore's parser reserves.)
+
+:let sem_ev_imp = (\t. \V. \Q. \imp. \k. \e. \h. (fst h, (fst (snd h), (fst (snd (snd h)), (fst (snd (snd (snd h))), imp (fst (snd (snd h))) (snd (snd (snd (snd h)))))))) : Π(t : Ty). Π(V : Π(_ : Expr empty t). Type). Π(Q : Π(_ : Expr empty t). Type). Π(imp : Π(v : Expr empty t). Π(_ : V v). Q v). Π(k : Nat). Π(e : Expr empty t). Π(_ : SemEV t V k e). SemEV t Q k e)
+
+-- ── sub_sound_v : THE LEMMA, value level ──────────────────────────────────────
+-- Sub t r r' → SemV t r v → SemV t r' v, by indrec Sub.
+--   SubBase: repack the payload triple, imp fired at the payload (the
+--            spine's sem_v_imp, now a case).
+--   SubFn:   the variance flip made computational — the DOMAIN IH runs
+--            BACKWARD (ihd : ra'-good → ra-good, fed to the clause's
+--            hypothesis), the CODOMAIN IH runs FORWARD (ihc, lifted
+--            through SemEV at the result). IsVal passes through.
+
+:let sub_sound_v = (\t. \r. \r'. \s. indrec Sub (\t1. \r1. \r1'. \_. Π(v : Expr empty t1). Π(_ : SemV t1 r1 v). SemV t1 r1' v : Π(t1 : Ty). Π(r1 : RTy t1). Π(r1' : RTy t1). Π(_ : Sub t1 r1 r1'). Type) (\p. \q. \imp. \v. \h. (fst h, (fst (snd h), imp (fst h) (snd (snd h)))) : Π(p : Π(_ : Nat). Bool). Π(q : Π(_ : Nat). Bool). Π(imp : Π(n : Nat). Π(_ : IsTrue (p n)). IsTrue (q n)). Π(v : Expr empty TInt). Π(_ : SemV TInt (RInt p) v). SemV TInt (RInt q) v) (\a. \b. \ra. \ra'. \rb. \rb'. \sd. \ihd. \sc. \ihc. \f. \h. (fst h, \w. \hw. (fst (snd h w (ihd w hw)), sem_ev_imp b (SemV b rb) (SemV b rb') ihc (fst (snd h w (ihd w hw))) (EApp empty a b f w) (snd (snd h w (ihd w hw))))) : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(ra' : RTy a). Π(rb : RTy b). Π(rb' : RTy b). Π(sd : Sub a ra' ra). Π(ihd : Π(v : Expr empty a). Π(_ : SemV a ra' v). SemV a ra v). Π(sc : Sub b rb rb'). Π(ihc : Π(v : Expr empty b). Π(_ : SemV b rb v). SemV b rb' v). Π(f : Expr empty (TFn a b)). Π(_ : SemV (TFn a b) (RFn a b ra rb) f). SemV (TFn a b) (RFn a b ra' rb') f) s : Π(t : Ty). Π(r : RTy t). Π(r' : RTy t). Π(_ : Sub t r r'). Π(v : Expr empty t). Π(_ : SemV t r v). SemV t r' v)
+:i sub_sound_v
+
+-- ── sub_sound : THE LEMMA, expression level ───────────────────────────────────
+-- Subtyping implies semantic implication, at any budget:
+--   Sub t r r'  →  Π(k). Π(e). SemE t r k e → SemE t r' k e
+
+:let sub_sound = (\t. \r. \r'. \s. \k. \e. \h. sem_ev_imp t (SemV t r) (SemV t r') (sub_sound_v t r r' s) k e h : Π(t : Ty). Π(r : RTy t). Π(r' : RTy t). Π(_ : Sub t r r'). Π(k : Nat). Π(e : Expr empty t). Π(_ : SemE t r k e). SemE t r' k e)
+:i sub_sound
+
+-- ── Smoke tests: the base rung, intact ─────────────────────────────────────────
+-- Concrete instance: {v : Int | v ≥ 2} <: {v : Int | v ≥ 1}, exercised on a
+-- term that actually steps. Mirrors the checker's simplest accepted pair.
+
+:let n1 = (succ zero : Nat)
+:let n2 = (succ (succ zero) : Nat)
+
+-- ge1 n = (n ≥ 1):  false at zero, true at succ _
+:let ge1 = (\n. natrec (\_. Bool : Π(_ : Nat). Type) false (\m. \_. true : Π(m : Nat). Π(_ : Bool). Bool) n : Π(n : Nat). Bool)
+
+-- ge2 n = (n ≥ 2):  false at zero, ge1 m at succ m
+:let ge2 = (\n. natrec (\_. Bool : Π(_ : Nat). Type) false (\m. \_. ge1 m : Π(m : Nat). Π(_ : Bool). Bool) n : Π(n : Nat). Bool)
+
+-- the implication ge2 ⇒ ge1, by natrec:
+--   zero:   IsTrue false → IsTrue false  =  Empty → Empty   — identity
+--   succ m: target IsTrue (ge1 (succ m)) = Unit             — star
+:let imp21 = (\n. natrec (\n1. Π(_ : IsTrue (ge2 n1)). IsTrue (ge1 n1) : Π(_ : Nat). Type) (\h. h) (\m. \ih. \h. star : Π(m : Nat). Π(ih : Π(_ : IsTrue (ge2 m)). IsTrue (ge1 m)). Π(_ : IsTrue (ge2 (succ m))). IsTrue (ge1 (succ m))) n : Π(n : Nat). Π(_ : IsTrue (ge2 n)). IsTrue (ge1 n))
+
+:let rge1 = (RInt ge1 : RTy TInt)
+:let rge2 = (RInt ge2 : RTy TInt)
+
+-- the subtyping derivation {Int|ge2} <: {Int|ge1}
+:let sub21 = (SubBase ge2 ge1 imp21 : Sub TInt rge2 rge1)
+:i sub21
+
+-- e_if2 = if true then 2 else 1  — steps (1 step) to ELitInt 2
+:let e_if2 = (EIf empty TInt (ELitBool empty true) (ELitInt empty n2) (ELitInt empty n1) : Expr empty TInt)
+
+-- the 1-step reduction, counted:  e_if2 →¹ 2   (SN_cons over SN_refl)
+:let sn_e2 = (SN_cons zero TInt e_if2 (ELitInt empty n2) (ELitInt empty n2) (StepIfTrue TInt (ELitInt empty n2) (ELitInt empty n1)) (SN_refl TInt (ELitInt empty n2)) : StepsN n1 TInt e_if2 (ELitInt empty n2))
+
+-- 1 ≤ 1  (LeS over LeZ — both constructors exercised)
+:let le11 = (LeS zero zero (LeZ zero) : Le n1 n1)
+
+-- V⟦{Int|ge2}⟧ (ELitInt 2):  payload 2, pinned by refl, ge2 2 computes to true
+:let semv_2 = ((n2, (refl (ELitInt empty n2), star)) : SemV TInt rge2 (ELitInt empty n2))
+
+-- E_1⟦{Int|ge2}⟧ e_if2:  j = 1 ≤ 1, reaches ELitInt 2, payload good
+:let seme_p = ((n1, (le11, (ELitInt empty n2, (sn_e2, semv_2)))) : SemE TInt rge2 n1 e_if2)
+
+-- THE APPLICATION: sub_sound carries e_if2 across {Int|ge2} <: {Int|ge1}
+:let seme_q = (sub_sound TInt rge2 rge1 sub21 n1 e_if2 seme_p : SemE TInt rge1 n1 e_if2)
+:i seme_q
+
+-- value case: a literal is semantically fine at j = 0 within any budget
+-- (SN_refl and LeZ at top level)
+:let seme_v = ((zero, (LeZ n1, (ELitInt empty n2, (SN_refl TInt (ELitInt empty n2), semv_2)))) : SemE TInt rge2 n1 (ELitInt empty n2))
+:let seme_v_q = (sub_sound TInt rge2 rge1 sub21 n1 (ELitInt empty n2) seme_v : SemE TInt rge1 n1 (ELitInt empty n2))
+:i seme_v_q
+
+-- ── Smoke tests: THE ARROW ─────────────────────────────────────────────────────
+-- Two inhabitants and one derivation, chosen so every new piece fires:
+--   idInt at {ge2}→{ge2} — β fires via StepBeta, sub_ground COMPUTES the
+--     body (EVar here) to the NEUTRAL argument w, and the domain hypothesis
+--     hw is reused verbatim as the result witness. No J, no transport.
+--   constTwo at {ge1}→{ge2}, carried across SubFn to {ge2}→{ge1} — one
+--     implication (imp21) exercises BOTH variances: contravariantly at the
+--     domain ({ge2} tightens {ge1}), covariantly at the codomain.
+
+:let idInt = (ELam empty TInt TInt (EVar (ext TInt empty) TInt (here empty TInt)) : Expr empty (TFn TInt TInt))
+:let rid22 = (RFn TInt TInt rge2 rge2 : RTy (TFn TInt TInt))
+
+-- V⟦{ge2}→{ge2}⟧ idInt: given w with hw : V⟦{ge2}⟧ w, the application
+-- steps once (β; the substituted body computes to w) and hw itself is the
+-- result witness.
+:let semv_id = ((ValLam TInt TInt (EVar (ext TInt empty) TInt (here empty TInt)), \w. \hw. (n1, (n1, (le11, (w, (SN_cons zero TInt (EApp empty TInt TInt idInt w) w w (StepBeta TInt TInt (EVar (ext TInt empty) TInt (here empty TInt)) w) (SN_refl TInt w), hw)))))) : SemV (TFn TInt TInt) rid22 idInt)
+:i semv_id
+
+-- the clause COMPUTES: apply it at the literal 2 and watch the certificate
+:let use_id = (snd semv_id (ELitInt empty n2) semv_2 : Σ(k' : Nat). SemEV TInt (SemV TInt rge2) k' (EApp empty TInt TInt idInt (ELitInt empty n2)))
+:i use_id
+
+:let constTwo = (ELam empty TInt TInt (ELitInt (ext TInt empty) n2) : Expr empty (TFn TInt TInt))
+:let rc12 = (RFn TInt TInt rge1 rge2 : RTy (TFn TInt TInt))
+:let rc21 = (RFn TInt TInt rge2 rge1 : RTy (TFn TInt TInt))
+
+-- V⟦{ge1}→{ge2}⟧ constTwo: any good argument, the application steps once
+-- to the literal 2 (sub_ground computes the constant body under the
+-- neutral environment), which is ge2-good.
+:let semv_c2 = ((ValLam TInt TInt (ELitInt (ext TInt empty) n2), \w. \hw. (n1, (n1, (le11, (ELitInt empty n2, (SN_cons zero TInt (EApp empty TInt TInt constTwo w) (ELitInt empty n2) (ELitInt empty n2) (StepBeta TInt TInt (ELitInt (ext TInt empty) n2) w) (SN_refl TInt (ELitInt empty n2)), semv_2)))))) : SemV (TFn TInt TInt) rc12 constTwo)
+:i semv_c2
+
+-- {ge1}→{ge2}  <:  {ge2}→{ge1} — the arrow derivation. Note the DOMAIN
+-- premise is Sub {ge2} {ge1} (flipped) and so is the codomain's: the same
+-- imp21 serves both variances.
+:let sub_fn21 = (SubFn TInt TInt rge1 rge2 rge2 rge1 (SubBase ge2 ge1 imp21) (SubBase ge2 ge1 imp21) : Sub (TFn TInt TInt) rc12 rc21)
+:i sub_fn21
+
+-- carry constTwo across the arrow subtyping, value level
+:let semv_c2w = (sub_sound_v (TFn TInt TInt) rc12 rc21 sub_fn21 constTwo semv_c2 : SemV (TFn TInt TInt) rc21 constTwo)
+:i semv_c2w
+
+-- the CARRIED function still computes: apply the rewritten clause at 2 and
+-- the certificate lands at {ge1} (star at the weaker payload)
+:let use_c2w = (snd semv_c2w (ELitInt empty n2) semv_2 : Σ(k' : Nat). SemEV TInt (SemV TInt rge1) k' (EApp empty TInt TInt constTwo (ELitInt empty n2)))
+:i use_c2w
+
+-- expression level: a function VALUE sits in E at j = 0; carry it across
+:let seme_fn = ((zero, (LeZ n1, (constTwo, (SN_refl (TFn TInt TInt) constTwo, semv_c2)))) : SemE (TFn TInt TInt) rc12 n1 constTwo)
+:let seme_fnw = (sub_sound (TFn TInt TInt) rc12 rc21 sub_fn21 n1 constTwo seme_fn : SemE (TFn TInt TInt) rc21 n1 constTwo)
+:i seme_fnw
+
+-- ── Monotonicity in k (budget widening) ───────────────────────────────────────
+-- For the ∃-form SemEV ("reaches a good value within k steps"), monotonicity
+-- runs UPWARD: an observation that fits budget k fits every wider budget.
+-- SemV never consults the index (the inert-index decision, header (b)), so
+-- the lemma is generic in the value relation and covers arrows for free.
+-- The classical "downward closure of the indexed value relation" seam moves
+-- to the DESCEND rung, together with the index itself.
+--
+-- The real content is Le-TRANSITIVITY, which needs INVERSION of Le (succ m) c
+-- — and lcore's indrec does no dependent pattern matching, so inversion is
+-- not free. Technique: a natrec-COMPUTED motive (the IsTrue trick applied to
+-- Le): LeInvT a b unfolds by the shape of a, so each indrec case lands at
+-- its own type with no index refinement; the Id it returns is consumed by J.
+
+-- le_refl : n ≤ n — by natrec.
+:let le_refl = (\n. natrec (\n1. Le n1 n1 : Π(n1 : Nat). Type) (LeZ zero) (\m. \ih. LeS m m ih : Π(m : Nat). Π(ih : Le m m). Le (succ m) (succ m)) n : Π(n : Nat). Le n n)
+:i le_refl
+
+-- LeInvT a b : what inverting a derivation of Le a b yields, computed from
+-- the shape of a:
+--   a = zero   → Unit                                (nothing to learn)
+--   a = succ m → Σ k'. Id b (succ k') × Le m k'      (b steps down too)
+:let LeInvT = (\a. \b. natrec (\_. Type : Π(_ : Nat). Type_1) Unit (\a1. \_. Σ(k1 : Nat). Σ(_ : Id Nat b (succ k1)). Le a1 k1 : Π(a1 : Nat). Π(_ : Type). Type) a : Π(a : Nat). Π(b : Nat). Type)
+
+-- le_inv : every Le derivation inhabits its inversion type. By indrec Le;
+-- each case's target COMPUTES (LeInvT zero n = Unit, LeInvT (succ m)
+-- (succ n) = the Σ), so the bodies are star and a triple — no transport.
+:let le_inv = (\a. \b. \h. indrec Le (\a1. \b1. \_. LeInvT a1 b1 : Π(a1 : Nat). Π(b1 : Nat). Le a1 b1 → Type) (\n. star : Π(n : Nat). LeInvT zero n) (\m. \n. \h1. \_. (n, (refl (succ n), h1)) : Π(m : Nat). Π(n : Nat). Π(h1 : Le m n). Π(_ : LeInvT m n). LeInvT (succ m) (succ n)) h : Π(a : Nat). Π(b : Nat). Π(_ : Le a b). LeInvT a b)
+:i le_inv
+
+-- le_trans — by indrec on the FIRST derivation:
+--   LeZ: zero ≤ anything, done.
+--   LeS: invert Le (succ n) c to get c = succ k', Le n k'; step down with the
+--        IH, rebuild with LeS at succ k', transport back to c along the Id
+--        via J (motive: Le (succ m) bb → Le (succ m) c; base: identity).
+:let le_trans = (\a. \b. \h. indrec Le (\a1. \b1. \_. Π(c : Nat). Π(_ : Le b1 c). Le a1 c : Π(a1 : Nat). Π(b1 : Nat). Le a1 b1 → Type) (\n. \c. \_. LeZ c : Π(n : Nat). Π(c : Nat). Π(_ : Le n c). Le zero c) (\m. \n. \h1. \ih. \c. \hnc. (\inv. J Nat c (\bb. \_. Π(_ : Le (succ m) bb). Le (succ m) c : Π(bb : Nat). Π(_ : Id Nat c bb). Type) (\x. x) (succ (fst inv)) (fst (snd inv)) (LeS m (fst inv) (ih (fst inv) (snd (snd inv)))) : Π(inv : LeInvT (succ n) c). Le (succ m) c) (le_inv (succ n) c hnc) : Π(m : Nat). Π(n : Nat). Π(h1 : Le m n). Π(ih : Π(c : Nat). Π(_ : Le n c). Le m c). Π(c : Nat). Π(_ : Le (succ n) c). Le (succ m) c) h : Π(a : Nat). Π(b : Nat). Π(_ : Le a b). Π(c : Nat). Π(_ : Le b c). Le a c)
+:i le_trans
+
+-- sem_e_mono : budget widening, generic in the value relation.
+-- The witness j, the reduction, and the value pass through untouched; only
+-- the budget certificate Le j k is rewritten, by transitivity.
+:let sem_e_mono = (\t. \V. \k. \k'. \le. \e. \h. (fst h, (le_trans (fst h) k (fst (snd h)) k' le, snd (snd h))) : Π(t : Ty). Π(V : Π(_ : Expr empty t). Type). Π(k : Nat). Π(k' : Nat). Π(_ : Le k k'). Π(e : Expr empty t). Π(_ : SemEV t V k e). SemEV t V k' e)
+:i sem_e_mono
+
+-- ── Monotonicity smoke tests ──────────────────────────────────────────────────
+:let n3 = (succ n2 : Nat)
+:let le12 = (LeS zero n1 (LeZ n1) : Le n1 n2)
+:let le23 = (LeS n1 n2 le12 : Le n2 n3)
+
+-- le_trans on concrete derivations — COMPUTES to the canonical LeS/LeZ form
+:let le13 = (le_trans n1 n2 le12 n3 le23 : Le n1 n3)
+:i le13
+
+-- widen seme_p (e_if2 within budget 1) to budget 2
+:let seme_p_w = (sem_e_mono TInt (SemV TInt rge2) n1 n2 le12 e_if2 seme_p : SemE TInt rge2 n2 e_if2)
+:i seme_p_w
+
+-- the lemmas COMPOSE: widen the budget, then cross the subtyping
+:let seme_q_w = (sub_sound TInt rge2 rge1 sub21 n2 e_if2 seme_p_w : SemE TInt rge1 n2 e_if2)
+:i seme_q_w
+
+-- ...and at the arrow: widen the function's budget, then cross SubFn
+:let seme_fn_w = (sem_e_mono (TFn TInt TInt) (SemV (TFn TInt TInt) rc12) n1 n2 le12 constTwo seme_fn : SemE (TFn TInt TInt) rc12 n2 constTwo)
+:let seme_fn_wq = (sub_sound (TFn TInt TInt) rc12 rc21 sub_fn21 n2 constTwo seme_fn_w : SemE (TFn TInt TInt) rc21 n2 constTwo)
+:i seme_fn_wq
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- V3-FUND — THE FUNDAMENTAL LEMMA (Pitch 1)
+-- A refined typing judgment (HasR) and the theorem that every derivation
+-- lands in the semantic relation. Scope note (d) in the header records what
+-- is deferred (RT_Lam/RT_Let — the substitution-lemma seam) and why.
+-- ══════════════════════════════════════════════════════════════════════════════
+
+-- ── Budget arithmetic ─────────────────────────────────────────────────────────
+-- The App and If cases CONCATENATE reductions, so budgets must add and the
+-- Le certificates must add with them. plus recurses on its first argument,
+-- so plus zero k = k and plus (succ m) k = succ (plus m k) hold by
+-- computation — steps_append's SN_refl/SN_cons cases land on the nose.
+
+:let plus = (\a. \b. natrec (\_. Nat : Π(_ : Nat). Type) b (\m. \ih. succ ih : Π(m : Nat). Π(_ : Nat). Nat) a : Π(a : Nat). Π(b : Nat). Nat)
+
+-- le_succ_r : a ≤ b → a ≤ b+1   (widen on the right, one step)
+:let le_succ_r = (\a. \b. \h. indrec Le (\a1. \b1. \_. Le a1 (succ b1) : Π(a1 : Nat). Π(b1 : Nat). Le a1 b1 → Type) (\n. LeZ (succ n) : Π(n : Nat). Le zero (succ n)) (\m. \n. \h1. \ih. LeS m (succ n) ih : Π(m : Nat). Π(n : Nat). Π(h1 : Le m n). Π(ih : Le m (succ n)). Le (succ m) (succ (succ n))) h : Π(a : Nat). Π(b : Nat). Π(_ : Le a b). Le a (succ b))
+
+-- le_plus_r : a ≤ b → a ≤ n+b   (widen on the right, n steps — by natrec)
+:let le_plus_r = (\n. \a. \b. \h. natrec (\n1. Le a (plus n1 b) : Π(n1 : Nat). Type) h (\m. \ih. le_succ_r a (plus m b) ih : Π(m : Nat). Π(ih : Le a (plus m b)). Le a (succ (plus m b))) n : Π(n : Nat). Π(a : Nat). Π(b : Nat). Π(_ : Le a b). Le a (plus n b))
+
+-- le_plus_mono : a ≤ b → c ≤ d → a+c ≤ b+d   (budgets add monotonically)
+:let le_plus_mono = (\a. \b. \h. indrec Le (\a1. \b1. \_. Π(c : Nat). Π(d : Nat). Π(_ : Le c d). Le (plus a1 c) (plus b1 d) : Π(a1 : Nat). Π(b1 : Nat). Le a1 b1 → Type) (\n. \c. \d. \h2. le_plus_r n c d h2 : Π(n : Nat). Π(c : Nat). Π(d : Nat). Π(h2 : Le c d). Le (plus zero c) (plus n d)) (\m. \n. \h1. \ih. \c. \d. \h2. LeS (plus m c) (plus n d) (ih c d h2) : Π(m : Nat). Π(n : Nat). Π(h1 : Le m n). Π(ih : Π(c : Nat). Π(d : Nat). Π(_ : Le c d). Le (plus m c) (plus n d)). Π(c : Nat). Π(d : Nat). Π(_ : Le c d). Le (plus (succ m) c) (plus (succ n) d)) h : Π(a : Nat). Π(b : Nat). Π(_ : Le a b). Π(c : Nat). Π(d : Nat). Π(_ : Le c d). Le (plus a c) (plus b d))
+:i le_plus_mono
+
+-- steps_append : reductions concatenate, counts add.
+:let steps_append = (\k1. \t. \ea. \eb. \s. indrec StepsN (\k. \t1. \e1. \e2. \_. Π(k2 : Nat). Π(e3 : Expr empty t1). Π(_ : StepsN k2 t1 e2 e3). StepsN (plus k k2) t1 e1 e3 : Π(k : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(_ : StepsN k t1 e1 e2). Type) (\t1. \e1. \k2. \e3. \s2. s2 : Π(t1 : Ty). Π(e1 : Expr empty t1). Π(k2 : Nat). Π(e3 : Expr empty t1). Π(s2 : StepsN k2 t1 e1 e3). StepsN (plus zero k2) t1 e1 e3) (\k. \t1. \e1. \e2. \e3. \st. \sn. \ih. \k2. \e4. \s2. SN_cons (plus k k2) t1 e1 e2 e4 st (ih k2 e4 s2) : Π(k : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(e3 : Expr empty t1). Π(st : Step t1 e1 e2). Π(sn : StepsN k t1 e2 e3). Π(ih : Π(k2 : Nat). Π(e4 : Expr empty t1). Π(_ : StepsN k2 t1 e3 e4). StepsN (plus k k2) t1 e2 e4). Π(k2 : Nat). Π(e4 : Expr empty t1). Π(_ : StepsN k2 t1 e3 e4). StepsN (plus (succ k) k2) t1 e1 e4) s : Π(k1 : Nat). Π(t : Ty). Π(ea : Expr empty t). Π(eb : Expr empty t). Π(_ : StepsN k1 t ea eb). Π(k2 : Nat). Π(e3 : Expr empty t). Π(_ : StepsN k2 t eb e3). StepsN (plus k1 k2) t ea e3)
+:i steps_append
+
+-- ── Congruence lifts: StepsN through the CBV evaluation frames ────────────────
+-- The App case must run the function's reduction UNDER  EApp _ x  and the
+-- argument's under  EApp fv _ ; the If case runs the condition's under
+-- EIf _ th el. indrec StepsN abstracts the type index t1, but the frames
+-- pin it (TFn a b, resp. TBool) — the le_inv trick again, lifted from Nat
+-- to Ty: the motive quantifies an  Id Ty t1 (TFn a b)  (resp. TBool) and
+-- coerces the endpoints along it (coe_e/step_coe below), so each case is
+-- stateable at abstract t1. At every use site the Id is refl and the
+-- coercions COMPUTE AWAY. lift_app2's frame is parametric in the stepping
+-- type, so it needs no coercion — it carries the function's IsVal instead
+-- (StepApp2 demands it: CBV evaluates the function first).
+
+:let coe_e = (\t1. \t2. \pf. \e. J Ty t1 (\ty. \pf1. Expr empty ty : Π(ty : Ty). Π(pf1 : Id Ty t1 ty). Type) e t2 pf : Π(t1 : Ty). Π(t2 : Ty). Π(pf : Id Ty t1 t2). Π(_ : Expr empty t1). Expr empty t2)
+
+:let step_coe = (\t1. \t2. \pf. \e. \e2. \st. J Ty t1 (\ty. \pf1. Step ty (coe_e t1 ty pf1 e) (coe_e t1 ty pf1 e2) : Π(ty : Ty). Π(pf1 : Id Ty t1 ty). Type) st t2 pf : Π(t1 : Ty). Π(t2 : Ty). Π(pf : Id Ty t1 t2). Π(e : Expr empty t1). Π(e2 : Expr empty t1). Π(_ : Step t1 e e2). Step t2 (coe_e t1 t2 pf e) (coe_e t1 t2 pf e2))
+
+:let lift_app1 = (\k. \tf. \f. \f2. \s. indrec StepsN (\k1. \t1. \ea. \eb. \_. Π(a : Ty). Π(b : Ty). Π(pf : Id Ty t1 (TFn a b)). Π(x : Expr empty a). StepsN k1 b (EApp empty a b (coe_e t1 (TFn a b) pf ea) x) (EApp empty a b (coe_e t1 (TFn a b) pf eb) x) : Π(k1 : Nat). Π(t1 : Ty). Π(ea : Expr empty t1). Π(eb : Expr empty t1). Π(_ : StepsN k1 t1 ea eb). Type) (\t1. \e1. \a. \b. \pf. \x. SN_refl b (EApp empty a b (coe_e t1 (TFn a b) pf e1) x) : Π(t1 : Ty). Π(e1 : Expr empty t1). Π(a : Ty). Π(b : Ty). Π(pf : Id Ty t1 (TFn a b)). Π(x : Expr empty a). StepsN zero b (EApp empty a b (coe_e t1 (TFn a b) pf e1) x) (EApp empty a b (coe_e t1 (TFn a b) pf e1) x)) (\k1. \t1. \e1. \e2. \e3. \st. \sn. \ih. \a. \b. \pf. \x. SN_cons k1 b (EApp empty a b (coe_e t1 (TFn a b) pf e1) x) (EApp empty a b (coe_e t1 (TFn a b) pf e2) x) (EApp empty a b (coe_e t1 (TFn a b) pf e3) x) (StepApp1 a b (coe_e t1 (TFn a b) pf e1) (coe_e t1 (TFn a b) pf e2) x (step_coe t1 (TFn a b) pf e1 e2 st)) (ih a b pf x) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(e3 : Expr empty t1). Π(st : Step t1 e1 e2). Π(sn : StepsN k1 t1 e2 e3). Π(ih : Π(a : Ty). Π(b : Ty). Π(pf : Id Ty t1 (TFn a b)). Π(x : Expr empty a). StepsN k1 b (EApp empty a b (coe_e t1 (TFn a b) pf e2) x) (EApp empty a b (coe_e t1 (TFn a b) pf e3) x)). Π(a : Ty). Π(b : Ty). Π(pf : Id Ty t1 (TFn a b)). Π(x : Expr empty a). StepsN (succ k1) b (EApp empty a b (coe_e t1 (TFn a b) pf e1) x) (EApp empty a b (coe_e t1 (TFn a b) pf e3) x)) s : Π(k : Nat). Π(tf : Ty). Π(f : Expr empty tf). Π(f2 : Expr empty tf). Π(_ : StepsN k tf f f2). Π(a : Ty). Π(b : Ty). Π(pf : Id Ty tf (TFn a b)). Π(x : Expr empty a). StepsN k b (EApp empty a b (coe_e tf (TFn a b) pf f) x) (EApp empty a b (coe_e tf (TFn a b) pf f2) x))
+
+:let lift_app2 = (\k. \ta. \xa. \xb. \s. indrec StepsN (\k1. \t1. \e1. \e2. \_. Π(b : Ty). Π(f : Expr empty (TFn t1 b)). Π(_ : IsVal (TFn t1 b) f). StepsN k1 b (EApp empty t1 b f e1) (EApp empty t1 b f e2) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(_ : StepsN k1 t1 e1 e2). Type) (\t1. \e1. \b. \f. \hv. SN_refl b (EApp empty t1 b f e1) : Π(t1 : Ty). Π(e1 : Expr empty t1). Π(b : Ty). Π(f : Expr empty (TFn t1 b)). Π(_ : IsVal (TFn t1 b) f). StepsN zero b (EApp empty t1 b f e1) (EApp empty t1 b f e1)) (\k1. \t1. \e1. \e2. \e3. \st. \sn. \ih. \b. \f. \hv. SN_cons k1 b (EApp empty t1 b f e1) (EApp empty t1 b f e2) (EApp empty t1 b f e3) (StepApp2 t1 b f e1 e2 hv st) (ih b f hv) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(e3 : Expr empty t1). Π(st : Step t1 e1 e2). Π(sn : StepsN k1 t1 e2 e3). Π(ih : Π(b : Ty). Π(f : Expr empty (TFn t1 b)). Π(_ : IsVal (TFn t1 b) f). StepsN k1 b (EApp empty t1 b f e2) (EApp empty t1 b f e3)). Π(b : Ty). Π(f : Expr empty (TFn t1 b)). Π(_ : IsVal (TFn t1 b) f). StepsN (succ k1) b (EApp empty t1 b f e1) (EApp empty t1 b f e3)) s : Π(k : Nat). Π(ta : Ty). Π(xa : Expr empty ta). Π(xb : Expr empty ta). Π(_ : StepsN k ta xa xb). Π(b : Ty). Π(f : Expr empty (TFn ta b)). Π(_ : IsVal (TFn ta b) f). StepsN k b (EApp empty ta b f xa) (EApp empty ta b f xb))
+
+:let lift_if = (\k. \tc. \ca. \cb. \s. indrec StepsN (\k1. \t1. \e1. \e2. \_. Π(t : Ty). Π(pf : Id Ty t1 TBool). Π(th : Expr empty t). Π(el : Expr empty t). StepsN k1 t (EIf empty t (coe_e t1 TBool pf e1) th el) (EIf empty t (coe_e t1 TBool pf e2) th el) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(_ : StepsN k1 t1 e1 e2). Type) (\t1. \e1. \t. \pf. \th. \el. SN_refl t (EIf empty t (coe_e t1 TBool pf e1) th el) : Π(t1 : Ty). Π(e1 : Expr empty t1). Π(t : Ty). Π(pf : Id Ty t1 TBool). Π(th : Expr empty t). Π(el : Expr empty t). StepsN zero t (EIf empty t (coe_e t1 TBool pf e1) th el) (EIf empty t (coe_e t1 TBool pf e1) th el)) (\k1. \t1. \e1. \e2. \e3. \st. \sn. \ih. \t. \pf. \th. \el. SN_cons k1 t (EIf empty t (coe_e t1 TBool pf e1) th el) (EIf empty t (coe_e t1 TBool pf e2) th el) (EIf empty t (coe_e t1 TBool pf e3) th el) (StepIf t (coe_e t1 TBool pf e1) (coe_e t1 TBool pf e2) th el (step_coe t1 TBool pf e1 e2 st)) (ih t pf th el) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(e3 : Expr empty t1). Π(st : Step t1 e1 e2). Π(sn : StepsN k1 t1 e2 e3). Π(ih : Π(t : Ty). Π(pf : Id Ty t1 TBool). Π(th : Expr empty t). Π(el : Expr empty t). StepsN k1 t (EIf empty t (coe_e t1 TBool pf e2) th el) (EIf empty t (coe_e t1 TBool pf e3) th el)). Π(t : Ty). Π(pf : Id Ty t1 TBool). Π(th : Expr empty t). Π(el : Expr empty t). StepsN (succ k1) t (EIf empty t (coe_e t1 TBool pf e1) th el) (EIf empty t (coe_e t1 TBool pf e3) th el)) s : Π(k : Nat). Π(tc : Ty). Π(ca : Expr empty tc). Π(cb : Expr empty tc). Π(_ : StepsN k tc ca cb). Π(t : Ty). Π(pf : Id Ty tc TBool). Π(th : Expr empty t). Π(el : Expr empty t). StepsN k t (EIf empty t (coe_e tc TBool pf ca) th el) (EIf empty t (coe_e tc TBool pf cb) th el))
+:i lift_app1
+:i lift_app2
+:i lift_if
+
+-- ── Refined contexts: RCtx / rlookup / GoodEnv / glookup ──────────────────────
+-- RCtx g  puts an RTy rider on every Γ entry — a telescope like SemCtx, so
+-- rlookup is a FUNCTION (fst/snd compute; the sem_lookup motive trick) and
+-- RT_Var can NAME it in the judgment: no side relation, no Id.
+-- GoodEnv g rg env  says every env entry is SemV-good at its rider — the
+-- semantic weight of "the context is refined." glookup extracts it, and is
+-- the entire proof of fund's Var case.
+
+:let RCtx = (\g. indrec Ctx (\g1. Type : Ctx → Type_1) (Unit : Type) (\t. \g1. \ih. Σ(_ : RTy t). ih : Π(t : Ty). Π(g1 : Ctx). Type → Type) g : Ctx → Type)
+
+:let rlookup = (\g. \t. \v. indrec Var (\g1. \t1. \_. RCtx g1 → RTy t1 : Π(g1 : Ctx). Π(t1 : Ty). Var g1 t1 → Type) (\g1. \t1. \rg. fst rg : Π(g1 : Ctx). Π(t1 : Ty). RCtx (ext t1 g1) → RTy t1) (\g1. \t1. \s. \v1. \ih. \rg. ih (snd rg) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Var g1 t1 → (RCtx g1 → RTy t1) → RCtx (ext s g1) → RTy t1) v : Π(g : Ctx). Π(t : Ty). Var g t → RCtx g → RTy t)
+
+:let GoodEnv = (\g. indrec Ctx (\g1. Π(_ : RCtx g1). Π(_ : SemCtx g1). Type : Ctx → Type_1) (\rg. \env. Unit : Π(_ : RCtx empty). Π(_ : SemCtx empty). Type) (\t. \g1. \ih. \rg. \env. Σ(_ : SemV t (fst rg) (fst env)). ih (snd rg) (snd env) : Π(t : Ty). Π(g1 : Ctx). Π(_ : Π(_ : RCtx g1). Π(_ : SemCtx g1). Type). Π(_ : RCtx (ext t g1)). Π(_ : SemCtx (ext t g1)). Type) g : Π(g : Ctx). Π(_ : RCtx g). Π(_ : SemCtx g). Type)
+
+:let glookup = (\g. \t. \v. indrec Var (\g1. \t1. \v1. Π(rg : RCtx g1). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg env). SemV t1 (rlookup g1 t1 v1 rg) (sem_lookup g1 t1 v1 env) : Π(g1 : Ctx). Π(t1 : Ty). Π(v1 : Var g1 t1). Type) (\g1. \t1. \rg. \env. \ge. fst ge : Π(g1 : Ctx). Π(t1 : Ty). Π(rg : RCtx (ext t1 g1)). Π(env : SemCtx (ext t1 g1)). Π(_ : GoodEnv (ext t1 g1) rg env). SemV t1 (rlookup (ext t1 g1) t1 (here g1 t1) rg) (sem_lookup (ext t1 g1) t1 (here g1 t1) env)) (\g1. \t1. \s. \v1. \ih. \rg. \env. \ge. ih (snd rg) (snd env) (snd ge) : Π(g1 : Ctx). Π(t1 : Ty). Π(s : Ty). Π(v1 : Var g1 t1). Π(_ : Π(rg : RCtx g1). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg env). SemV t1 (rlookup g1 t1 v1 rg) (sem_lookup g1 t1 v1 env)). Π(rg : RCtx (ext s g1)). Π(env : SemCtx (ext s g1)). Π(_ : GoodEnv (ext s g1) rg env). SemV t1 (rlookup (ext s g1) t1 (there g1 t1 s v1) rg) (sem_lookup (ext s g1) t1 (there g1 t1 s v1) env)) v : Π(g : Ctx). Π(t : Ty). Π(v : Var g t). Π(rg : RCtx g). Π(env : SemCtx g). Π(_ : GoodEnv g rg env). SemV t (rlookup g t v rg) (sem_lookup g t v env))
+:i glookup
+
+-- ── HasR : the refined typing judgment ────────────────────────────────────────
+-- Rides the intrinsic Expr the way RTy rides Ty: a derivation ON a term the
+-- base system already typed — refine.py's second pass, as a data type.
+--   RT_Int  — a literal at {v:Int|p} demands EVIDENCE that p holds of its
+--             payload (selfification modeled, like SubBase models the solver).
+--   RT_Bool — a boolean literal at the trivial rider.
+--   RT_Var  — the rider is rlookup's answer, definitionally.
+--   RT_App  — the function at RFn ra rb, the argument at EXACTLY ra:
+--             subsumption is NOT implicit here (control c3f) — it is a rule.
+--   RT_If   — both branches at the same r; the condition at RBool. NOT
+--             path-sensitive (header note (d)).
+--   RT_Sub  — subsumption, the calculus's Sub as a premise.
+-- Deferred (Pitch 2): RT_Lam and RT_Let — see note (d).
+
+data HasR : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(r : RTy t). Π(_ : Expr g t). Type where RT_Int : Π(g : Ctx). Π(rg : RCtx g). Π(p : Π(_ : Nat). Bool). Π(n : Nat). Π(_ : IsTrue (p n)). HasR g rg TInt (RInt p) (ELitInt g n) ; RT_Bool : Π(g : Ctx). Π(rg : RCtx g). Π(b : Bool). HasR g rg TBool RBool (ELitBool g b) ; RT_Var : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(v : Var g t). HasR g rg t (rlookup g t v rg) (EVar g t v) ; RT_App : Π(g : Ctx). Π(rg : RCtx g). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(f : Expr g (TFn a b)). Π(x : Expr g a). HasR g rg (TFn a b) (RFn a b ra rb) f → HasR g rg a ra x → HasR g rg b rb (EApp g a b f x) ; RT_If : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(r : RTy t). Π(c : Expr g TBool). Π(th : Expr g t). Π(el : Expr g t). HasR g rg TBool RBool c → HasR g rg t r th → HasR g rg t r el → HasR g rg t r (EIf g t c th el) ; RT_Sub : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(r : RTy t). Π(r2 : RTy t). Π(e : Expr g t). HasR g rg t r e → Sub t r r2 → HasR g rg t r2 e ; RT_Lam : Π(g : Ctx). Π(rg : RCtx g). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(body : Expr (ext a g) b). HasR (ext a g) (ra, rg) b rb body → HasR g rg (TFn a b) (RFn a b ra rb) (ELam g a b body) ; RT_Let : Π(g : Ctx). Π(rg : RCtx g). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(val : Expr g a). Π(body : Expr (ext a g) b). HasR g rg a ra val → HasR (ext a g) (ra, rg) b rb body → HasR g rg b rb (ELet g a b val body)
+
+-- ── fund : THE FUNDAMENTAL LEMMA ──────────────────────────────────────────────
+--   HasR g rg t r e  →  Π env. GoodEnv g rg env →  Σ k. SemE t r k (e[env])
+-- By indrec HasR. Case by case:
+--   RT_Int/RT_Bool — the literal is its own value at j = 0; the payload
+--     evidence (resp. the pinning refl) is the SemV witness.
+--   RT_Var — sub_ground computes to the env entry; glookup delivers its
+--     goodness; SN_refl at j = 0.
+--   RT_App — the heavy case. Run the function's reduction under the frame
+--     (lift_app1, Id at refl), then the argument's (lift_app2, under the
+--     function's IsVal from its SemV), then fire the applicative clause of
+--     SemV at the argument's value; concatenate with steps_append, add the
+--     budgets with le_plus_mono. The clause's Σ k' existential budget is
+--     absorbed into the output's Σ k — the inert-index decision at work.
+--   RT_If — the condition's SemV pins it to a literal bool; J transports
+--     the goal along the pinning, boolrec selects the branch, StepIfTrue/
+--     StepIfFalse costs the one step (LeS/succ), and the branch IH finishes;
+--     prepend the condition's lifted reduction.
+--   RT_Sub — sub_sound. The ladder below this line, used at the summit.
+
+-- ── Pitch 2 helpers: RT_Lam / RT_Let case machinery ──────────────────────────
+--   lb          — the opened lambda body (weaken the env, plug the bound var).
+--   lam_app_cert — β at the applicative clause: one StepBeta + fuse transport.
+--   fund_lam_case— RT_Lam: value at j=0, the arrow clause runs the body IH.
+--   lift_let     — StepsN congruence through the let scrutinee (StepLet).
+--   semv_isval   — a SemV value is an IsVal (needed to fire StepLetBeta).
+--   let_cert     — run the bound val to a value, StepLetBeta, fuse, body IH.
+--   fund_let_case— RT_Let: feed the val's value + goodness into the body IH.
+:let lb = (\a. \g1. \b. \body. \env. sub_open (ext a g1) b body (ext a empty) (EVar (ext a empty) a (here empty a), weaken_semctx_d a empty g1 env) : Π(a : Ty). Π(g1 : Ctx). Π(b : Ty). Π(body : Expr (ext a g1) b). Π(env : SemCtx g1). Expr (ext a empty) b)
+:let lam_app_cert = (\a. \g1. \b. \rb. \body. \env. \w. \hb. (succ (fst hb), (succ (fst (snd hb)), (LeS (fst (snd hb)) (fst hb) (fst (snd (snd hb))), (fst (snd (snd (snd hb))), (SN_cons (fst (snd hb)) b (EApp empty a b (ELam empty a b (lb a g1 b body env)) w) (sub_open (ext a empty) b (lb a g1 b body env) empty (w, star)) (fst (snd (snd (snd hb)))) (StepBeta a b (lb a g1 b body env) w) (J (Expr empty b) (sub_open (ext a g1) b body empty (w, env)) (\y1. \p1. StepsN (fst (snd hb)) b y1 (fst (snd (snd (snd hb)))) : Π(y1 : Expr empty b). Π(p1 : Id (Expr empty b) (sub_open (ext a g1) b body empty (w, env)) y1). Type) (fst (snd (snd (snd (snd hb))))) (sub_open (ext a empty) b (lb a g1 b body env) empty (w, star)) (sym (Expr empty b) (sub_open (ext a empty) b (lb a g1 b body env) empty (w, star)) (sub_open (ext a g1) b body empty (w, env)) (fuse a g1 b body w env))), snd (snd (snd (snd (snd hb))))))))) : Π(a : Ty). Π(g1 : Ctx). Π(b : Ty). Π(rb : RTy b). Π(body : Expr (ext a g1) b). Π(env : SemCtx g1). Π(w : Expr empty a). Π(hb : Σ(k : Nat). SemE b rb k (sub_ground (ext a g1) b body (w, env))). Σ(k2 : Nat). SemEV b (SemV b rb) k2 (EApp empty a b (ELam empty a b (lb a g1 b body env)) w))
+:let fund_lam_case = (\g1. \rg1. \a. \b. \ra. \rb. \body. \dbody. \ihbody. \env. \ge. (zero, (zero, (LeZ zero, (ELam empty a b (lb a g1 b body env), (SN_refl (TFn a b) (ELam empty a b (lb a g1 b body env)), (ValLam a b (lb a g1 b body env), \w. \hw. lam_app_cert a g1 b rb body env w (ihbody (w, env) (hw, ge)))))))) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(body : Expr (ext a g1) b). Π(dbody : HasR (ext a g1) (ra, rg1) b rb body). Π(ihbody : Π(env : SemCtx (ext a g1)). Π(_ : GoodEnv (ext a g1) (ra, rg1) env). Σ(k : Nat). SemE b rb k (sub_ground (ext a g1) b body env)). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE (TFn a b) (RFn a b ra rb) k (sub_ground g1 (TFn a b) (ELam g1 a b body) env))
+:let lift_let = (\k. \ta. \va. \vb. \s. indrec StepsN (\k1. \t1. \e1. \e2. \_. Π(b : Ty). Π(body : Expr (ext t1 empty) b). StepsN k1 b (ELet empty t1 b e1 body) (ELet empty t1 b e2 body) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(_ : StepsN k1 t1 e1 e2). Type) (\t1. \e1. \b. \body. SN_refl b (ELet empty t1 b e1 body) : Π(t1 : Ty). Π(e1 : Expr empty t1). Π(b : Ty). Π(body : Expr (ext t1 empty) b). StepsN zero b (ELet empty t1 b e1 body) (ELet empty t1 b e1 body)) (\k1. \t1. \e1. \e2. \e3. \st. \sn. \ih. \b. \body. SN_cons k1 b (ELet empty t1 b e1 body) (ELet empty t1 b e2 body) (ELet empty t1 b e3 body) (StepLet t1 b e1 e2 body st) (ih b body) : Π(k1 : Nat). Π(t1 : Ty). Π(e1 : Expr empty t1). Π(e2 : Expr empty t1). Π(e3 : Expr empty t1). Π(st : Step t1 e1 e2). Π(sn : StepsN k1 t1 e2 e3). Π(ih : Π(b : Ty). Π(body : Expr (ext t1 empty) b). StepsN k1 b (ELet empty t1 b e2 body) (ELet empty t1 b e3 body)). Π(b : Ty). Π(body : Expr (ext t1 empty) b). StepsN (succ k1) b (ELet empty t1 b e1 body) (ELet empty t1 b e3 body)) s : Π(k : Nat). Π(ta : Ty). Π(va : Expr empty ta). Π(vb : Expr empty ta). Π(_ : StepsN k ta va vb). Π(b : Ty). Π(body : Expr (ext ta empty) b). StepsN k b (ELet empty ta b va body) (ELet empty ta b vb body))
+:let semv_isval = (\t. \r. indrec RTy (\t1. \r1. Π(v : Expr empty t1). Π(_ : SemV t1 r1 v). IsVal t1 v : Π(t1 : Ty). Π(r1 : RTy t1). Type) (\p. \v. \h. J (Expr empty TInt) (ELitInt empty (fst h)) (\y1. \p1. IsVal TInt y1 : Π(y1 : Expr empty TInt). Π(p1 : Id (Expr empty TInt) (ELitInt empty (fst h)) y1). Type) (ValInt (fst h)) v (sym (Expr empty TInt) v (ELitInt empty (fst h)) (fst (snd h))) : Π(p : Π(_ : Nat). Bool). Π(v : Expr empty TInt). Π(_ : SemV TInt (RInt p) v). IsVal TInt v) (\v. \h. J (Expr empty TBool) (ELitBool empty (fst h)) (\y1. \p1. IsVal TBool y1 : Π(y1 : Expr empty TBool). Π(p1 : Id (Expr empty TBool) (ELitBool empty (fst h)) y1). Type) (ValBool (fst h)) v (sym (Expr empty TBool) v (ELitBool empty (fst h)) (snd h)) : Π(v : Expr empty TBool). Π(_ : SemV TBool RBool v). IsVal TBool v) (\a. \b. \ra. \iha. \rb. \ihb. \v. \h. fst h : Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(iha : Π(v : Expr empty a). Π(_ : SemV a ra v). IsVal a v). Π(rb : RTy b). Π(ihb : Π(v : Expr empty b). Π(_ : SemV b rb v). IsVal b v). Π(v : Expr empty (TFn a b)). Π(_ : SemV (TFn a b) (RFn a b ra rb) v). IsVal (TFn a b) v) r : Π(t : Ty). Π(r : RTy t). Π(v : Expr empty t). Π(_ : SemV t r v). IsVal t v)
+:let let_cert = (\a. \g1. \b. \ra. \rb. \val. \body. \env. \hval. \hbody. (plus (fst hval) (succ (fst hbody)), (plus (fst (snd hval)) (succ (fst (snd hbody))), (le_plus_mono (fst (snd hval)) (fst hval) (fst (snd (snd hval))) (succ (fst (snd hbody))) (succ (fst hbody)) (LeS (fst (snd hbody)) (fst hbody) (fst (snd (snd hbody)))), (fst (snd (snd (snd hbody))), (steps_append (fst (snd hval)) b (ELet empty a b (sub_ground g1 a val env) (lb a g1 b body env)) (ELet empty a b (fst (snd (snd (snd hval)))) (lb a g1 b body env)) (lift_let (fst (snd hval)) a (sub_ground g1 a val env) (fst (snd (snd (snd hval)))) (fst (snd (snd (snd (snd hval))))) b (lb a g1 b body env)) (succ (fst (snd hbody))) (fst (snd (snd (snd hbody)))) (SN_cons (fst (snd hbody)) b (ELet empty a b (fst (snd (snd (snd hval)))) (lb a g1 b body env)) (sub_open (ext a empty) b (lb a g1 b body env) empty ((fst (snd (snd (snd hval)))), star)) (fst (snd (snd (snd hbody)))) (StepLetBeta a b (fst (snd (snd (snd hval)))) (lb a g1 b body env) (semv_isval a ra (fst (snd (snd (snd hval)))) (snd (snd (snd (snd (snd hval))))))) (J (Expr empty b) (sub_open (ext a g1) b body empty ((fst (snd (snd (snd hval)))), env)) (\y1. \p1. StepsN (fst (snd hbody)) b y1 (fst (snd (snd (snd hbody)))) : Π(y1 : Expr empty b). Π(p1 : Id (Expr empty b) (sub_open (ext a g1) b body empty ((fst (snd (snd (snd hval)))), env)) y1). Type) (fst (snd (snd (snd (snd hbody))))) (sub_open (ext a empty) b (lb a g1 b body env) empty ((fst (snd (snd (snd hval)))), star)) (sym (Expr empty b) (sub_open (ext a empty) b (lb a g1 b body env) empty ((fst (snd (snd (snd hval)))), star)) (sub_open (ext a g1) b body empty ((fst (snd (snd (snd hval)))), env)) (fuse a g1 b body (fst (snd (snd (snd hval)))) env)))), snd (snd (snd (snd (snd hbody))))))))) : Π(a : Ty). Π(g1 : Ctx). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(val : Expr g1 a). Π(body : Expr (ext a g1) b). Π(env : SemCtx g1). Π(hval : Σ(k : Nat). SemE a ra k (sub_ground g1 a val env)). Π(hbody : Σ(k : Nat). SemE b rb k (sub_ground (ext a g1) b body ((fst (snd (snd (snd hval)))), env))). Σ(k : Nat). SemE b rb k (sub_ground g1 b (ELet g1 a b val body) env))
+:let fund_let_case = (\g1. \rg1. \a. \b. \ra. \rb. \val. \body. \dval. \ihval. \dbody. \ihbody. \env. \ge. (\hval. let_cert a g1 b ra rb val body env hval (ihbody ((fst (snd (snd (snd hval)))), env) ((snd (snd (snd (snd (snd hval))))), ge)) : Π(hval : Σ(k : Nat). SemE a ra k (sub_ground g1 a val env)). Σ(k : Nat). SemE b rb k (sub_ground g1 b (ELet g1 a b val body) env)) (ihval env ge) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(val : Expr g1 a). Π(body : Expr (ext a g1) b). Π(dval : HasR g1 rg1 a ra val). Π(ihval : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE a ra k (sub_ground g1 a val env)). Π(dbody : HasR (ext a g1) (ra, rg1) b rb body). Π(ihbody : Π(env : SemCtx (ext a g1)). Π(_ : GoodEnv (ext a g1) (ra, rg1) env). Σ(k : Nat). SemE b rb k (sub_ground (ext a g1) b body env)). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE b rb k (sub_ground g1 b (ELet g1 a b val body) env))
+
+:let fund = (\g. \rg. \t. \r. \e. \d. indrec HasR (\g1. \rg1. \t1. \r1. \e1. \_. Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 e1 env) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(e1 : Expr g1 t1). Π(_ : HasR g1 rg1 t1 r1 e1). Type) (\g1. \rg1. \p. \n. \ev. \env. \ge. (zero, (zero, (LeZ zero, (ELitInt empty n, (SN_refl TInt (ELitInt empty n), (n, (refl (ELitInt empty n), ev))))))) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(p : Π(_ : Nat). Bool). Π(n : Nat). Π(ev : IsTrue (p n)). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE TInt (RInt p) k (sub_ground g1 TInt (ELitInt g1 n) env)) (\g1. \rg1. \b1. \env. \ge. (zero, (zero, (LeZ zero, (ELitBool empty b1, (SN_refl TBool (ELitBool empty b1), (b1, refl (ELitBool empty b1))))))) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(b1 : Bool). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE TBool RBool k (sub_ground g1 TBool (ELitBool g1 b1) env)) (\g1. \rg1. \t1. \v1. \env. \ge. (zero, (zero, (LeZ zero, (sem_lookup g1 t1 v1 env, (SN_refl t1 (sem_lookup g1 t1 v1 env), glookup g1 t1 v1 rg1 env ge))))) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(v1 : Var g1 t1). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 (rlookup g1 t1 v1 rg1) k (sub_ground g1 t1 (EVar g1 t1 v1) env)) (\g1. \rg1. \a. \b. \ra. \rb. \f. \x. \df. \ihf. \dx. \ihx. \env. \ge. (\hf. \hx. (\hc. (plus (fst hf) (plus (fst hx) (fst hc)), (plus (fst (snd hf)) (plus (fst (snd hx)) (fst (snd hc))), (le_plus_mono (fst (snd hf)) (fst hf) (fst (snd (snd hf))) (plus (fst (snd hx)) (fst (snd hc))) (plus (fst hx) (fst hc)) (le_plus_mono (fst (snd hx)) (fst hx) (fst (snd (snd hx))) (fst (snd hc)) (fst hc) (fst (snd (snd hc)))), (fst (snd (snd (snd hc))), (steps_append (fst (snd hf)) b (EApp empty a b (sub_ground g1 (TFn a b) f env) (sub_ground g1 a x env)) (EApp empty a b (fst (snd (snd (snd hf)))) (sub_ground g1 a x env)) (lift_app1 (fst (snd hf)) (TFn a b) (sub_ground g1 (TFn a b) f env) (fst (snd (snd (snd hf)))) (fst (snd (snd (snd (snd hf))))) a b (refl (TFn a b)) (sub_ground g1 a x env)) (plus (fst (snd hx)) (fst (snd hc))) (fst (snd (snd (snd hc)))) (steps_append (fst (snd hx)) b (EApp empty a b (fst (snd (snd (snd hf)))) (sub_ground g1 a x env)) (EApp empty a b (fst (snd (snd (snd hf)))) (fst (snd (snd (snd hx))))) (lift_app2 (fst (snd hx)) a (sub_ground g1 a x env) (fst (snd (snd (snd hx)))) (fst (snd (snd (snd (snd hx))))) b (fst (snd (snd (snd hf)))) (fst (snd (snd (snd (snd (snd hf))))))) (fst (snd hc)) (fst (snd (snd (snd hc)))) (fst (snd (snd (snd (snd hc)))))), snd (snd (snd (snd (snd hc))))))))) : Π(hc : Σ(k2 : Nat). SemEV b (SemV b rb) k2 (EApp empty a b (fst (snd (snd (snd hf)))) (fst (snd (snd (snd hx)))))). Σ(k : Nat). SemE b rb k (sub_ground g1 b (EApp g1 a b f x) env)) (snd (snd (snd (snd (snd (snd hf))))) (fst (snd (snd (snd hx)))) (snd (snd (snd (snd (snd hx)))))) : Π(hf : Σ(k : Nat). SemE (TFn a b) (RFn a b ra rb) k (sub_ground g1 (TFn a b) f env)). Π(hx : Σ(k : Nat). SemE a ra k (sub_ground g1 a x env)). Σ(k : Nat). SemE b rb k (sub_ground g1 b (EApp g1 a b f x) env)) (ihf env ge) (ihx env ge) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(a : Ty). Π(b : Ty). Π(ra : RTy a). Π(rb : RTy b). Π(f : Expr g1 (TFn a b)). Π(x : Expr g1 a). Π(df : HasR g1 rg1 (TFn a b) (RFn a b ra rb) f). Π(ihf : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE (TFn a b) (RFn a b ra rb) k (sub_ground g1 (TFn a b) f env)). Π(dx : HasR g1 rg1 a ra x). Π(ihx : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE a ra k (sub_ground g1 a x env)). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE b rb k (sub_ground g1 b (EApp g1 a b f x) env)) (\g1. \rg1. \t1. \r1. \c. \th. \el. \dc. \ihc. \dth. \ihth. \del. \ihel. \env. \ge. (\hc. (\hb. (plus (fst hc) (fst hb), (plus (fst (snd hc)) (fst (snd hb)), (le_plus_mono (fst (snd hc)) (fst hc) (fst (snd (snd hc))) (fst (snd hb)) (fst hb) (fst (snd (snd hb))), (fst (snd (snd (snd hb))), (steps_append (fst (snd hc)) t1 (EIf empty t1 (sub_ground g1 TBool c env) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (EIf empty t1 (fst (snd (snd (snd hc)))) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (lift_if (fst (snd hc)) TBool (sub_ground g1 TBool c env) (fst (snd (snd (snd hc)))) (fst (snd (snd (snd (snd hc))))) t1 (refl TBool) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (fst (snd hb)) (fst (snd (snd (snd hb)))) (fst (snd (snd (snd (snd hb))))), snd (snd (snd (snd (snd hb))))))))) : Π(hb : Σ(k : Nat). SemE t1 r1 k (EIf empty t1 (fst (snd (snd (snd hc)))) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env))). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 (EIf g1 t1 c th el) env)) (J (Expr empty TBool) (fst (snd (snd (snd hc)))) (\x1. \pf1. Π(_ : Σ(k : Nat). SemE t1 r1 k (EIf empty t1 x1 (sub_ground g1 t1 th env) (sub_ground g1 t1 el env))). Σ(k : Nat). SemE t1 r1 k (EIf empty t1 (fst (snd (snd (snd hc)))) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) : Π(x1 : Expr empty TBool). Π(pf1 : Id (Expr empty TBool) (fst (snd (snd (snd hc)))) x1). Type) (\z. z) (ELitBool empty (fst (snd (snd (snd (snd (snd hc))))))) (snd (snd (snd (snd (snd (snd hc)))))) (boolrec (\b1. Σ(k : Nat). SemE t1 r1 k (EIf empty t1 (ELitBool empty b1) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) : Π(b1 : Bool). Type) ((\hth. (succ (fst hth), (succ (fst (snd hth)), (LeS (fst (snd hth)) (fst hth) (fst (snd (snd hth))), (fst (snd (snd (snd hth))), (SN_cons (fst (snd hth)) t1 (EIf empty t1 (ELitBool empty true) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (sub_ground g1 t1 th env) (fst (snd (snd (snd hth)))) (StepIfTrue t1 (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (fst (snd (snd (snd (snd hth))))), snd (snd (snd (snd (snd hth))))))))) : Π(hth : Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 th env)). Σ(k : Nat). SemE t1 r1 k (EIf empty t1 (ELitBool empty true) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env))) (ihth env ge)) ((\hel. (succ (fst hel), (succ (fst (snd hel)), (LeS (fst (snd hel)) (fst hel) (fst (snd (snd hel))), (fst (snd (snd (snd hel))), (SN_cons (fst (snd hel)) t1 (EIf empty t1 (ELitBool empty false) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (sub_ground g1 t1 el env) (fst (snd (snd (snd hel)))) (StepIfFalse t1 (sub_ground g1 t1 th env) (sub_ground g1 t1 el env)) (fst (snd (snd (snd (snd hel))))), snd (snd (snd (snd (snd hel))))))))) : Π(hel : Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 el env)). Σ(k : Nat). SemE t1 r1 k (EIf empty t1 (ELitBool empty false) (sub_ground g1 t1 th env) (sub_ground g1 t1 el env))) (ihel env ge)) (fst (snd (snd (snd (snd (snd hc)))))))) : Π(hc : Σ(k : Nat). SemE TBool RBool k (sub_ground g1 TBool c env)). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 (EIf g1 t1 c th el) env)) (ihc env ge) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(c : Expr g1 TBool). Π(th : Expr g1 t1). Π(el : Expr g1 t1). Π(dc : HasR g1 rg1 TBool RBool c). Π(ihc : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE TBool RBool k (sub_ground g1 TBool c env)). Π(dth : HasR g1 rg1 t1 r1 th). Π(ihth : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 th env)). Π(del : HasR g1 rg1 t1 r1 el). Π(ihel : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 el env)). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 (EIf g1 t1 c th el) env)) (\g1. \rg1. \t1. \r1. \r2. \e1. \d1. \ihd. \s1. \env. \ge. (\h1. (fst h1, sub_sound t1 r1 r2 s1 (fst h1) (sub_ground g1 t1 e1 env) (snd h1)) : Π(h1 : Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 e1 env)). Σ(k : Nat). SemE t1 r2 k (sub_ground g1 t1 e1 env)) (ihd env ge) : Π(g1 : Ctx). Π(rg1 : RCtx g1). Π(t1 : Ty). Π(r1 : RTy t1). Π(r2 : RTy t1). Π(e1 : Expr g1 t1). Π(d1 : HasR g1 rg1 t1 r1 e1). Π(ihd : Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r1 k (sub_ground g1 t1 e1 env)). Π(s1 : Sub t1 r1 r2). Π(env : SemCtx g1). Π(_ : GoodEnv g1 rg1 env). Σ(k : Nat). SemE t1 r2 k (sub_ground g1 t1 e1 env)) fund_lam_case fund_let_case d : Π(g : Ctx). Π(rg : RCtx g). Π(t : Ty). Π(r : RTy t). Π(e : Expr g t). Π(_ : HasR g rg t r e). Π(env : SemCtx g). Π(_ : GoodEnv g rg env). Σ(k : Nat). SemE t r k (sub_ground g t e env))
+:i fund
+
+-- ── Smoke tests: the summit computes ──────────────────────────────────────────
+
+-- closed instance: the literal 2 at {ge2}, empty everything
+:let d_lit = (RT_Int empty star ge2 n2 star : HasR empty star TInt rge2 (ELitInt empty n2))
+:let fund_lit = (fund empty star TInt rge2 (ELitInt empty n2) d_lit star star : Σ(k : Nat). SemE TInt rge2 k (sub_ground empty TInt (ELitInt empty n2) star))
+:i fund_lit
+
+-- THE SHOWCASE: f (if true then 2 else 3), with f : {ge2}→{ge2} a HYPOTHESIS
+-- (idInt enters through the environment — higher-order USE without RT_Lam).
+-- Every rule fires: Var (rlookup computes rid22), Bool, Int (payload evidence
+-- by computation), If (J + boolrec select the branch), App (both lifts, the
+-- applicative clause, budget arithmetic), and Sub weakens the result to {ge1}.
+:let gF = (ext (TFn TInt TInt) empty : Ctx)
+:let rgF = ((rid22, star) : RCtx gF)
+:let envF = ((idInt, star) : SemCtx gF)
+:let geF = ((semv_id, star) : GoodEnv gF rgF envF)
+:let vF = (here empty (TFn TInt TInt) : Var gF (TFn TInt TInt))
+
+:let d_f = (RT_Var gF rgF (TFn TInt TInt) vF : HasR gF rgF (TFn TInt TInt) rid22 (EVar gF (TFn TInt TInt) vF))
+:let d_arg = (RT_If gF rgF TInt rge2 (ELitBool gF true) (ELitInt gF n2) (ELitInt gF n3) (RT_Bool gF rgF true) (RT_Int gF rgF ge2 n2 star) (RT_Int gF rgF ge2 n3 star) : HasR gF rgF TInt rge2 (EIf gF TInt (ELitBool gF true) (ELitInt gF n2) (ELitInt gF n3)))
+:let eF = (EApp gF TInt TInt (EVar gF (TFn TInt TInt) vF) (EIf gF TInt (ELitBool gF true) (ELitInt gF n2) (ELitInt gF n3)) : Expr gF TInt)
+:let d_app = (RT_App gF rgF TInt TInt rge2 rge2 (EVar gF (TFn TInt TInt) vF) (EIf gF TInt (ELitBool gF true) (ELitInt gF n2) (ELitInt gF n3)) d_f d_arg : HasR gF rgF TInt rge2 eF)
+:let d_sub = (RT_Sub gF rgF TInt rge2 rge1 eF d_app sub21 : HasR gF rgF TInt rge1 eF)
+
+-- run it: the certificate COMPUTES — the condition steps, the argument
+-- lands at 2, β fires through the applicative clause, and the payload
+-- arrives good at the WEAKENED {ge1}
+:let fund_run = (fund gF rgF TInt rge1 eF d_sub envF geF : Σ(k : Nat). SemE TInt rge1 k (sub_ground gF TInt eF envF))
+:i fund_run
+
+-- ── Pitch 2 smokes: λ-introduction and let, closed, through fund ───────────────
+
+-- the bound variable, shared by both smokes (rlookup at `here` computes to rge2)
+:let idbody = (EVar (ext TInt empty) TInt (here empty TInt) : Expr (ext TInt empty) TInt)
+:let d_idvar = (RT_Var (ext TInt empty) (rge2, star) TInt (here empty TInt) : HasR (ext TInt empty) (rge2, star) TInt rge2 idbody)
+
+-- RT_Lam: (λx:{ge2}. x) : {ge2}→{ge2}. fund hands back a value at j=0 whose
+-- arrow clause runs the body IH — the certificate COMPUTES to the identity.
+:let d_idlam = (RT_Lam empty star TInt TInt rge2 rge2 idbody d_idvar : HasR empty star (TFn TInt TInt) (RFn TInt TInt rge2 rge2) (ELam empty TInt TInt idbody))
+:let fund_idlam = (fund empty star (TFn TInt TInt) (RFn TInt TInt rge2 rge2) (ELam empty TInt TInt idbody) d_idlam star star : Σ(k : Nat). SemE (TFn TInt TInt) (RFn TInt TInt rge2 rge2) k (sub_ground empty (TFn TInt TInt) (ELam empty TInt TInt idbody) star))
+:i fund_idlam
+
+-- RT_Let: (let x = 2 in x) : {ge2}. the bound val runs to a value (semv_isval),
+-- StepLetBeta fires, fuse transports, and the body IH finishes at x ↦ 2.
+:let d_let = (RT_Let empty star TInt TInt rge2 rge2 (ELitInt empty n2) idbody d_lit d_idvar : HasR empty star TInt rge2 (ELet empty TInt TInt (ELitInt empty n2) idbody))
+:let fund_let = (fund empty star TInt rge2 (ELet empty TInt TInt (ELitInt empty n2) idbody) d_let star star : Σ(k : Nat). SemE TInt rge2 k (sub_ground empty TInt (ELet empty TInt TInt (ELitInt empty n2) idbody) star))
+:i fund_let

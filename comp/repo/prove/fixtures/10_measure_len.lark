@@ -1,0 +1,51 @@
+module MeasureLen
+
+(* the measure DECLARATION.  What it buys, exactly, and no more.
+
+   Under the first version this file was not an unproved program; it was a REFINEMENT ERROR.
+   `len` had no declaration, so it had no sort, so `len(v) > 0` was not a
+   predicate at all — `_int_term`'s sort guard threw it out, and rightly: an
+   unsorted symbol has no business in an ordering.  The only names a the first version predicate
+   could apply were the program's own functions, which is a strange rule when you
+   say it out loud, and the strangeness is what the measure declaration removes.
+
+   So a later version's win is smaller than it sounds and bigger than it looks: DECLARING the
+   measure is what lets its name into a contract in the first place.  The word
+   `len` now means something to the logic — it is an Int-sorted symbol, and the
+   checker knows one equation per constructor for it.
+
+   a later version does NOT hand those equations to the solver.  That is a later version, and this file
+   is its thermometer.  The call in `main` owes exactly one obligation —
+
+       len(Cons(3, Cons(4, Nil))) > 0
+
+   — and it is UNPROVED, honestly: the equations exist, the solver has not been
+   shown them, so `len` is still nothing but a symbol.  It is true, it is not
+   provable, and the checker says so rather than guessing.  The day a later version
+   instantiates the equations at the terms the program mentions, this file goes
+   green with no other change — which is what makes it a test and not a comment.
+
+   And it RUNS.  Measures are ghost: they live in `Program.measures`, never in
+   `Program.decls`, so infer.py and the CEK machine never see one.  Erasure by
+   construction, with the corollary for free — calling `len` from real code is an
+   unbound-name error from HM, not a rule anybody had to write.
+
+   Expected output:
+     3 *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+fn head(xs : {v : List(Int) | len(v) > 0}) : Int =
+  match xs with
+  | Nil        => 0
+  | Cons(x, _) => x
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(head(Cons(3, Cons(4, Nil)))))

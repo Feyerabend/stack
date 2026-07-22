@@ -1,0 +1,23 @@
+(* Test 14 — String concatenation and show for mixed types
+   Covers: string + string via __str_concat, show(Int) + show(Float) in concat,
+           string concat in recursive function (counts down).
+   Expected output:
+     hello world
+     hello world again
+     x=42 y=3.14
+     5:4:3:2:1: *)
+
+module StringOps
+
+fn repeat_sep(sep : String, n : Int) : String =
+  if n <= 0 then ""
+  else int_to_string(n) + sep + repeat_sep(sep, n - 1)
+
+fn main(io : IO) : IO =
+  let s1  = "hello" in
+  let s2  = " world" in
+  let io  = print(io, s1 + s2) in
+  let io  = print(io, s1 + s2 + " again") in
+  let msg = "x=" + show(42) + " y=" + show(3.14) in
+  let io  = print(io, msg) in
+  print(io, repeat_sep(":", 5))

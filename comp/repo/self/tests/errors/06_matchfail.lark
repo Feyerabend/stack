@@ -1,0 +1,18 @@
+(* Error test 06 — Runtime match failure: non-exhaustive match with ADT
+   The match only handles Circle; calling with Square triggers a runtime
+   failure.  All three backends must exit non-zero.
+   Expected: RuntimeError: non-exhaustive match *)
+
+module MatchFail2
+
+type Shape =
+  | Circle of Float
+  | Square of Float
+
+fn area(s : Shape) : Float =
+  match s with
+  | Circle(r) => 3.14159 * r * r
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(area(Square(2.0))))

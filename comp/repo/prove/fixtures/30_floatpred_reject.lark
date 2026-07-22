@@ -1,0 +1,31 @@
+module FloatPredReject
+
+(* A DIFFERENT CONTEXT, A DIFFERENT REFUSAL.  13, 19 and 29 all show a Float going
+   silent in PROGRAM position — a guard that constrains nothing, a division that goes
+   honestly unproved.  Silence is the right answer there because a program-position
+   condition is allowed to say nothing.
+
+   A REFINEMENT is not.  `{v : Float | v > 0.0}` is a CLAIM the checker would have to
+   read and carry as a hypothesis at every call — and a Float is precisely the value it
+   may not read.  So here the checker does not go silent; it REJECTS the declaration.
+   The two are the same principle (a Float is unspeakable) reached by two different
+   roads: in program position the road is `term_opt`, which returns None and lets the
+   obligation go unproved; in a predicate the road is the STRICT `formula()` at the
+   declaration site, which has no None to fall back on and raises.
+
+   This is the pedagogical half of the interlude: there is no single "Float rule."
+   The one fact — no term is ever built at sort FLOAT — surfaces as SILENCE where a
+   formula is optional and as an ERROR where a formula is mandatory.  A checker that
+   returned `true` here instead of raising would be the `or Top()` mistake (false
+   proofs #2/#7) in the refinement language itself.
+
+   Note the predicate mentions the float literal `0.0`, but it need not: `{v : Float |
+   v == v}` is rejected for the same reason, because the BINDER is a Float and the
+   binder alone is already unspeakable.
+
+   Expected: refinement error — the predicate is not in the decidable fragment. *)
+
+fn scale(x : {v : Float | v > 0.0}) : Int = 7
+
+fn main(io : IO) : IO =
+  print(io, show(scale(1.5)))

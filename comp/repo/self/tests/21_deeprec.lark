@@ -1,0 +1,17 @@
+(* Test 21 — Deep non-tail recursion
+   Covers: recursion that is NOT tail-recursive (the addition is performed
+           after the recursive call), building up continuation frames in the
+           CEK machine and stack frames in the RV32 VM.  Depth 50 verifies
+           that all backends handle a non-trivial continuation/stack depth
+           without overflow.
+   Expected output:
+     1275 *)
+
+module DeepRec
+
+fn sum_range(lo : Int, hi : Int) : Int =
+  if lo > hi then 0
+  else lo + sum_range(lo + 1, hi)
+
+fn main(io : IO) : IO =
+  print(io, show(sum_range(1, 50)))

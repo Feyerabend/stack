@@ -1,0 +1,35 @@
+module MinimumUnsafe
+
+(* The mutant of 25_minimum_safe.lark, and the change is one argument: `main` calls
+   `min_pos(5, 0)` rather than `min_pos(5, 2)`.
+
+   `min_pos`'s second parameter is `{v : Int | v > 0}`, so the call owes `0 > 0` — and
+   that is FALSE.  The obligation must go UNPROVED.  This is the false-PRECONDITION
+   direction, the same shape as the Bool-measure and polymorphic-list rungs: the axiom
+   over `min` is honest in the BODY of `min_pos` (its result really is positive when
+   both arguments are), and the only way to reach a non-positive minimum is to lie at
+   the CALL about what you are handing it.
+
+   Were it admitted, the detonation is real: `min(5, 0)` is `0`, `m` is `0`, and `main`
+   would evaluate `100 / 0`.  The `{v > 0}` precondition is the only thing standing
+   between the checker and that division.
+
+   The other five obligations are unchanged and still prove — `min_le`, `min_pos`'s own
+   body, `max_ge`, the first argument `5 > 0`, and the division `100 / m` (which reads
+   `min_pos`'s declared `{v > 0}` result) — so exactly one obligation flips, which is
+   what makes the pair a thermometer and not a coin flip.
+
+   Expected: 1 of 6 obligations unproved. *)
+
+fn min_le(a : Int, b : Int) : {v : Int | v <= a and v <= b} =
+  min(a, b)
+
+fn min_pos(a : {v : Int | v > 0}, b : {v : Int | v > 0}) : {v : Int | v > 0} =
+  min(a, b)
+
+fn max_ge(a : Int, b : Int) : {v : Int | v >= a and v >= b} =
+  max(a, b)
+
+fn main(io : IO) : IO =
+  let m = min_pos(5, 0) in
+  print(io, show(100 / m))

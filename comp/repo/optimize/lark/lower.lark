@@ -1,0 +1,1190 @@
+(* lower.lark — Lark's typed-AST → TAC lowerer, written in Lark.
+   (the port of oracle/lower.py.)
+
+   Pipeline position (per lower.py):
+       tast.lark  →  lower.lark  →  tac.lark  →  emit_tac_c.lark  →  C text
+
+   lower.py is a mutable `Lowerer` class; this port threads that state PURELY:
+
+     • The per-Function instruction stream + fresh/label counter is threaded as
+       a `Function` (tac.lark's tacFresh/tacLabel/tacEmit return an updated one).
+     • The read-only program tables — type_tags, trait_impls, global_lets,
+       show_impls, global_arity — become an `LCtx` record, computed once up front.
+     • The genuinely-mutable lowerer state — the growing global-fnc name set, the
+       lambda counter, and the list of lifted closure functions — becomes an
+       `LSt` record, threaded through every lowering that can lift a lambda.
+
+   Every lowering therefore has the shape  (…, ctx : LCtx, fnc : Function,
+   st : LSt) -> (Operand, Function, LSt): it reads ctx, emits into fnc, and hands
+   back the updated fnc + st.  This mirrors lower.py statement-for-statement, so
+   the fresh/label counter increments and the emitted instruction order — hence
+   the byte-identical tacPretty output — match tac.py + lower.py exactly.
+
+   Design notes (the pipeline is assembled by CONCATENATION):
+     parse.lark  gives  Val / Maybe / Just / Nothing
+     types.lark  gives  Mono (MVar/MCon/MApp/MFn/MTup), strEq, memberStr
+     tast.lark   gives  the typed AST (TExpr/TPat/TDecl/TVariant/TProgram)
+     tac.lark    gives  the TAC IR + tacFresh/tacLabel/tacEmit + tacPretty
+   So the differential (lower_difftest.py) concatenates lex+parse+types+tast+
+   tac+lower.  Generic helpers are `lw`-prefixed to dodge name clashes; tac's
+   pretty was renamed `tacPretty` so types.lark's Mono `pretty` can co-exist.
+
+   Run (differential):  harness/lower_difftest.py   (make lowertest)  *)
+
+module Lower
+
+
+(* ── Lowerer state (the pure record replacing lower.py's mutable fields) ────── *)
+
+(* Read-only program tables, computed once by buildCtx:
+     tags       type_name  -> constructor tag names          (_type_tags)
+     traitImpls method_name -> for-types (appearance order)   (_trait_impls)
+     lets       top-level let names                           (_global_lets)
+     showImpls  type_name  -> "show$Type"                     (_show_impls)
+     arity      user fnc / impl-method name -> #params         (_global_arity) *)
+type LCtx =
+  | LCtx of List((String, List(String))),
+            List((String, List(String))),
+            List(String),
+            List((String, String)),
+            List((String, Int))
+
+(* Threaded mutable state:
+     globalFns   builtins + fnc/impl/trait-method + lifted-lambda names
+     lambdaCtr   next lifted-lambda counter (drives <fnc>$lam<n>)
+     lifted      lifted closure functions, MOST-RECENT-FIRST (flushed reversed) *)
+type LSt = | LSt of List(String), Int, List(Function)
+
+impl Copy for LCtx = {}
+impl Copy for LSt  = {}
+
+
+(* ── Small list/string helpers (lw-prefixed to avoid concat collisions) ─────── *)
+
+fn lwAppend(a : List(String), b : List(String)) : List(String) =
+  match a with
+  | Nil           => b
+  | Cons(x, rest) => Cons(x, lwAppend(rest, b))
+  end
+
+fn lwAppendFns(a : List(Function), b : List(Function)) : List(Function) =
+  match a with
+  | Nil           => b
+  | Cons(x, rest) => Cons(x, lwAppendFns(rest, b))
+  end
+
+fn lwAppendArity(a : List((String, Int)), b : List((String, Int))) : List((String, Int)) =
+  match a with
+  | Nil           => b
+  | Cons(x, rest) => Cons(x, lwAppendArity(rest, b))
+  end
+
+fn reverseFnsGo(a : List(Function), acc : List(Function)) : List(Function) =
+  match a with
+  | Nil           => acc
+  | Cons(x, rest) => reverseFnsGo(rest, Cons(x, acc))
+  end
+
+fn reverseFns(a : List(Function)) : List(Function) = reverseFnsGo(a, Nil)
+
+fn insertStrU(x : String, xs : List(String)) : List(String) =
+  if memberStr(x, xs) then xs else Cons(x, xs)
+
+fn unionStrU(xs : List(String), ys : List(String)) : List(String) =
+  match xs with
+  | Nil           => ys
+  | Cons(x, rest) => insertStrU(x, unionStrU(rest, ys))
+  end
+
+(* Lexicographic (code-point) string order — mirrors Python's `sorted(list[str])`
+   used for the free-variable capture order (lower.py `free = sorted(...)`). *)
+fn strLtFrom(a : String, b : String, i : Int, la : Int, lb : Int) : Bool =
+  if i >= la then (if i >= lb then false else true)
+  else if i >= lb then false
+  else
+    let ca = string_index(a, i) in
+    let cb = string_index(b, i) in
+    if ca == cb then strLtFrom(a, b, i + 1, la, lb)
+    else if ca < cb then true else false
+
+fn strLt(a : String, b : String) : Bool =
+  strLtFrom(a, b, 0, string_length(a), string_length(b))
+
+fn insSorted(x : String, xs : List(String)) : List(String) =
+  match xs with
+  | Nil           => Cons(x, Nil)
+  | Cons(h, rest) => if strLt(x, h) then Cons(x, Cons(h, rest))
+                     else Cons(h, insSorted(x, rest))
+  end
+
+fn sortStr(xs : List(String)) : List(String) =
+  match xs with
+  | Nil           => Nil
+  | Cons(x, rest) => insSorted(x, sortStr(rest))
+  end
+
+
+(* ── Builtin names (lower.py `_BUILTINS`) ─────────────────────────────────── *)
+
+let lwBuiltins : List(String) =
+  Cons("print", Cons("read", Cons("read_all", Cons("show",
+  Cons("int_to_float", Cons("float_to_int", Cons("int_to_string", Cons("float_to_string",
+  Cons("__show_float", Cons("__show_bool",
+  Cons("__float_add", Cons("__float_sub", Cons("__float_mul", Cons("__float_div",
+  Cons("__float_lt", Cons("__float_le", Cons("__float_gt", Cons("__float_ge",
+  Cons("__str_concat",
+  Cons("string_length",
+  Cons("int_abs", Cons("float_abs", Cons("float_sqrt", Cons("float_floor", Cons("float_ceil",
+  Cons("string_index", Cons("string_slice", Cons("char_to_string", Cons("float_to_bits",
+  Cons("string_to_int", Cons("string_to_float",
+  Nil)))))))))))))))))))))))))))))))
+
+fn isBuiltinName(n : String) : Bool = memberStr(n, lwBuiltins)
+
+
+(* ── Assoc-list accessors over the ctx tables ─────────────────────────────── *)
+
+fn lwAssocTags(xs : List((String, List(String))), n : String) : List(String) =
+  match xs with
+  | Nil            => Nil
+  | Cons((k, v), r) => if strEq(k, n) then v else lwAssocTags(r, n)
+  end
+
+fn lwAssocInt(xs : List((String, Int)), n : String) : Maybe(Int) =
+  match xs with
+  | Nil            => Nothing
+  | Cons((k, v), r) => if strEq(k, n) then Just(v) else lwAssocInt(r, n)
+  end
+
+fn lwAssocStr(xs : List((String, String)), n : String) : Maybe(String) =
+  match xs with
+  | Nil            => Nothing
+  | Cons((k, v), r) => if strEq(k, n) then Just(v) else lwAssocStr(r, n)
+  end
+
+fn lwAssocStrForce(xs : List((String, String)), n : String) : String =
+  match xs with
+  | Nil            => ""
+  | Cons((k, v), r) => if strEq(k, n) then v else lwAssocStrForce(r, n)
+  end
+
+fn ctxTags(ctx : LCtx, n : String) : List(String) =
+  match ctx with | LCtx(tags, _, _, _, _) => lwAssocTags(tags, n) end
+
+fn ctxArity(ctx : LCtx, n : String) : Maybe(Int) =
+  match ctx with | LCtx(_, _, _, _, ar) => lwAssocInt(ar, n) end
+
+fn ctxShowImpl(ctx : LCtx, n : String) : Maybe(String) =
+  match ctx with | LCtx(_, _, _, si, _) => lwAssocStr(si, n) end
+
+fn ctxGlobalLets(ctx : LCtx) : List(String) =
+  match ctx with | LCtx(_, _, lets, _, _) => lets end
+
+fn ctxIsGlobalLet(ctx : LCtx, n : String) : Bool = memberStr(n, ctxGlobalLets(ctx))
+
+fn ctxTraitImpls(ctx : LCtx) : List((String, List(String))) =
+  match ctx with | LCtx(_, ti, _, _, _) => ti end
+
+
+(* ── LSt accessors (LSt is Copy, so reads don't consume the threaded value) ── *)
+
+fn stGlobalFns(st : LSt) : List(String) = match st with | LSt(gf, _, _) => gf end
+
+fn stHasGlobalFn(st : LSt, n : String) : Bool = memberStr(n, stGlobalFns(st))
+
+fn stAddGlobalFn(st : LSt, n : String) : LSt =
+  match st with | LSt(gf, lc, lf) => LSt(Cons(n, gf), lc, lf) end
+
+(* Returns the CURRENT counter (lam_name uses it) and bumps for next time. *)
+fn stBumpLambda(st : LSt) : (Int, LSt) =
+  match st with | LSt(gf, lc, lf) => (lc, LSt(gf, lc + 1, lf)) end
+
+fn stAddLifted(st : LSt, f : Function) : LSt =
+  match st with | LSt(gf, lc, lf) => LSt(gf, lc, Cons(f, lf)) end
+
+fn fnNameOf(f : Function) : String = match f with | Function(nm, _, _, _) => nm end
+
+
+(* ── Literal payload → TAC constant (parse.lark Val → tac.lark ConstVal) ────── *)
+
+fn valToConst(v : Val) : ConstVal =
+  match v with
+  | VInt(s)   => CInt(s)
+  | VFloat(s) => CFloat(s)
+  | VStr(s)   => CStr(s)
+  | VBool(b)  => CBool(b)
+  | VUnit     => CUnit
+  end
+
+
+(* ── Type-directed operator routing (lower.py TBinOp arm) ─────────────────── *)
+
+fn texprTyp(e : TExpr) : Mono =
+  match e with
+  | TLit(_, t)       => t
+  | TVar(_, t)       => t
+  | TCon(_, t)       => t
+  | TTupleExpr(_, t) => t
+  | TApp(_, _, t)    => t
+  | TBinOp(_, _, _, t) => t
+  | TUnaryOp(_, _, t)  => t
+  | TLetExpr(_, _, _, t) => t
+  | TIfExpr(_, _, _, t)  => t
+  | TMatchExpr(_, _, t)  => t
+  | TLambda(_, _, t)     => t
+  end
+
+fn isMConNamed(t : Mono, name : String) : Bool =
+  match t with | MCon(n) => strEq(n, name) | _ => false end
+
+fn isFloatT(t : Mono) : Bool  = isMConNamed(t, "Float")
+fn isStringT(t : Mono) : Bool = isMConNamed(t, "String")
+fn isBoolT(t : Mono) : Bool   = isMConNamed(t, "Bool")
+
+fn isArithOp(op : String) : Bool =
+  strEq(op, "+") or strEq(op, "-") or strEq(op, "*") or strEq(op, "/")
+
+fn isCmpOp(op : String) : Bool =
+  strEq(op, "<") or strEq(op, "<=") or strEq(op, ">") or strEq(op, ">=")
+
+fn floatArithName(op : String) : String =
+  if strEq(op, "+") then "__float_add"
+  else if strEq(op, "-") then "__float_sub"
+  else if strEq(op, "*") then "__float_mul"
+  else "__float_div"
+
+fn floatCmpName(op : String) : String =
+  if strEq(op, "<") then "__float_lt"
+  else if strEq(op, "<=") then "__float_le"
+  else if strEq(op, ">") then "__float_gt"
+  else "__float_ge"
+
+fn mapAndOr(op : String) : String =
+  if strEq(op, "and") then "&&" else if strEq(op, "or") then "||" else op
+
+
+(* ── Free-variable analysis (lower.py _free / _pat_bound) ─────────────────── *)
+
+fn lwParamNames(ps : List((String, Mono))) : List(String) =
+  match ps with
+  | Nil            => Nil
+  | Cons((n, _), r) => Cons(n, lwParamNames(r))
+  end
+
+fn lwPatBound(p : TPat) : List(String) =
+  match p with
+  | TPWild(_)         => Nil
+  | TPLit(_, _)       => Nil
+  | TPVar(n, _)       => Cons(n, Nil)
+  | TPCon(_, subs, _) => lwPatBoundList(subs)
+  | TPTuple(subs, _)  => lwPatBoundList(subs)
+  end
+
+fn lwPatBoundList(ps : List(TPat)) : List(String) =
+  match ps with
+  | Nil           => Nil
+  | Cons(p, rest) => unionStrU(lwPatBound(p), lwPatBoundList(rest))
+  end
+
+fn lwFreeExpr(e : TExpr, bound : List(String)) : List(String) =
+  match e with
+  | TVar(n, _)          => if memberStr(n, bound) then Nil else Cons(n, Nil)
+  | TCon(_, _)          => Nil
+  | TLit(_, _)          => Nil
+  | TTupleExpr(es, _)   => lwFreeList(es, bound)
+  | TApp(f, args, _)    => unionStrU(lwFreeExpr(f, bound), lwFreeList(args, bound))
+  | TBinOp(_, l, r, _)  => unionStrU(lwFreeExpr(l, bound), lwFreeExpr(r, bound))
+  | TUnaryOp(_, x, _)   => lwFreeExpr(x, bound)
+  | TLetExpr(n, v, b, _) =>
+      unionStrU(lwFreeExpr(v, bound), lwFreeExpr(b, Cons(n, bound)))
+  | TIfExpr(c, t, e2, _) =>
+      unionStrU(lwFreeExpr(c, bound), unionStrU(lwFreeExpr(t, bound), lwFreeExpr(e2, bound)))
+  | TMatchExpr(s, arms, _) =>
+      unionStrU(lwFreeExpr(s, bound), lwFreeArms(arms, bound))
+  | TLambda(params, b, _) =>
+      lwFreeExpr(b, lwAppend(lwParamNames(params), bound))
+  end
+
+fn lwFreeList(es : List(TExpr), bound : List(String)) : List(String) =
+  match es with
+  | Nil           => Nil
+  | Cons(e, rest) => unionStrU(lwFreeExpr(e, bound), lwFreeList(rest, bound))
+  end
+
+fn lwFreeArms(arms : List((TPat, TExpr)), bound : List(String)) : List(String) =
+  match arms with
+  | Nil                   => Nil
+  | Cons((pat, body), rest) =>
+      unionStrU(lwFreeExpr(body, lwAppend(lwPatBound(pat), bound)),
+                lwFreeArms(rest, bound))
+  end
+
+
+(* ── Env helpers ──────────────────────────────────────────────────────────── *)
+
+fn lwParamEnv(ns : List(String)) : List((String, Operand)) =
+  match ns with
+  | Nil           => Nil
+  | Cons(n, rest) => Cons((n, OTmp(Tmp(n))), lwParamEnv(rest))
+  end
+
+fn lwEnvGet(env : List((String, Operand)), n : String) : Maybe(Operand) =
+  match env with
+  | Nil            => Nothing
+  | Cons((k, v), r) => if strEq(k, n) then Just(v) else lwEnvGet(r, n)
+  end
+
+(* Two-element operand list.  Built through an annotated helper on purpose:
+   inside lowerExpr the two operands come from monomorphically-recursive self
+   calls, so their types are still unresolved variables during body inference.
+   Consing them together directly (`Cons(lv, Cons(rv, Nil))`) unifies those two
+   variables, and — because the self-call return is the same rec-var — that ties
+   the list-element type back through lowerExpr's own result, blowing inference
+   up into an ever-growing type.  Routing them through `a : Operand, b : Operand`
+   pins each to the concrete `Operand` at the call site, so the list element type
+   is fixed and the two result variables never unify.  Runtime value is identical
+   to `Cons(lv, Cons(rv, Nil))`, so emitted TAC is byte-for-byte unchanged. *)
+fn lwPair(a : Operand, b : Operand) : List(Operand) = Cons(a, Cons(b, Nil))
+
+
+(* ── Eta-expansion helpers (lower.py TVar-as-value path) ──────────────────── *)
+
+fn etaParamsGo(i : Int, k : Int) : List((String, Mono)) =
+  if i >= k then Nil
+  else Cons(("$eta" + int_to_string(i), MCon("()")), etaParamsGo(i + 1, k))
+
+fn etaParams(k : Int) : List((String, Mono)) = etaParamsGo(0, k)
+
+fn etaArgsGo(i : Int, k : Int) : List(TExpr) =
+  if i >= k then Nil
+  else Cons(TVar("$eta" + int_to_string(i), MCon("()")), etaArgsGo(i + 1, k))
+
+fn etaArgs(k : Int) : List(TExpr) = etaArgsGo(0, k)
+
+
+(* ── Expression lowering (lower.py _expr) ─────────────────────────────────── *)
+
+fn lowerExpr(e : TExpr, env : List((String, Operand)), ctx : LCtx,
+             fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match e with
+
+  | TLit(v, _) => (OConst(valToConst(v)), fnc, st)
+
+  | TVar(n, _) =>
+      match lwEnvGet(env, n) with
+      | Just(v)  => (v, fnc, st)
+      | Nothing  =>
+          let arityM = ctxArity(ctx, n) in
+          let doEta  = match arityM with | Just(k) => k >= 1 | Nothing => false end in
+          if doEta then
+            match arityM with
+            | Just(k) => lowerLambda(etaParams(k),
+                            TApp(TVar(n, MCon("()")), etaArgs(k), MCon("()")),
+                            env, ctx, fnc, st)
+            | Nothing => (OTmp(Tmp(n)), fnc, st)
+            end
+          else if stHasGlobalFn(st, n) then
+            match tacFresh(fnc, "fn") with
+            | (dst, fn1) => (OTmp(dst), tacEmit(fn1, IAllocClosure(dst, n, Nil)), st)
+            end
+          else
+            (* global let (Tmp(n)) or — in the oracle — an error; the port
+               resolves it as a global-var read, which asm maps to the table. *)
+            (OTmp(Tmp(n)), fnc, st)
+      end
+
+  | TCon(n, _) =>
+      if strEq(n, "True") then (OConst(CBool(true)), fnc, st)
+      else if strEq(n, "False") then (OConst(CBool(false)), fnc, st)
+      else
+        match tacFresh(fnc, "t") with
+        | (dst, fn1) => (OTmp(dst), tacEmit(fn1, IAlloc(dst, n, Nil)), st)
+        end
+
+  | TTupleExpr(es, _) =>
+      match es with
+      | Nil => (OConst(CUnit), fnc, st)
+      | _   =>
+          match lowerExprs(es, env, ctx, fnc, st) with
+          | (fields, fn1, st1) =>
+              match tacFresh(fn1, "t") with
+              | (dst, fn2) => (OTmp(dst), tacEmit(fn2, IAlloc(dst, "()", fields)), st1)
+              end
+          end
+      end
+
+  | TBinOp(op0, l, r, t) =>
+      match lowerExpr(l, env, ctx, fnc, st) with
+      | (lv, fn1, st1) =>
+          match lowerExpr(r, env, ctx, fn1, st1) with
+          | (rv, fn2, st2) =>
+              match tacFresh(fn2, "t") with
+              | (dst, fn3) =>
+                  let op = mapAndOr(op0) in
+                  let instr =
+                    if strEq(op, "+") and isStringT(t) then
+                      ICall(Just(dst), "__str_concat", lwPair(lv, rv))
+                    else if isFloatT(t) and isArithOp(op) then
+                      ICall(Just(dst), floatArithName(op), lwPair(lv, rv))
+                    else if isBoolT(t) and isFloatT(texprTyp(l)) and isCmpOp(op) then
+                      ICall(Just(dst), floatCmpName(op), lwPair(lv, rv))
+                    else IBinOp(dst, op, lv, rv)
+                  in
+                  (OTmp(dst), tacEmit(fn3, instr), st2)
+              end
+          end
+      end
+
+  | TUnaryOp(op, x, _) =>
+      match lowerExpr(x, env, ctx, fnc, st) with
+      | (v, fn1, st1) =>
+          match tacFresh(fn1, "t") with
+          | (dst, fn2) => (OTmp(dst), tacEmit(fn2, IUnary(dst, op, v)), st1)
+          end
+      end
+
+  | TLetExpr(n, v, body, _) =>
+      match lowerExpr(v, env, ctx, fnc, st) with
+      | (vv, fn1, st1) => lowerExpr(body, Cons((n, vv), env), ctx, fn1, st1)
+      end
+
+  | TIfExpr(c, t, el, _) => lowerIf(c, t, el, env, ctx, fnc, st)
+
+  | TMatchExpr(s, arms, _) => lowerMatch(s, arms, env, ctx, fnc, st)
+
+  | TApp(f, args, _) => lowerApply(f, args, env, ctx, fnc, st)
+
+  | TLambda(params, body, _) => lowerLambda(params, body, env, ctx, fnc, st)
+
+  end
+
+fn lowerExprs(es : List(TExpr), env : List((String, Operand)), ctx : LCtx,
+              fnc : Function, st : LSt) : (List(Operand), Function, LSt) =
+  match es with
+  | Nil           => (Nil, fnc, st)
+  | Cons(e, rest) =>
+      match lowerExpr(e, env, ctx, fnc, st) with
+      | (v, fn1, st1) =>
+          match lowerExprs(rest, env, ctx, fn1, st1) with
+          | (vs, fn2, st2) => (Cons(v, vs), fn2, st2)
+          end
+      end
+  end
+
+
+(* ── If / else (lower.py _lower_if) ───────────────────────────────────────── *)
+
+fn lowerIf(c : TExpr, t : TExpr, el : TExpr, env : List((String, Operand)),
+           ctx : LCtx, fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match lowerExpr(c, env, ctx, fnc, st) with
+  | (cv, fn1, st1) =>
+      match tacLabel(fn1, "then") with
+      | (lThen, fn2) =>
+          match tacLabel(fn2, "else") with
+          | (lElse, fn3) =>
+              match tacLabel(fn3, "end") with
+              | (lEnd, fn4) =>
+                  match tacFresh(fn4, "r") with
+                  | (dst, fn5) =>
+                      let fn6 = tacEmit(fn5, ICondJump(cv, lThen, lElse)) in
+                      let fn7 = tacEmit(fn6, ILabel(lThen)) in
+                      match lowerExpr(t, env, ctx, fn7, st1) with
+                      | (tv, fn8, st2) =>
+                          let fn9  = tacEmit(fn8, IAssign(dst, tv)) in
+                          let fn10 = tacEmit(fn9, IJump(lEnd)) in
+                          let fn11 = tacEmit(fn10, ILabel(lElse)) in
+                          match lowerExpr(el, env, ctx, fn11, st2) with
+                          | (ev, fn12, st3) =>
+                              let fn13 = tacEmit(fn12, IAssign(dst, ev)) in
+                              let fn14 = tacEmit(fn13, IJump(lEnd)) in
+                              let fn15 = tacEmit(fn14, ILabel(lEnd)) in
+                              (OTmp(dst), fn15, st3)
+                          end
+                      end
+                  end
+              end
+          end
+      end
+  end
+
+
+(* ── Match (lower.py _lower_match / _pat_check / _pat_bind) ────────────────── *)
+
+fn lowerMatch(scrut : TExpr, arms : List((TPat, TExpr)),
+              env : List((String, Operand)), ctx : LCtx,
+              fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match lowerExpr(scrut, env, ctx, fnc, st) with
+  | (sv, fn1, st1) =>
+      match tacFresh(fn1, "r") with
+      | (dst, fn2) =>
+          match tacLabel(fn2, "match_end") with
+          | (lEnd, fn3) =>
+              match lowerArms(arms, sv, dst, lEnd, env, ctx, fn3, st1) with
+              | (fn4, st2) =>
+                  let fn5 = tacEmit(fn4, ICall(Nothing, "__lark_match_fail", Nil)) in
+                  let fn6 = tacEmit(fn5, ILabel(lEnd)) in
+                  (OTmp(dst), fn6, st2)
+              end
+          end
+      end
+  end
+
+fn lowerArms(arms : List((TPat, TExpr)), sv : Operand, dst : Tmp, lEnd : String,
+             env : List((String, Operand)), ctx : LCtx,
+             fnc : Function, st : LSt) : (Function, LSt) =
+  match arms with
+  | Nil                     => (fnc, st)
+  | Cons((pat, body), rest) =>
+      match tacLabel(fnc, "arm") with
+      | (lBody, fn1) =>
+          match tacLabel(fn1, "next") with
+          | (lNext, fn2) =>
+              let fn3 = patCheck(pat, sv, lBody, lNext, fn2) in
+              let fn4 = tacEmit(fn3, ILabel(lBody)) in
+              match patBind(pat, sv, env, fn4) with
+              | (armEnv, fn5) =>
+                  match lowerExpr(body, armEnv, ctx, fn5, st) with
+                  | (bodyVal, fn6, st1) =>
+                      let fn7 = tacEmit(fn6, IAssign(dst, bodyVal)) in
+                      let fn8 = tacEmit(fn7, IJump(lEnd)) in
+                      let fn9 = tacEmit(fn8, ILabel(lNext)) in
+                      lowerArms(rest, sv, dst, lEnd, env, ctx, fn9, st1)
+                  end
+              end
+          end
+      end
+  end
+
+fn patCheck(pat : TPat, sv : Operand, lMatch : String, lFail : String,
+            fnc : Function) : Function =
+  match pat with
+  | TPWild(_)   => tacEmit(fnc, IJump(lMatch))
+  | TPVar(_, _) => tacEmit(fnc, IJump(lMatch))
+  | TPLit(v, _) =>
+      match tacFresh(fnc, "eq") with
+      | (cmp, fn1) =>
+          let fn2 = tacEmit(fn1, IBinOp(cmp, "==", sv, OConst(valToConst(v)))) in
+          tacEmit(fn2, ICondJump(OTmp(cmp), lMatch, lFail))
+      end
+  | TPCon(tag, subPats, _) =>
+      match subPats with
+      | Nil =>
+          if strEq(tag, "True") or strEq(tag, "False") then
+            match tacFresh(fnc, "eq") with
+            | (cmp, fn1) =>
+                let fn2 = tacEmit(fn1, IBinOp(cmp, "==", sv, OConst(CBool(strEq(tag, "True"))))) in
+                tacEmit(fn2, ICondJump(OTmp(cmp), lMatch, lFail))
+            end
+          else
+            match tacFresh(fnc, "tag") with
+            | (tagTmp, fn1) =>
+                let fn2 = tacEmit(fn1, IGetTag(tagTmp, sv)) in
+                match tacFresh(fn2, "tag_ok") with
+                | (tagOk, fn3) =>
+                    let fn4 = tacEmit(fn3, IBinOp(tagOk, "==", OTmp(tagTmp), OConst(CStr(tag)))) in
+                    tacEmit(fn4, ICondJump(OTmp(tagOk), lMatch, lFail))
+                end
+            end
+      | _ =>
+          match tacFresh(fnc, "tag") with
+          | (tagTmp, fn1) =>
+              let fn2 = tacEmit(fn1, IGetTag(tagTmp, sv)) in
+              match tacFresh(fn2, "tag_ok") with
+              | (tagOk, fn3) =>
+                  let fn4 = tacEmit(fn3, IBinOp(tagOk, "==", OTmp(tagTmp), OConst(CStr(tag)))) in
+                  match tacLabel(fn4, "tag_ok") with
+                  | (lTagOk, fn5) =>
+                      let fn6 = tacEmit(fn5, ICondJump(OTmp(tagOk), lTagOk, lFail)) in
+                      let fn7 = tacEmit(fn6, ILabel(lTagOk)) in
+                      let fn8 = patCheckFields(subPats, sv, 0, lFail, fn7) in
+                      tacEmit(fn8, IJump(lMatch))
+                  end
+              end
+          end
+      end
+  | TPTuple(subPats, _) =>
+      let fn1 = patCheckFields(subPats, sv, 0, lFail, fnc) in
+      tacEmit(fn1, IJump(lMatch))
+  end
+
+fn patCheckFields(subPats : List(TPat), sv : Operand, i : Int, lFail : String,
+                  fnc : Function) : Function =
+  match subPats with
+  | Nil            => fnc
+  | Cons(sp, rest) =>
+      match tacFresh(fnc, "fld") with
+      | (fld, fn1) =>
+          let fn2 = tacEmit(fn1, IGetField(fld, sv, i)) in
+          match tacLabel(fn2, "sub") with
+          | (lSubOk, fn3) =>
+              let fn4 = patCheck(sp, OTmp(fld), lSubOk, lFail, fn3) in
+              let fn5 = tacEmit(fn4, ILabel(lSubOk)) in
+              patCheckFields(rest, sv, i + 1, lFail, fn5)
+          end
+      end
+  end
+
+fn patBind(pat : TPat, sv : Operand, env : List((String, Operand)),
+           fnc : Function) : (List((String, Operand)), Function) =
+  match pat with
+  | TPWild(_)         => (env, fnc)
+  | TPLit(_, _)       => (env, fnc)
+  | TPVar(n, _)       => (Cons((n, sv), env), fnc)
+  | TPCon(_, subPats, _) => patBindFields(subPats, sv, 0, env, fnc)
+  | TPTuple(subPats, _)  => patBindFields(subPats, sv, 0, env, fnc)
+  end
+
+fn patBindFields(subPats : List(TPat), sv : Operand, i : Int,
+                 env : List((String, Operand)), fnc : Function)
+    : (List((String, Operand)), Function) =
+  match subPats with
+  | Nil            => (env, fnc)
+  | Cons(sp, rest) =>
+      match tacFresh(fnc, "f") with
+      | (fld, fn1) =>
+          let fn2 = tacEmit(fn1, IGetField(fld, sv, i)) in
+          match patBind(sp, OTmp(fld), env, fn2) with
+          | (env1, fn3) => patBindFields(rest, sv, i + 1, env1, fn3)
+          end
+      end
+  end
+
+
+(* ── Application (lower.py _lower_apply) ───────────────────────────────────── *)
+
+fn showRoute(dst : Tmp, argVals : List(Operand), typ : Mono, ctx : LCtx) : Instr =
+  if isFloatT(typ) then ICall(Just(dst), "__show_float", argVals)
+  else if isBoolT(typ) then ICall(Just(dst), "__show_bool", argVals)
+  else
+    match typ with
+    | MCon(nm) =>
+        match ctxShowImpl(ctx, nm) with
+        | Just(s) => ICall(Just(dst), s, argVals)
+        | Nothing => ICall(Just(dst), "show", argVals)
+        end
+    | MApp(h, _) =>
+        match ctxShowImpl(ctx, h) with
+        | Just(s) => ICall(Just(dst), s, argVals)
+        | Nothing => ICall(Just(dst), "show", argVals)
+        end
+    | _ => ICall(Just(dst), "show", argVals)
+    end
+
+fn lowerApply(fnExpr : TExpr, args : List(TExpr), env : List((String, Operand)),
+              ctx : LCtx, fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match fnExpr with
+  | TVar(n, _) =>
+      if strEq(n, "string_to_int") or strEq(n, "string_to_float") then
+        lowerStringToResult(n, args, env, ctx, fnc, st)
+      else if stHasGlobalFn(st, n) then
+        match lowerExprs(args, env, ctx, fnc, st) with
+        | (argVals, fn1, st1) =>
+            match tacFresh(fn1, "t") with
+            | (dst, fn2) =>
+                let instr =
+                  if strEq(n, "show") then
+                    match args with
+                    | Nil          => ICall(Just(dst), n, argVals)
+                    | Cons(a0, _)  => showRoute(dst, argVals, texprTyp(a0), ctx)
+                    end
+                  else ICall(Just(dst), n, argVals)
+                in
+                (OTmp(dst), tacEmit(fn2, instr), st1)
+            end
+        end
+      else
+        lowerIndirect(fnExpr, args, env, ctx, fnc, st)
+  | TCon(tag, _) =>
+      match lowerExprs(args, env, ctx, fnc, st) with
+      | (fieldVals, fn1, st1) =>
+          match tacFresh(fn1, "t") with
+          | (dst, fn2) => (OTmp(dst), tacEmit(fn2, IAlloc(dst, tag, fieldVals)), st1)
+          end
+      end
+  | _ => lowerIndirect(fnExpr, args, env, ctx, fnc, st)
+  end
+
+fn lowerIndirect(fnExpr : TExpr, args : List(TExpr), env : List((String, Operand)),
+                 ctx : LCtx, fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match lowerExpr(fnExpr, env, ctx, fnc, st) with
+  | (closureVal, fn1, st1) => lowerIndirectArgs(args, closureVal, env, ctx, fn1, st1)
+  end
+
+fn lowerIndirectArgs(args : List(TExpr), result : Operand,
+                     env : List((String, Operand)), ctx : LCtx,
+                     fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match args with
+  | Nil            => (result, fnc, st)
+  | Cons(arg, rest) =>
+      match lowerExpr(arg, env, ctx, fnc, st) with
+      | (argVal, fn1, st1) =>
+          match tacFresh(fn1, "t") with
+          | (dst, fn2) =>
+              let fn3 = tacEmit(fn2, IClosureCall(dst, result, argVal)) in
+              lowerIndirectArgs(rest, OTmp(dst), env, ctx, fn3, st1)
+          end
+      end
+  end
+
+(* string_to_int / string_to_float → Result-producing sequence (lower.py). *)
+fn lowerStringToResult(name : String, args : List(TExpr),
+                       env : List((String, Operand)), ctx : LCtx,
+                       fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match args with
+  | Cons(argExpr, _) =>
+      match lowerExpr(argExpr, env, ctx, fnc, st) with
+      | (argv, fn1, st1) =>
+          match tacFresh(fn1, "t") with
+          | (raw, fn2) =>
+              let fn3 = tacEmit(fn2, ICall(Just(raw), "__" + name + "_raw", Cons(argv, Nil))) in
+              match tacFresh(fn3, "t") with
+              | (flag, fn4) =>
+                  match tacFresh(fn4, "t") with
+                  | (payload, fn5) =>
+                      let fn6 = tacEmit(fn5, IGetField(flag, OTmp(raw), 0)) in
+                      let fn7 = tacEmit(fn6, IGetField(payload, OTmp(raw), 1)) in
+                      match tacLabel(fn7, "res_ok") with
+                      | (lOk, fn8) =>
+                          match tacLabel(fn8, "res_err") with
+                          | (lErr, fn9) =>
+                              match tacLabel(fn9, "res_end") with
+                              | (lEnd, fn10) =>
+                                  match tacFresh(fn10, "r") with
+                                  | (dst, fn11) =>
+                                      let fn12 = tacEmit(fn11, ICondJump(OTmp(flag), lOk, lErr)) in
+                                      let fn13 = tacEmit(fn12, ILabel(lOk)) in
+                                      match tacFresh(fn13, "t") with
+                                      | (okT, fn14) =>
+                                          let fn15 = tacEmit(fn14, IAlloc(okT, "Ok", Cons(OTmp(payload), Nil))) in
+                                          let fn16 = tacEmit(fn15, IAssign(dst, OTmp(okT))) in
+                                          let fn17 = tacEmit(fn16, IJump(lEnd)) in
+                                          let fn18 = tacEmit(fn17, ILabel(lErr)) in
+                                          match tacFresh(fn18, "t") with
+                                          | (erT, fn19) =>
+                                              let fn20 = tacEmit(fn19, IAlloc(erT, "Err", Cons(OTmp(payload), Nil))) in
+                                              let fn21 = tacEmit(fn20, IAssign(dst, OTmp(erT))) in
+                                              let fn22 = tacEmit(fn21, IJump(lEnd)) in
+                                              let fn23 = tacEmit(fn22, ILabel(lEnd)) in
+                                              (OTmp(dst), fn23, st1)
+                                          end
+                                      end
+                                  end
+                              end
+                          end
+                      end
+                  end
+              end
+          end
+      end
+  | Nil => (OConst(CUnit), fnc, st)   (* unreachable: the prim always has 1 arg *)
+  end
+
+
+(* ── Lambda / closure conversion (lower.py _lower_lambda) ─────────────────── *)
+
+fn loadCaps(free : List(String), i : Int, env : List((String, Operand)),
+            fnc : Function) : (List((String, Operand)), Function) =
+  match free with
+  | Nil            => (env, fnc)
+  | Cons(fv, rest) =>
+      match tacFresh(fnc, "cap") with
+      | (fld, fn1) =>
+          let fn2 = tacEmit(fn1, IGetField(fld, OTmp(Tmp("env")), i)) in
+          loadCaps(rest, i + 1, Cons((fv, OTmp(fld)), env), fn2)
+      end
+  end
+
+fn lwCaptured(free : List(String), env : List((String, Operand))) : List(Operand) =
+  match free with
+  | Nil            => Nil
+  | Cons(fv, rest) =>
+      match lwEnvGet(env, fv) with
+      | Just(v)  => Cons(v, lwCaptured(rest, env))
+      | Nothing  => Cons(OTmp(Tmp(fv)), lwCaptured(rest, env))
+      end
+  end
+
+fn lowerLambda(params : List((String, Mono)), body : TExpr,
+               env : List((String, Operand)), ctx : LCtx,
+               fnc : Function, st : LSt) : (Operand, Function, LSt) =
+  match params with
+  | Cons(p0, Cons(p1, rest)) =>
+      (* Curry multi-param lambdas into nested single-param closures. *)
+      lowerLambda(Cons(p0, Nil), TLambda(Cons(p1, rest), body, MCon("()")),
+                  env, ctx, fnc, st)
+  | _ =>
+      let paramNames = lwParamNames(params) in
+      let allBound = lwAppend(paramNames, lwAppend(stGlobalFns(st), ctxGlobalLets(ctx))) in
+      let free = sortStr(lwFreeExpr(body, allBound)) in
+      match stBumpLambda(st) with
+      | (ctr, st1) =>
+          let lamName = fnNameOf(fnc) + "$lam" + int_to_string(ctr) in
+          let st2 = stAddGlobalFn(st1, lamName) in
+          let lamParams = Cons("env", paramNames) in
+          let lamFn0 = Function(lamName, lamParams, Nil, 0) in
+          match loadCaps(free, 0, lwParamEnv(lamParams), lamFn0) with
+          | (lamEnv1, lamFn1) =>
+              match lowerExpr(body, lamEnv1, ctx, lamFn1, st2) with
+              | (result, lamFn2, st3) =>
+                  let lamFn3 = tacEmit(lamFn2, IReturn(Just(result))) in
+                  let st4 = stAddLifted(st3, lamFn3) in
+                  match tacFresh(fnc, "clos") with
+                  | (dst, fnA) =>
+                      let captured = lwCaptured(free, env) in
+                      (OTmp(dst), tacEmit(fnA, IAllocClosure(dst, lamName, captured)), st4)
+                  end
+              end
+          end
+      end
+  end
+
+
+(* ── Top-level assembly (lower.py Lowerer.lower) ──────────────────────────── *)
+
+(* One producer: a top-level fnc / impl method.  Lowers its body — lifting any
+   lambdas into st.lifted (most-recent-first) — then emits the trailing return
+   and flushes: reversed lifted fns come FIRST (as lower.py adds them before the
+   enclosing fnc), then this fnc.  st.lifted is left Nil for the next producer. *)
+fn lowerFnProducer(name : String, paramNames : List(String), body : TExpr,
+                   ctx : LCtx, st : LSt) : (List(Function), LSt) =
+  let fn0 = Function(name, paramNames, Nil, 0) in
+  match lowerExpr(body, lwParamEnv(paramNames), ctx, fn0, st) with
+  | (result, fn1, st1) =>
+      let fn2 = tacEmit(fn1, IReturn(Just(result))) in
+      match st1 with
+      | LSt(gf, lc, lifted) =>
+          (lwAppendFns(reverseFns(lifted), Cons(fn2, Nil)), LSt(gf, lc, Nil))
+      end
+  end
+
+fn lowerImplMethods(methods : List(TDecl), forType : String, ctx : LCtx,
+                    st : LSt) : (List(Function), LSt) =
+  match methods with
+  | Nil            => (Nil, st)
+  | Cons(m, rest)  =>
+      match m with
+      | TFnDecl(mname, mparams, mbody, _, _) =>
+          match lowerFnProducer(mname + "$" + forType, lwParamNames(mparams), mbody, ctx, st) with
+          | (fns, st1) =>
+              match lowerImplMethods(rest, forType, ctx, st1) with
+              | (restFns, st2) => (lwAppendFns(fns, restFns), st2)
+              end
+          end
+      | _ => lowerImplMethods(rest, forType, ctx, st)
+      end
+  end
+
+fn lowerOneDecl(d : TDecl, ctx : LCtx, st : LSt) : (List(Function), LSt) =
+  match d with
+  | TFnDecl(name, params, body, _, _) =>
+      lowerFnProducer(name, lwParamNames(params), body, ctx, st)
+  | TImplDecl(_, forType, methods) => lowerImplMethods(methods, forType, ctx, st)
+  | TTypeDecl(_, _, _, _)          => (Nil, st)
+  | TLetDecl(_, _, _, _)           => (Nil, st)
+  end
+
+fn lowerDecls(decls : List(TDecl), ctx : LCtx, st : LSt) : (List(Function), LSt) =
+  match decls with
+  | Nil            => (Nil, st)
+  | Cons(d, rest)  =>
+      match lowerOneDecl(d, ctx, st) with
+      | (fns, st1) =>
+          match lowerDecls(rest, ctx, st1) with
+          | (restFns, st2) => (lwAppendFns(fns, restFns), st2)
+          end
+      end
+  end
+
+(* Top-level `let`s → one __global_init__ function (lower.py). *)
+fn globalLetPairs(decls : List(TDecl)) : List((String, TExpr)) =
+  match decls with
+  | Nil            => Nil
+  | Cons(d, rest)  =>
+      match d with
+      | TLetDecl(name, value, _, _) => Cons((name, value), globalLetPairs(rest))
+      | _ => globalLetPairs(rest)
+      end
+  end
+
+fn lowerLets(lets : List((String, TExpr)), env : List((String, Operand)),
+             ctx : LCtx, fnc : Function, st : LSt) : (Function, LSt) =
+  match lets with
+  | Nil                    => (fnc, st)
+  | Cons((gname, gexpr), rest) =>
+      match lowerExpr(gexpr, env, ctx, fnc, st) with
+      | (v, fn1, st1) =>
+          let fn2 = tacEmit(fn1, IAssign(Tmp(gname), v)) in
+          lowerLets(rest, Cons((gname, OTmp(Tmp(gname))), env), ctx, fn2, st1)
+      end
+  end
+
+fn buildGlobalInit(decls : List(TDecl), ctx : LCtx, st : LSt) : (List(Function), LSt) =
+  match globalLetPairs(decls) with
+  | Nil  => (Nil, st)
+  | lets =>
+      let initFn0 = Function("__global_init__", Nil, Nil, 0) in
+      match lowerLets(lets, Nil, ctx, initFn0, st) with
+      | (initFn1, st1) =>
+          let initFn2 = tacEmit(initFn1, IReturn(Just(OConst(CUnit)))) in
+          match st1 with
+          | LSt(gf, lc, lifted) =>
+              (lwAppendFns(reverseFns(lifted), Cons(initFn2, Nil)), LSt(gf, lc, Nil))
+          end
+      end
+  end
+
+
+(* ── Dispatch stubs (lower.py _make_dispatch_stub) ────────────────────────── *)
+
+fn allocArmLabels(typeNames : List(String), ctx : LCtx, fnc : Function)
+    : (List((String, String)), Function) =
+  match typeNames with
+  | Nil            => (Nil, fnc)
+  | Cons(tn, rest) =>
+      match ctxTags(ctx, tn) with
+      | Nil => allocArmLabels(rest, ctx, fnc)
+      | _   =>
+          match tacLabel(fnc, "arm_" + tn) with
+          | (lab, fn1) =>
+              match allocArmLabels(rest, ctx, fn1) with
+              | (labs, fn2) => (Cons((tn, lab), labs), fn2)
+              end
+          end
+      end
+  end
+
+fn emitTagChecksFor(tags : List(String), lArm : String, tagTmp : Tmp,
+                    fnc : Function) : Function =
+  match tags with
+  | Nil            => fnc
+  | Cons(tag, rest) =>
+      match tacFresh(fnc, "eq") with
+      | (eq, fn1) =>
+          match tacLabel(fn1, "nxt") with
+          | (lNext, fn2) =>
+              let fn3 = tacEmit(fn2, IBinOp(eq, "==", OTmp(tagTmp), OConst(CStr(tag)))) in
+              let fn4 = tacEmit(fn3, ICondJump(OTmp(eq), lArm, lNext)) in
+              let fn5 = tacEmit(fn4, ILabel(lNext)) in
+              emitTagChecksFor(rest, lArm, tagTmp, fn5)
+          end
+      end
+  end
+
+fn emitTagChecks(typeNames : List(String), armLabels : List((String, String)),
+                 tagTmp : Tmp, ctx : LCtx, fnc : Function) : Function =
+  match typeNames with
+  | Nil            => fnc
+  | Cons(tn, rest) =>
+      match ctxTags(ctx, tn) with
+      | Nil => emitTagChecks(rest, armLabels, tagTmp, ctx, fnc)
+      | tags =>
+          let fn1 = emitTagChecksFor(tags, lwAssocStrForce(armLabels, tn), tagTmp, fnc) in
+          emitTagChecks(rest, armLabels, tagTmp, ctx, fn1)
+      end
+  end
+
+fn emitArmBodies(typeNames : List(String), armLabels : List((String, String)),
+                 method : String, dst : Tmp, lEnd : String, ctx : LCtx,
+                 fnc : Function) : Function =
+  match typeNames with
+  | Nil            => fnc
+  | Cons(tn, rest) =>
+      match ctxTags(ctx, tn) with
+      | Nil => emitArmBodies(rest, armLabels, method, dst, lEnd, ctx, fnc)
+      | _   =>
+          let fn1 = tacEmit(fnc, ILabel(lwAssocStrForce(armLabels, tn))) in
+          match tacFresh(fn1, "call_r") with
+          | (callDst, fn2) =>
+              let fn3 = tacEmit(fn2, ICall(Just(callDst), method + "$" + tn, Cons(OTmp(Tmp("x")), Nil))) in
+              let fn4 = tacEmit(fn3, IAssign(dst, OTmp(callDst))) in
+              let fn5 = tacEmit(fn4, IJump(lEnd)) in
+              emitArmBodies(rest, armLabels, method, dst, lEnd, ctx, fn5)
+          end
+      end
+  end
+
+fn makeDispatchStub(method : String, typeNames : List(String), ctx : LCtx) : Function =
+  let fn0 = Function(method, Cons("x", Nil), Nil, 0) in
+  match tacFresh(fn0, "r") with
+  | (dst, fn1) =>
+      match tacLabel(fn1, "dispatch_end") with
+      | (lEnd, fn2) =>
+          match tacFresh(fn2, "tag") with
+          | (tagTmp, fn3) =>
+              let fn4 = tacEmit(fn3, IGetTag(tagTmp, OTmp(Tmp("x")))) in
+              match allocArmLabels(typeNames, ctx, fn4) with
+              | (armLabels, fn5) =>
+                  let fn6 = emitTagChecks(typeNames, armLabels, tagTmp, ctx, fn5) in
+                  let fn7 = tacEmit(fn6, ICall(Nothing, "__lark_match_fail", Nil)) in
+                  let fn8 = emitArmBodies(typeNames, armLabels, method, dst, lEnd, ctx, fn7) in
+                  let fn9 = tacEmit(fn8, ILabel(lEnd)) in
+                  tacEmit(fn9, IReturn(Just(OTmp(dst))))
+              end
+          end
+      end
+  end
+
+fn buildDispatchStubs(ti : List((String, List(String))), ctx : LCtx) : List(Function) =
+  match ti with
+  | Nil            => Nil
+  | Cons((method, typeNames), rest) =>
+      if isBuiltinName(method) then buildDispatchStubs(rest, ctx)
+      else Cons(makeDispatchStub(method, typeNames, ctx), buildDispatchStubs(rest, ctx))
+  end
+
+
+(* ── Context construction (lower.py Lowerer.lower, setup loops) ───────────── *)
+
+fn variantNames(vs : List(TVariant)) : List(String) =
+  match vs with
+  | Nil               => Nil
+  | Cons(TVariant(n, _), r) => Cons(n, variantNames(r))
+  end
+
+fn collectTypeTags(decls : List(TDecl)) : List((String, List(String))) =
+  match decls with
+  | Nil            => Nil
+  | Cons(d, rest)  =>
+      match d with
+      | TTypeDecl(name, _, mvs, _) =>
+          match mvs with
+          | Just(vs) => Cons((name, variantNames(vs)), collectTypeTags(rest))
+          | Nothing  => collectTypeTags(rest)
+          end
+      | _ => collectTypeTags(rest)
+      end
+  end
+
+fn collectGlobalLets(decls : List(TDecl)) : List(String) =
+  match decls with
+  | Nil            => Nil
+  | Cons(d, rest)  =>
+      match d with
+      | TLetDecl(name, _, _, _) => Cons(name, collectGlobalLets(rest))
+      | _ => collectGlobalLets(rest)
+      end
+  end
+
+fn listLenP(ps : List((String, Mono))) : Int =
+  match ps with | Nil => 0 | Cons(_, r) => 1 + listLenP(r) end
+
+fn implArity(methods : List(TDecl), forType : String) : List((String, Int)) =
+  match methods with
+  | Nil           => Nil
+  | Cons(m, rest) =>
+      match m with
+      | TFnDecl(mname, mparams, _, _, _) =>
+          Cons((mname + "$" + forType, listLenP(mparams)), implArity(rest, forType))
+      | _ => implArity(rest, forType)
+      end
+  end
+
+fn collectArity(decls : List(TDecl)) : List((String, Int)) =
+  match decls with
+  | Nil            => Nil
+  | Cons(d, rest)  =>
+      match d with
+      | TFnDecl(name, params, _, _, _) => Cons((name, listLenP(params)), collectArity(rest))
+      | TImplDecl(_, forType, methods) => lwAppendArity(implArity(methods, forType), collectArity(rest))
+      | _ => collectArity(rest)
+      end
+  end
+
+(* setdefault+append, preserving key-appearance order and per-key order. *)
+fn tiAdd(acc : List((String, List(String))), method : String, forType : String)
+    : List((String, List(String))) =
+  match acc with
+  | Nil            => Cons((method, Cons(forType, Nil)), Nil)
+  | Cons((k, vs), rest) =>
+      if strEq(k, method) then Cons((k, tacSnocStr(vs, forType)), rest)
+      else Cons((k, vs), tiAdd(rest, method, forType))
+  end
+
+fn addImplMethods(methods : List(TDecl), forType : String,
+                  acc : List((String, List(String)))) : List((String, List(String))) =
+  match methods with
+  | Nil           => acc
+  | Cons(m, rest) =>
+      match m with
+      | TFnDecl(mname, _, _, _, _) => addImplMethods(rest, forType, tiAdd(acc, mname, forType))
+      | _ => addImplMethods(rest, forType, acc)
+      end
+  end
+
+fn collectTraitImplsGo(decls : List(TDecl), acc : List((String, List(String))))
+    : List((String, List(String))) =
+  match decls with
+  | Nil            => acc
+  | Cons(d, rest)  =>
+      match d with
+      | TImplDecl(traitName, forType, methods) =>
+          if strEq(traitName, "Copy") then collectTraitImplsGo(rest, acc)
+          else collectTraitImplsGo(rest, addImplMethods(methods, forType, acc))
+      | _ => collectTraitImplsGo(rest, acc)
+      end
+  end
+
+fn collectTraitImpls(decls : List(TDecl)) : List((String, List(String))) =
+  collectTraitImplsGo(decls, Nil)
+
+fn tiGet(ti : List((String, List(String))), method : String) : List(String) =
+  match ti with
+  | Nil            => Nil
+  | Cons((k, vs), r) => if strEq(k, method) then vs else tiGet(r, method)
+  end
+
+fn buildShowImpls(tns : List(String)) : List((String, String)) =
+  match tns with
+  | Nil           => Nil
+  | Cons(tn, r)   => Cons((tn, "show$" + tn), buildShowImpls(r))
+  end
+
+fn implMangledNames(methods : List(TDecl), forType : String) : List(String) =
+  match methods with
+  | Nil           => Nil
+  | Cons(m, rest) =>
+      match m with
+      | TFnDecl(mname, _, _, _, _) => Cons(mname + "$" + forType, implMangledNames(rest, forType))
+      | _ => implMangledNames(rest, forType)
+      end
+  end
+
+fn declGlobalFns(decls : List(TDecl)) : List(String) =
+  match decls with
+  | Nil            => Nil
+  | Cons(d, rest)  =>
+      match d with
+      | TFnDecl(name, _, _, _, _)      => Cons(name, declGlobalFns(rest))
+      | TImplDecl(_, forType, methods) => lwAppend(implMangledNames(methods, forType), declGlobalFns(rest))
+      | _ => declGlobalFns(rest)
+      end
+  end
+
+fn tiKeys(ti : List((String, List(String)))) : List(String) =
+  match ti with | Nil => Nil | Cons((k, _), r) => Cons(k, tiKeys(r)) end
+
+fn collectGlobalFns(decls : List(TDecl), ti : List((String, List(String)))) : List(String) =
+  lwAppend(lwBuiltins, lwAppend(declGlobalFns(decls), tiKeys(ti)))
+
+fn buildCtx(decls : List(TDecl)) : LCtx =
+  let ti = collectTraitImpls(decls) in
+  LCtx(collectTypeTags(decls), ti, collectGlobalLets(decls),
+       buildShowImpls(tiGet(ti, "show")), collectArity(decls))
+
+
+(* ── Entry point (lower.py `lower`) ───────────────────────────────────────── *)
+
+fn lowerProgram(tprog : TProgram) : TAC =
+  match tprog with
+  | TProgram(_, decls) =>
+      let ctx = buildCtx(decls) in
+      let st0 = LSt(collectGlobalFns(decls, ctxTraitImpls(ctx)), 0, Nil) in
+      match buildGlobalInit(decls, ctx, st0) with
+      | (initFns, st1) =>
+          match lowerDecls(decls, ctx, st1) with
+          | (declFns, st2) =>
+              let stubFns = buildDispatchStubs(ctxTraitImpls(ctx), ctx) in
+              TAC(lwAppendFns(initFns, lwAppendFns(declFns, stubFns)), ctxGlobalLets(ctx))
+          end
+      end
+  end

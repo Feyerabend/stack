@@ -1,0 +1,74 @@
+module MeasureSafe
+
+(* the equations reach the solver.  This is the file where "prove
+   programs" stops being about arithmetic on integers the program already held and
+   starts being about the SHAPE of the data it built.
+
+   `len` is uninterpreted no longer.  Its arms are equations, and an equation is
+   instantiated at each constructor term the obligation MENTIONS — never as an axiom
+   schema, never under a quantifier, because `forall xs. len(Cons(x, xs)) == 1 +
+   len(xs)` would leave QF-UFLIA and take the decision procedure with it.  What the
+   checker does instead is the quantifier-free shadow of that axiom: it looks at the
+   terms that are actually there and writes down the equation for each.
+
+   Four obligations, and each one is a different half of the rung:
+
+     two()          BUILDING.  `Cons(a, Cons(b, Nil))` is now a TERM, so the walk
+                    finds all three constructor terms inside it and instantiates
+                    `len` at each: len(Nil) == 0, hence the inner Cons is 1, hence
+                    the outer is 2.  Arithmetic chains them.  The contract holds.
+
+     tail_of_two()  DESTRUCTING, twice over, and the Nil arm is the better half:
+
+                      | Cons(_, r) =>  the pattern says xs == Cons($f, r), so
+                                       len(xs) == 1 + len(r); with len(xs) == 2 from
+                                       the contract, len(r) == 1.  The arm returns
+                                       `r`, and `r` is still NAMED — which is why an
+                                       ADT-typed binder had to stop being opaque.
+                                       Refined products let a fact travel; a measure
+                                       creates one; a *name* is what carries it out
+                                       through the return.
+
+                      | Nil =>         len(xs) == 0 and len(xs) == 2 cannot both
+                                       hold, so the hypotheses are contradictory and
+                                       the arm is proved VACUOUSLY.  That is not the
+                                       checker cheating: it is the checker noticing
+                                       the arm is DEAD, which is a thing it could not
+                                       notice until `len(Nil) == 0` was a fact.
+
+     main()         COMPOSITION.  `head`'s precondition is `len(v) > 0`, and the
+                    argument is a call, not a constructor — so the fact comes from
+                    `two`'s CONTRACT (`len(v) == 2`), not from any term the checker
+                    can see inside it.  The measure crosses a function boundary.
+
+   Its mutant, 12_measure_unsafe.lark, breaks each of these and must fail on each.
+
+   Expected output:
+     3 *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  end
+
+fn head(xs : {v : List(Int) | len(v) > 0}) : Int =
+  match xs with
+  | Nil        => 0
+  | Cons(x, _) => x
+  end
+
+fn two(a : Int, b : Int) : {v : List(Int) | len(v) == 2} =
+  Cons(a, Cons(b, Nil))
+
+fn tail_of_two(xs : {v : List(Int) | len(v) == 2})
+             : {v : List(Int) | len(v) == 1} =
+  match xs with
+  | Nil        => Nil
+  | Cons(_, r) => r
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(head(two(3, 4))))

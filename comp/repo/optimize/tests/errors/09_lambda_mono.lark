@@ -1,0 +1,11 @@
+(* Error test 09 — lambda parameters are monomorphic.
+   Expected: type error — a lambda-bound parameter f cannot be used at both
+   Int and Bool. Only let-bound names are generalised (let-polymorphism), so
+   this lambda-bound use must be rejected with a unification error.
+   Regression guard for the substitution-threading fix in infer.py. *)
+
+module LambdaMono
+
+fn main(io : IO) : IO =
+  let p = (fn (f) => (f(1), f(true)))(fn (x) => x) in
+  io

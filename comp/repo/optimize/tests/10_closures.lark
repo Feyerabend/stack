@@ -1,0 +1,26 @@
+(* Test 10 — Closures and higher-order functions
+   Covers: function returning a closure, environment capture,
+           function composition, applying a returned function,
+           passing lambdas as arguments, let-bound lambdas
+   Expected output:
+     15
+     16
+     12 *)
+
+module Closures
+
+fn adder(n : Int) : Int -> Int =
+  fn(x : Int) => n + x
+
+fn compose(f : Int -> Int, g : Int -> Int) : Int -> Int =
+  fn(x : Int) => f(g(x))
+
+fn twice(f : Int -> Int, x : Int) : Int =
+  f(f(x))
+
+fn main(io : IO) : IO =
+  let add5   = adder(5) in
+  let double = fn(x : Int) => x * 2 in
+  let io     = print(io, show(add5(10))) in
+  let io     = print(io, show(compose(double, add5)(3))) in
+  print(io, show(twice(double, 3)))

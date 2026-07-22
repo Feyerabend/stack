@@ -1,0 +1,13 @@
+module SliceUnsafe
+
+(* Unconditional: the empty string has no character to drop. *)
+fn drop_first(s: String) : String =
+  string_slice(s, 1, string_length(s))
+
+(* The bounds are checked in the wrong order — nothing says a <= b. *)
+fn middle(s: String, a: {v: Int | v >= 0}, b: {v: Int | v >= 0}) : String =
+  if b <= string_length(s) then string_slice(s, a, b) else s
+
+(* Past the end. *)
+fn overrun(s: String) : String =
+  string_slice(s, 0, string_length(s) + 1)

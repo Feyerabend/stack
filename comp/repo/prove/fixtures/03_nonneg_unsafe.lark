@@ -1,0 +1,14 @@
+module NonNegUnsafe
+
+(* The negation is missing from the else branch, so a negative x comes straight
+   back out.  The HM type is still Int -> Int; only the refinement notices. *)
+fn abs_bad(x: Int) : {v: Int | v >= 0} =
+  if x >= 0 then x else x
+
+(* Subtraction does not preserve non-negativity, however plausible it looks. *)
+fn diff_bad(a: {v: Int | v >= 0}, b: {v: Int | v >= 0}) : {v: Int | v >= 0} =
+  a - b
+
+(* The branches are swapped. *)
+fn clamp_bad(x: Int) : {v: Int | v >= 0} =
+  if x < 0 then x else 0

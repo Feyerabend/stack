@@ -1,0 +1,2064 @@
+(* opt.lark — Lark's TAC optimizer, written in Lark.
+   (the port of oracle/opt.py — the TAC subset.)
+
+   Pipeline position (per opt.py):
+       tast.lark → lower.lark → tac.lark → [opt.lark] → emit_tac_c.lark → C text
+
+   opt.py is a bundle of TAC→TAC passes plus a fixpoint driver.  This is a PURE
+   port of the TAC subset only — the passes named in opt.py's `PASSES` list:
+       devirt, inline (+ prune), closure_elim, const_fold, copy_prop,
+       algebraic_simplify, cse, dce, licm.
+   It deliberately does NOT port the `ASM_PASSES` (peephole / immfold /
+   branchlayout) — those rewrite RV32 assembly TEXT, irrelevant to a C emitter.
+
+   Everything opt.py does with mutation, a monotonic global site counter, and the
+   cfg/liveness helper modules is threaded PURELY here:
+
+     • Each pass is  (TAC, Int) -> (TAC, Int):  the Int is the shared site counter
+       (opt.py's `_SITE = itertools.count()`).  Only `inline` and `closure_elim`
+       mint sites; the others thread it through untouched.  optimize() starts the
+       counter at 0 and threads it across every pass AND every sweep, so a run in
+       a fresh CEK subprocess reproduces opt.py's site numbers exactly PROVIDED the
+       oracle resets `_SITE` per file (the differential does).
+     • cfg.py's `build_cfg` and liveness.py's `analyse`/`defs`/`uses` are ported
+       here (optBuildCfg / optLiveness / optDefs / optUses) — only `dce` needs the
+       full CFG + backward-dataflow liveness; `copy_prop`/`cse` need only block
+       boundaries (detected inline, no CFG); `licm` needs dominators.
+     • The inline/closure renamers memoise via dicts in opt.py, but the rename is a
+       PURE function of (site, name) — `_i{site}_{name}` / `.i{site}_{label}` — so
+       no memo threading is needed; renVal/renDst/renLab compute it directly.
+
+   Design notes (the pipeline is assembled by CONCATENATION):
+     parse.lark gives Maybe / Just / Nothing (+ Ok/Err are built-in ctors)
+     tac.lark   gives the TAC IR (Operand/ConstVal/Instr/Function/TAC) +
+                tacPretty (used as the fixpoint fingerprint) + tacSnoc* helpers
+   So the differential (opt_difftest.py) concatenates lex+parse+tac+opt.  All
+   generic helpers are `opt`-prefixed to dodge name clashes under concatenation;
+   opt.lark is otherwise self-contained (its own string-eq, set, and assoc code,
+   like emit_tac_c.lark).
+
+   The one arithmetic subtlety: const_fold folds int +,-,* under a signed 32-bit
+   truncation (opt.py `_wrap32`, matching RV32).  Lark has no `%` operator and `/`
+   truncates toward zero, so optWrap32 reconstructs `& 0xFFFFFFFF` via a floor-mod
+   built from `/`,`*`,`-` (19_intoverflow is the corpus witness at -O1+).
+
+   Run (differential):  harness/opt_difftest.py    (make opttest)      *)
+
+module Opt
+
+
+(* ══ String / list / set / assoc helpers (opt-prefixed, self-contained) ═════ *)
+
+fn optStrEqGo(a : String, b : String, i : Int, n : Int) : Bool =
+  if i >= n then true
+  else if string_index(a, i) == string_index(b, i) then optStrEqGo(a, b, i + 1, n)
+  else false
+
+fn optStrEq(a : String, b : String) : Bool =
+  let la = string_length(a) in
+  let lb = string_length(b) in
+  if la == lb then optStrEqGo(a, b, 0, la) else false
+
+fn optMember(x : String, xs : List(String)) : Bool =
+  match xs with
+  | Nil        => false
+  | Cons(y, r) => if optStrEq(x, y) then true else optMember(x, r)
+  end
+
+(* set insert (dedup), union, difference — String sets as lists *)
+fn optInsert(x : String, xs : List(String)) : List(String) =
+  if optMember(x, xs) then xs else Cons(x, xs)
+
+fn optUnion(xs : List(String), ys : List(String)) : List(String) =
+  match xs with
+  | Nil        => ys
+  | Cons(x, r) => optInsert(x, optUnion(r, ys))
+  end
+
+fn optDiff(xs : List(String), ys : List(String)) : List(String) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => if optMember(x, ys) then optDiff(r, ys) else Cons(x, optDiff(r, ys))
+  end
+
+fn optSubset(xs : List(String), ys : List(String)) : Bool =
+  match xs with
+  | Nil        => true
+  | Cons(x, r) => if optMember(x, ys) then optSubset(r, ys) else false
+  end
+
+fn optSetEq(xs : List(String), ys : List(String)) : Bool =
+  optSubset(xs, ys) and optSubset(ys, xs)
+
+(* ══ String-keyed balanced-tree set (StrSet) ═══════════════════════════════ *)
+(* The red-black template (types.lark's Subst) adapted to a String-keyed SET.
+   Liveness/dce carry name-sets that the assoc-list `optUnion`/`optDiff`/
+   `optSetEq` rebuilt O(n) times with no GC — an O(n²) arena wall on the
+   self-hosted optimizer's own ~7300-line source.  StrSet gives
+   O(log n) member/insert; union/diff/eq are O(n log n).  Membership decisions
+   (hence dce's kept instrs) are representation-independent, so the emitted C is
+   byte-identical — the opttest differential is the guard. *)
+
+fn optStrLtGo(a : String, b : String, i : Int, la : Int, lb : Int) : Bool =
+  if i >= la then i < lb
+  else if i >= lb then false
+  else if string_index(a, i) < string_index(b, i) then true
+  else if string_index(a, i) > string_index(b, i) then false
+  else optStrLtGo(a, b, i + 1, la, lb)
+
+fn optStrLt(a : String, b : String) : Bool =
+  optStrLtGo(a, b, 0, string_length(a), string_length(b))
+
+type OSColor = | OSRed | OSBlack
+type StrSet  = | SsLeaf | SsNode of OSColor, StrSet, String, StrSet
+impl Copy for OSColor = {}
+impl Copy for StrSet  = {}
+
+fn ssMember(k : String, s : StrSet) : Bool =
+  match s with
+  | SsLeaf              => false
+  | SsNode(_, l, k0, r) =>
+      if optStrEq(k, k0) then true
+      else if optStrLt(k, k0) then ssMember(k, l)
+      else ssMember(k, r)
+  end
+
+fn ssBalance(c : OSColor, a : StrSet, xk : String, b : StrSet) : StrSet =
+  match (c, a, xk, b) with
+  | (OSBlack, SsNode(OSRed, SsNode(OSRed, t1, k1, t2), k2, t3), k3, t4) =>
+      SsNode(OSRed, SsNode(OSBlack, t1, k1, t2), k2, SsNode(OSBlack, t3, k3, t4))
+  | (OSBlack, SsNode(OSRed, t1, k1, SsNode(OSRed, t2, k2, t3)), k3, t4) =>
+      SsNode(OSRed, SsNode(OSBlack, t1, k1, t2), k2, SsNode(OSBlack, t3, k3, t4))
+  | (OSBlack, t1, k1, SsNode(OSRed, SsNode(OSRed, t2, k2, t3), k3, t4)) =>
+      SsNode(OSRed, SsNode(OSBlack, t1, k1, t2), k2, SsNode(OSBlack, t3, k3, t4))
+  | (OSBlack, t1, k1, SsNode(OSRed, t2, k2, SsNode(OSRed, t3, k3, t4))) =>
+      SsNode(OSRed, SsNode(OSBlack, t1, k1, t2), k2, SsNode(OSBlack, t3, k3, t4))
+  | (cc, aa, kk, bb) => SsNode(cc, aa, kk, bb)
+  end
+
+fn ssIns(s : StrSet, k : String) : StrSet =
+  match s with
+  | SsLeaf => SsNode(OSRed, SsLeaf, k, SsLeaf)
+  | SsNode(c, l, k0, r) =>
+      if optStrLt(k, k0) then ssBalance(c, ssIns(l, k), k0, r)
+      else if optStrLt(k0, k) then ssBalance(c, l, k0, ssIns(r, k))
+      else SsNode(c, l, k0, r)
+  end
+
+fn ssInsert(s : StrSet, k : String) : StrSet =
+  match ssIns(s, k) with
+  | SsNode(_, l, k0, r) => SsNode(OSBlack, l, k0, r)   (* recolour root black *)
+  | SsLeaf              => SsLeaf                       (* ssIns never yields a leaf *)
+  end
+
+fn ssFromList(xs : List(String), acc : StrSet) : StrSet =
+  match xs with
+  | Nil        => acc
+  | Cons(x, r) => ssFromList(r, ssInsert(acc, x))
+  end
+
+(* fold all keys of src into acc (a ∪ b = fold a into b). *)
+fn ssUnionInto(src : StrSet, acc : StrSet) : StrSet =
+  match src with
+  | SsLeaf             => acc
+  | SsNode(_, l, k, r) => ssUnionInto(r, ssInsert(ssUnionInto(l, acc), k))
+  end
+fn ssUnion(a : StrSet, b : StrSet) : StrSet = ssUnionInto(a, b)
+
+(* keys of `a` not in `b`. *)
+fn ssDiffInto(src : StrSet, b : StrSet, acc : StrSet) : StrSet =
+  match src with
+  | SsLeaf             => acc
+  | SsNode(_, l, k, r) =>
+      let acc1 = ssDiffInto(l, b, acc) in
+      let acc2 = if ssMember(k, b) then acc1 else ssInsert(acc1, k) in
+      ssDiffInto(r, b, acc2)
+  end
+fn ssDiff(a : StrSet, b : StrSet) : StrSet = ssDiffInto(a, b, SsLeaf)
+
+fn ssSubsetGo(src : StrSet, b : StrSet) : Bool =
+  match src with
+  | SsLeaf             => true
+  | SsNode(_, l, k, r) => if ssMember(k, b) then ssSubsetGo(l, b) and ssSubsetGo(r, b) else false
+  end
+fn ssEq(a : StrSet, b : StrSet) : Bool = ssSubsetGo(a, b) and ssSubsetGo(b, a)
+
+(* String → prefix test / leading-dot strip (for inline/closure label renaming) *)
+fn optStartsWithGo(s : String, p : String, i : Int, np : Int) : Bool =
+  if i >= np then true
+  else if i >= string_length(s) then false
+  else if string_index(s, i) == string_index(p, i) then optStartsWithGo(s, p, i + 1, np)
+  else false
+
+fn optStartsWith(s : String, p : String) : Bool =
+  optStartsWithGo(s, p, 0, string_length(p))
+
+fn optStripDotsGo(s : String, i : Int, n : Int) : String =
+  if i >= n then ""
+  else if string_index(s, i) == 46 then optStripDotsGo(s, i + 1, n)   (* '.' = 46 *)
+  else string_slice(s, i, n)
+
+fn optStripDots(s : String) : String =
+  optStripDotsGo(s, 0, string_length(s))
+
+(* Monomorphic list reverses (pinned per element type — the accumulator-reverse
+   pattern trips frozen infer's monomorphic self-recursion when polymorphic). *)
+fn optRevInstrGo(xs : List(Instr), acc : List(Instr)) : List(Instr) =
+  match xs with | Nil => acc | Cons(x, r) => optRevInstrGo(r, Cons(x, acc)) end
+fn optRevInstr(xs : List(Instr)) : List(Instr) = optRevInstrGo(xs, Nil)
+
+fn optRevStrGo(xs : List(String), acc : List(String)) : List(String) =
+  match xs with | Nil => acc | Cons(x, r) => optRevStrGo(r, Cons(x, acc)) end
+fn optRevStr(xs : List(String)) : List(String) = optRevStrGo(xs, Nil)
+
+fn optAppendInstr(a : List(Instr), b : List(Instr)) : List(Instr) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, optAppendInstr(r, b)) end
+
+fn optAppendStr(a : List(String), b : List(String)) : List(String) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, optAppendStr(r, b)) end
+
+(* nth element of an Operand list (closure captures indexing). *)
+fn optNthOperand(xs : List(Operand), i : Int) : Operand =
+  match xs with
+  | Nil        => OConst(CUnit)                (* out of range: unreachable on valid TAC *)
+  | Cons(x, r) => if i == 0 then x else optNthOperand(r, i - 1)
+  end
+
+fn optLenInstr(xs : List(Instr)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + optLenInstr(r) end
+
+fn optLenOperand(xs : List(Operand)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + optLenOperand(r) end
+
+fn optLenStr(xs : List(String)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + optLenStr(r) end
+
+
+(* ══ Assoc-list accessors (one per value type used) ═════════════════════════ *)
+
+fn optAssocTmp(xs : List((String, Tmp)), k : String) : Maybe(Tmp) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocTmp(r, k)
+  end
+
+fn optAssocStr(xs : List((String, String)), k : String) : Maybe(String) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocStr(r, k)
+  end
+
+fn optAssocInt(xs : List((String, Int)), k : String) : Maybe(Int) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocInt(r, k)
+  end
+
+fn optAssocOp(xs : List((String, Operand)), k : String) : Maybe(Operand) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocOp(r, k)
+  end
+
+(* Closure info: root name → (lifted-fn name, captures). *)
+fn optAssocInfo(xs : List((String, (String, List(Operand)))), k : String)
+   : Maybe((String, List(Operand))) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocInfo(r, k)
+  end
+
+(* String set → List((String,Int)) def-count increment. *)
+fn optCountBump(xs : List((String, Int)), k : String) : List((String, Int)) =
+  match xs with
+  | Nil             => Cons((k, 1), Nil)
+  | Cons((n, v), r) => if optStrEq(n, k) then Cons((n, v + 1), r)
+                       else Cons((n, v), optCountBump(r, k))
+  end
+
+fn optCountOf(xs : List((String, Int)), k : String) : Int =
+  match optAssocInt(xs, k) with | Just(v) => v | Nothing => 0 end
+
+
+(* ══ Function lookup (fnmap) ════════════════════════════════════════════════ *)
+
+fn optFnName(f : Function) : String =
+  match f with | Function(nm, _, _, _) => nm end
+
+fn optFnParams(f : Function) : List(String) =
+  match f with | Function(_, ps, _, _) => ps end
+
+fn optFnBody(f : Function) : List(Instr) =
+  match f with | Function(_, _, b, _) => b end
+
+fn optFnLookup(fns : List(Function), nm : String) : Maybe(Function) =
+  match fns with
+  | Nil        => Nothing
+  | Cons(f, r) => if optStrEq(optFnName(f), nm) then Just(f) else optFnLookup(r, nm)
+  end
+
+(* Replace a function's body, keeping name/params/counter. *)
+fn optWithBody(f : Function, body : List(Instr)) : Function =
+  match f with | Function(nm, ps, _, ctr) => Function(nm, ps, body, ctr) end
+
+
+(* ══ Operand / Tmp destructors ══════════════════════════════════════════════ *)
+
+fn optTmpName(t : Tmp) : String = match t with | Tmp(n) => n end
+
+fn optIsTmp(v : Operand) : Bool =
+  match v with | OTmp(_) => true | _ => false end
+
+fn optOperandName(v : Operand) : Maybe(String) =
+  match v with | OTmp(t) => Just(optTmpName(t)) | OConst(_) => Nothing end
+
+(* Names used by a list of operands (Tmp positions only). *)
+fn optValNames(xs : List(Operand)) : List(String) =
+  match xs with
+  | Nil        => Nil
+  | Cons(v, r) => match v with
+                  | OTmp(t)   => Cons(optTmpName(t), optValNames(r))
+                  | OConst(_) => optValNames(r)
+                  end
+  end
+
+
+(* ══ defs / uses  (port of liveness.py defs / uses) ═════════════════════════ *)
+(* defs returns 0 or 1 name; uses returns a (possibly duplicated) name list —
+   every consumer treats it with set operations, so duplicates are harmless. *)
+
+fn optDefs(i : Instr) : List(String) =
+  match i with
+  | IAssign(d, _)          => Cons(optTmpName(d), Nil)
+  | IBinOp(d, _, _, _)     => Cons(optTmpName(d), Nil)
+  | IUnary(d, _, _)        => Cons(optTmpName(d), Nil)
+  | ICall(md, _, _)        => match md with | Just(d) => Cons(optTmpName(d), Nil) | Nothing => Nil end
+  | IClosureCall(d, _, _)  => Cons(optTmpName(d), Nil)
+  | IAlloc(d, _, _)        => Cons(optTmpName(d), Nil)
+  | IGetTag(d, _)          => Cons(optTmpName(d), Nil)
+  | IGetField(d, _, _)     => Cons(optTmpName(d), Nil)
+  | IAllocClosure(d, _, _) => Cons(optTmpName(d), Nil)
+  | _                      => Nil
+  end
+
+fn optUses(i : Instr) : List(String) =
+  match i with
+  | IAssign(_, s)          => optValNames(Cons(s, Nil))
+  | IBinOp(_, _, l, r)     => optValNames(Cons(l, Cons(r, Nil)))
+  | IUnary(_, _, s)        => optValNames(Cons(s, Nil))
+  | ICall(_, _, args)      => optValNames(args)
+  | IClosureCall(_, f, a)  => optValNames(Cons(f, Cons(a, Nil)))
+  | IReturn(mv)            => match mv with | Just(v) => optValNames(Cons(v, Nil)) | Nothing => Nil end
+  | ICondJump(c, _, _)     => optValNames(Cons(c, Nil))
+  | IAlloc(_, _, fs)       => optValNames(fs)
+  | IGetTag(_, s)          => optValNames(Cons(s, Nil))
+  | IGetField(_, s, _)     => optValNames(Cons(s, Nil))
+  | IAllocClosure(_, _, cs) => optValNames(cs)
+  | _                      => Nil
+  end
+
+(* The single def name, or Nothing (liveness.py _def_name via defs). *)
+fn optDefName(i : Instr) : Maybe(String) =
+  match optDefs(i) with | Cons(n, _) => Just(n) | Nil => Nothing end
+
+(* Pure value-def destination name (opt.py _pure_def_name): a fresh-Tmp def with
+   NO effect.  Excludes ICall / IClosureCall (calls may print/read). *)
+fn optPureDefName(i : Instr) : Maybe(String) =
+  match i with
+  | IAssign(d, _)          => Just(optTmpName(d))
+  | IBinOp(d, _, _, _)     => Just(optTmpName(d))
+  | IUnary(d, _, _)        => Just(optTmpName(d))
+  | IAlloc(d, _, _)        => Just(optTmpName(d))
+  | IGetTag(d, _)          => Just(optTmpName(d))
+  | IGetField(d, _, _)     => Just(optTmpName(d))
+  | IAllocClosure(d, _, _) => Just(optTmpName(d))
+  | _                      => Nothing
+  end
+
+(* Instruction shape predicates. *)
+fn optIsLabel(i : Instr) : Bool =
+  match i with | ILabel(_) => true | _ => false end
+
+fn optIsTerm(i : Instr) : Bool =
+  match i with
+  | IJump(_)          => true
+  | ICondJump(_, _, _) => true
+  | IReturn(_)        => true
+  | _                 => false
+  end
+
+
+(* ══ 32-bit wrap (opt.py _wrap32) — no `%`, `/` truncates toward zero ═══════ *)
+(* _wrap32(n) = ((n + 0x80000000) & 0xFFFFFFFF) - 0x80000000.  `& 0xFFFFFFFF`
+   is a floor-mod by 2^32; rebuild it as trunc-div remainder + a sign fix-up. *)
+
+fn optFloorMod(x : Int, m : Int) : Int =
+  let q = x / m in            (* trunc toward zero *)
+  let r = x - q * m in        (* C-style remainder: sign of x *)
+  if r < 0 then r + m else r
+
+fn optWrap32(n : Int) : Int =
+  let half = 2147483648 in    (* 0x80000000 *)
+  let full = 4294967296 in    (* 0x100000000 *)
+  optFloorMod(n + half, full) - half
+
+
+(* ══ Constant classifiers (opt.py _is_int_const / _is_bool_const) ═══════════ *)
+
+fn optIsIntConst(v : Operand) : Bool =
+  match v with | OConst(CInt(_)) => true | _ => false end
+
+fn optIsBoolConst(v : Operand) : Bool =
+  match v with | OConst(CBool(_)) => true | _ => false end
+
+fn optIntVal(v : Operand) : Int =
+  match v with
+  | OConst(CInt(s)) => match string_to_int(s) with | Ok(n) => n | Err(_) => 0 end
+  | _               => 0
+  end
+
+fn optBoolVal(v : Operand) : Bool =
+  match v with | OConst(CBool(b)) => b | _ => false end
+
+
+(* ══ Pass: const_fold  (opt.py const_fold / _fold_instr / _fold_binop) ══════ *)
+
+fn optFoldBinop(op : String, l : Operand, r : Operand) : Maybe(ConstVal) =
+  if optIsIntConst(l) and optIsIntConst(r) then
+    let a = optIntVal(l) in
+    let b = optIntVal(r) in
+    if optStrEq(op, "+") then Just(CInt(int_to_string(optWrap32(a + b))))
+    else if optStrEq(op, "-") then Just(CInt(int_to_string(optWrap32(a - b))))
+    else if optStrEq(op, "*") then Just(CInt(int_to_string(optWrap32(a * b))))
+    else if optStrEq(op, "==") then Just(CBool(optWrap32(a) == optWrap32(b)))
+    else if optStrEq(op, "!=") then Just(CBool(optWrap32(a) != optWrap32(b)))
+    else if optStrEq(op, "<")  then Just(CBool(optWrap32(a) <  optWrap32(b)))
+    else if optStrEq(op, "<=") then Just(CBool(optWrap32(a) <= optWrap32(b)))
+    else if optStrEq(op, ">")  then Just(CBool(optWrap32(a) >  optWrap32(b)))
+    else if optStrEq(op, ">=") then Just(CBool(optWrap32(a) >= optWrap32(b)))
+    else Nothing                (* "/" and "%" never folded — ÷0 diverges from CEK *)
+  else if optIsBoolConst(l) and optIsBoolConst(r) then
+    let a = optBoolVal(l) in
+    let b = optBoolVal(r) in
+    if optStrEq(op, "&&") then Just(CBool(a and b))
+    else if optStrEq(op, "||") then Just(CBool(a or b))
+    else Nothing
+  else Nothing
+
+fn optFoldUnary(op : String, s : Operand) : Maybe(ConstVal) =
+  if optStrEq(op, "-") and optIsIntConst(s) then Just(CInt(int_to_string(optWrap32(0 - optIntVal(s)))))
+  else if optStrEq(op, "not") and optIsBoolConst(s) then Just(CBool(not optBoolVal(s)))
+  else Nothing
+
+fn optFoldInstr(i : Instr) : Instr =
+  match i with
+  | IBinOp(d, op, l, r) => match optFoldBinop(op, l, r) with
+                           | Just(c) => IAssign(d, OConst(c)) | Nothing => i end
+  | IUnary(d, op, s)    => match optFoldUnary(op, s) with
+                           | Just(c) => IAssign(d, OConst(c)) | Nothing => i end
+  | _                   => i
+  end
+
+fn optFoldBody(b : List(Instr)) : List(Instr) =
+  match b with | Nil => Nil | Cons(i, r) => Cons(optFoldInstr(i), optFoldBody(r)) end
+
+fn optConstFoldFns(fns : List(Function)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optWithBody(f, optFoldBody(optFnBody(f))), optConstFoldFns(r))
+  end
+
+fn optConstFold(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optConstFoldFns(fns), g), site) end
+
+
+(* ══ Pass: algebraic_simplify  (opt.py algebraic_simplify) ══════════════════ *)
+
+fn optAlgArith(op : String, l : Operand, r : Operand) : Maybe(Operand) =
+  let zl = optIsIntConst(l) and optIntVal(l) == 0 in
+  let zr = optIsIntConst(r) and optIntVal(r) == 0 in
+  let ol = optIsIntConst(l) and optIntVal(l) == 1 in
+  let orr = optIsIntConst(r) and optIntVal(r) == 1 in
+  if optStrEq(op, "+") then (if zr then Just(l) else if zl then Just(r) else Nothing)
+  else if optStrEq(op, "-") then (if zr then Just(l) else Nothing)
+  else if optStrEq(op, "*") then
+    (if orr then Just(l)
+     else if ol then Just(r)
+     else if zr or zl then Just(OConst(CInt("0")))
+     else Nothing)
+  else Nothing
+
+fn optAlgBool(op : String, l : Operand, r : Operand) : Maybe(Operand) =
+  let tl = optIsBoolConst(l) and optBoolVal(l) in
+  let tr = optIsBoolConst(r) and optBoolVal(r) in
+  let fl = optIsBoolConst(l) and (not optBoolVal(l)) in
+  let fr = optIsBoolConst(r) and (not optBoolVal(r)) in
+  if optStrEq(op, "&&") then
+    (if tr then Just(l)
+     else if tl then Just(r)
+     else if fr or fl then Just(OConst(CBool(false)))
+     else Nothing)
+  else if optStrEq(op, "||") then
+    (if fr then Just(l)
+     else if fl then Just(r)
+     else if tr or tl then Just(OConst(CBool(true)))
+     else Nothing)
+  else Nothing
+
+fn optAlgBinop(op : String, l : Operand, r : Operand) : Maybe(Operand) =
+  match optAlgArith(op, l, r) with
+  | Just(v) => Just(v)
+  | Nothing => optAlgBool(op, l, r)
+  end
+
+fn optAlgInstr(i : Instr) : Instr =
+  match i with
+  | IBinOp(d, op, l, r) => match optAlgBinop(op, l, r) with
+                           | Just(v) => IAssign(d, v) | Nothing => i end
+  | _                   => i
+  end
+
+fn optAlgBody(b : List(Instr)) : List(Instr) =
+  match b with | Nil => Nil | Cons(i, r) => Cons(optAlgInstr(i), optAlgBody(r)) end
+
+fn optAlgFns(fns : List(Function)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optWithBody(f, optAlgBody(optFnBody(f))), optAlgFns(r))
+  end
+
+fn optAlgebraic(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optAlgFns(fns), g), site) end
+
+
+(* ══ Pass: copy_prop  (opt.py copy_prop / _map_uses / _def_name) ════════════ *)
+(* Block-local Tmp→Tmp copy propagation.  The per-block `copies` map is reset at
+   each block leader — detected inline (before a label, and after a terminator)
+   instead of building the CFG (opt.py uses _blocks == build_cfg, but only for the
+   block boundaries; concatenating the blocks' instrs equals fn.body). *)
+
+fn optCpVal(v : Operand, copies : List((String, Tmp))) : Operand =
+  match v with
+  | OTmp(t)   => match optAssocTmp(copies, optTmpName(t)) with
+                 | Just(s) => OTmp(s) | Nothing => v end
+  | OConst(_) => v
+  end
+
+fn optCpOps(xs : List(Operand), copies : List((String, Tmp))) : List(Operand) =
+  match xs with
+  | Nil        => Nil
+  | Cons(v, r) => Cons(optCpVal(v, copies), optCpOps(r, copies))
+  end
+
+(* _map_uses with the copy substitution (uses only; defs/labels/idx untouched). *)
+fn optCpMapUses(i : Instr, copies : List((String, Tmp))) : Instr =
+  match i with
+  | IAssign(d, s)          => IAssign(d, optCpVal(s, copies))
+  | IBinOp(d, op, l, r)    => IBinOp(d, op, optCpVal(l, copies), optCpVal(r, copies))
+  | IUnary(d, op, s)       => IUnary(d, op, optCpVal(s, copies))
+  | ICall(md, f, args)     => ICall(md, f, optCpOps(args, copies))
+  | IClosureCall(d, fv, a) => IClosureCall(d, optCpVal(fv, copies), optCpVal(a, copies))
+  | IReturn(mv)            => match mv with
+                              | Just(v) => IReturn(Just(optCpVal(v, copies))) | Nothing => IReturn(Nothing) end
+  | ICondJump(c, t, f)     => ICondJump(optCpVal(c, copies), t, f)
+  | IAlloc(d, tag, fs)     => IAlloc(d, tag, optCpOps(fs, copies))
+  | IGetTag(d, s)          => IGetTag(d, optCpVal(s, copies))
+  | IGetField(d, s, idx)   => IGetField(d, optCpVal(s, copies), idx)
+  | IAllocClosure(d, f, cs) => IAllocClosure(d, f, optCpOps(cs, copies))
+  | _                      => i
+  end
+
+(* Drop any copy entry keyed by `d` or whose canonical source is `d`.
+   Structure-preserving: the O(n)-alloc spine rebuild only happens when some
+   entry actually matches; otherwise the input list is returned untouched.
+   In near-SSA TAC a def `d` is fresh, so nothing matches and this is O(1). *)
+fn optCpAnyKill(copies : List((String, Tmp)), d : String) : Bool =
+  match copies with
+  | Nil             => false
+  | Cons((k, s), r) =>
+      if optStrEq(k, d) then true
+      else if optStrEq(optTmpName(s), d) then true
+      else optCpAnyKill(r, d)
+  end
+
+fn optCpKillDo(copies : List((String, Tmp)), d : String) : List((String, Tmp)) =
+  match copies with
+  | Nil             => Nil
+  | Cons((k, s), r) =>
+      if optStrEq(k, d) then optCpKillDo(r, d)
+      else if optStrEq(optTmpName(s), d) then optCpKillDo(r, d)
+      else Cons((k, s), optCpKillDo(r, d))
+  end
+
+fn optCpKill(copies : List((String, Tmp)), d : String) : List((String, Tmp)) =
+  if optCpAnyKill(copies, d) then optCpKillDo(copies, d) else copies
+
+(* Update the copy map for one (already use-substituted) instruction. *)
+fn optCpUpdate(copies : List((String, Tmp)), i : Instr) : List((String, Tmp)) =
+  let c1 = match optDefName(i) with | Just(d) => optCpKill(copies, d) | Nothing => copies end in
+  match i with
+  | IAssign(d, OTmp(s)) => Cons((optTmpName(d), s), c1)
+  | _                   => c1
+  end
+
+fn optCpBody(instrs : List(Instr), copies : List((String, Tmp))) : List(Instr) =
+  match instrs with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      let copies0 = if optIsLabel(i) then Nil else copies in
+      let i2      = optCpMapUses(i, copies0) in
+      let copies1 = optCpUpdate(copies0, i2) in
+      let copiesN = if optIsTerm(i2) then Nil else copies1 in
+      Cons(i2, optCpBody(r, copiesN))
+  end
+
+fn optCpFns(fns : List(Function)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optWithBody(f, optCpBody(optFnBody(f), Nil)), optCpFns(r))
+  end
+
+fn optCopyProp(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optCpFns(fns), g), site) end
+
+
+(* ══ Pass: cse  (opt.py cse / _cse_key / _vkey) ═════════════════════════════ *)
+(* Block-local common-subexpression elimination over pure non-allocating instrs
+   (IBinOp / IUnary / IGetTag / IGetField), keyed by opcode + operands. *)
+
+fn optVKey(v : Operand) : String =
+  match v with
+  | OTmp(t)   => "t:" + optTmpName(t)
+  | OConst(c) => match c with
+                 | CInt(s)   => "c:int:" + s
+                 | CFloat(s) => "c:float:" + s
+                 | CStr(s)   => "c:str:" + s
+                 | CBool(b)  => if b then "c:bool:1" else "c:bool:0"
+                 | CUnit     => "c:unit:"
+                 end
+  end
+
+(* Some(key) for the four pure non-allocating shapes, else Nothing. *)
+fn optCseKey(i : Instr) : Maybe(String) =
+  match i with
+  | IBinOp(_, op, l, r)  => Just("b|" + op + "|" + optVKey(l) + "|" + optVKey(r))
+  | IUnary(_, op, s)     => Just("u|" + op + "|" + optVKey(s))
+  | IGetTag(_, s)        => Just("g|" + optVKey(s))
+  | IGetField(_, s, idx) => Just("f|" + optVKey(s) + "|" + int_to_string(idx))
+  | _                    => Nothing
+  end
+
+fn optCseDst(i : Instr) : Tmp =
+  match i with
+  | IBinOp(d, _, _, _) => d
+  | IUnary(d, _, _)    => d
+  | IGetTag(d, _)      => d
+  | IGetField(d, _, _) => d
+  | _                  => Tmp("")
+  end
+
+(* avail table: key → (canonical Tmp, its use-set). *)
+fn optCseLookup(avail : List((String, (Tmp, List(String)))), k : String) : Maybe(Tmp) =
+  match avail with
+  | Nil                  => Nothing
+  | Cons((n, (tm, _)), r) => if optStrEq(n, k) then Just(tm) else optCseLookup(r, k)
+  end
+
+(* Kill entries whose canonical Tmp is `d`, or whose use-set contains `d`.
+   Structure-preserving (see optCpKill): rebuild the spine only on a real
+   match, else return the input untouched — O(1) for a fresh def. *)
+fn optCseAnyKill(avail : List((String, (Tmp, List(String)))), d : String) : Bool =
+  match avail with
+  | Nil                    => false
+  | Cons((k, (tm, us)), r) =>
+      if optStrEq(optTmpName(tm), d) then true
+      else if optMember(d, us) then true
+      else optCseAnyKill(r, d)
+  end
+
+fn optCseKillDo(avail : List((String, (Tmp, List(String)))), d : String)
+   : List((String, (Tmp, List(String)))) =
+  match avail with
+  | Nil                    => Nil
+  | Cons((k, (tm, us)), r) =>
+      if optStrEq(optTmpName(tm), d) then optCseKillDo(r, d)
+      else if optMember(d, us) then optCseKillDo(r, d)
+      else Cons((k, (tm, us)), optCseKillDo(r, d))
+  end
+
+fn optCseKill(avail : List((String, (Tmp, List(String)))), d : String)
+   : List((String, (Tmp, List(String)))) =
+  if optCseAnyKill(avail, d) then optCseKillDo(avail, d) else avail
+
+fn optCseStep(i : Instr, avail : List((String, (Tmp, List(String)))))
+   : (Instr, List((String, (Tmp, List(String))))) =
+  let k0 = optCseKey(i) in
+  (* Replace with a copy if the expression is already available. *)
+  let hit = match k0 with | Just(k) => optCseLookup(avail, k) | Nothing => Nothing end in
+  let i2  = match hit with | Just(canon) => IAssign(optCseDst(i), OTmp(canon)) | Nothing => i end in
+  let recordKey = match hit with | Just(_) => Nothing | Nothing => k0 end in
+  (* Kill availability entries defining or using this instr's def. *)
+  let avail1 = match optDefName(i2) with | Just(d) => optCseKill(avail, d) | Nothing => avail end in
+  (* Record the fresh expression (only if not just replaced). *)
+  let avail2 = match recordKey with
+               | Just(k) => Cons((k, (optCseDst(i2), optUses(i2))), avail1)
+               | Nothing => avail1
+               end in
+  (i2, avail2)
+
+fn optCseBody(instrs : List(Instr), avail : List((String, (Tmp, List(String))))) : List(Instr) =
+  match instrs with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      let avail0 = if optIsLabel(i) then Nil else avail in
+      match optCseStep(i, avail0) with
+      | (i2, avail1) =>
+          let availN = if optIsTerm(i2) then Nil else avail1 in
+          Cons(i2, optCseBody(r, availN))
+      end
+  end
+
+fn optCseFns(fns : List(Function)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optWithBody(f, optCseBody(optFnBody(f), Nil)), optCseFns(r))
+  end
+
+fn optCse(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optCseFns(fns), g), site) end
+
+
+(* ══ CFG (port of cfg.py build_cfg) ═════════════════════════════════════════ *)
+
+type OptBlock = | OptBlock of String, List(Instr), List(String), List(String)
+                  (* label, instrs, succs, preds *)
+
+impl Copy for OptBlock = {}
+
+fn optBlkLabel(b : OptBlock) : String = match b with | OptBlock(l, _, _, _) => l end
+fn optBlkInstrs(b : OptBlock) : List(Instr) = match b with | OptBlock(_, i, _, _) => i end
+fn optBlkSuccs(b : OptBlock) : List(String) = match b with | OptBlock(_, _, s, _) => s end
+
+fn optLastInstr(xs : List(Instr)) : Maybe(Instr) =
+  match xs with
+  | Nil        => Nothing
+  | Cons(x, r) => match r with | Nil => Just(x) | _ => optLastInstr(r) end
+  end
+
+(* Block label for a block whose first instr is `first`, at ordinal `idx`. *)
+fn optCfgLabelFor(first : Instr, idx : Int) : String =
+  match first with
+  | ILabel(nm) => nm
+  | _          => if idx == 0 then "__entry__" else "__block_" + int_to_string(idx) + "__"
+  end
+
+(* Close the currently-open block (first, reversed-instrs) at ordinal idx. *)
+fn optCfgClose(first : Instr, revI : List(Instr), idx : Int, doneRev : List(OptBlock))
+   : List(OptBlock) =
+  Cons(OptBlock(optCfgLabelFor(first, idx), optRevInstr(revI), Nil, Nil), doneRev)
+
+(* Forward scan producing blocks in order.  `open` carries (firstInstr, revInstrs)
+   of the block being built; `idx` is that block's ordinal.  Mirrors the leader
+   rules: index 0, every ILabel, and the instr after any terminator. *)
+fn optCfgScan(instrs : List(Instr), open : Maybe((Instr, List(Instr))),
+              idx : Int, doneRev : List(OptBlock)) : List(OptBlock) =
+  match instrs with
+  | Nil =>
+      (match open with
+       | Just((f0, revI)) => optRevBlocks(optCfgClose(f0, revI, idx, doneRev))
+       | Nothing          => optRevBlocks(doneRev)
+       end)
+  | Cons(i, rest) =>
+      (match open with
+       | Nothing =>
+           (* start a fresh block with i as first instr *)
+           let openN = Just((i, Cons(i, Nil))) in
+           if optIsTerm(i) then optCfgScan(rest, Nothing, idx + 1, optCfgClose(i, Cons(i, Nil), idx, doneRev))
+           else optCfgScan(rest, openN, idx, doneRev)
+       | Just((f0, revI)) =>
+           if optIsLabel(i) then
+             (* a label starts a new block: close current, open new at i *)
+             let doneRev1 = optCfgClose(f0, revI, idx, doneRev) in
+             optCfgScan(rest, Just((i, Cons(i, Nil))), idx + 1, doneRev1)
+           else
+             let revI1 = Cons(i, revI) in
+             if optIsTerm(i) then optCfgScan(rest, Nothing, idx + 1, optCfgClose(f0, revI1, idx, doneRev))
+             else optCfgScan(rest, Just((f0, revI1)), idx, doneRev)
+       end)
+  end
+
+fn optRevBlocksGo(xs : List(OptBlock), acc : List(OptBlock)) : List(OptBlock) =
+  match xs with | Nil => acc | Cons(x, r) => optRevBlocksGo(r, Cons(x, acc)) end
+fn optRevBlocks(xs : List(OptBlock)) : List(OptBlock) = optRevBlocksGo(xs, Nil)
+
+(* Wire successor edges (needs the next block's label for fall-through). *)
+fn optCfgSetSuccs(b : OptBlock, nextLbl : Maybe(String)) : OptBlock =
+  match b with
+  | OptBlock(l, instrs, _, _) =>
+      let succs = match optLastInstr(instrs) with
+                  | Just(IJump(t))            => Cons(t, Nil)
+                  | Just(ICondJump(_, t, f))  => Cons(t, Cons(f, Nil))
+                  | Just(IReturn(_))          => Nil
+                  | _                         => match nextLbl with | Just(nl) => Cons(nl, Nil) | Nothing => Nil end
+                  end in
+      OptBlock(l, instrs, succs, Nil)
+  end
+
+fn optCfgSuccs(blocks : List(OptBlock)) : List(OptBlock) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) =>
+      let nextLbl = match r with | Cons(nb, _) => Just(optBlkLabel(nb)) | Nil => Nothing end in
+      Cons(optCfgSetSuccs(b, nextLbl), optCfgSuccs(r))
+  end
+
+(* Predecessor edges: labels of blocks whose succs include `lbl`. *)
+fn optPredsFor(lbl : String, all : List(OptBlock)) : List(String) =
+  match all with
+  | Nil        => Nil
+  | Cons(b, r) => if optMember(lbl, optBlkSuccs(b)) then Cons(optBlkLabel(b), optPredsFor(lbl, r))
+                  else optPredsFor(lbl, r)
+  end
+
+fn optCfgPreds(blocks : List(OptBlock), all : List(OptBlock)) : List(OptBlock) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) => match b with
+                  | OptBlock(l, instrs, succs, _) =>
+                      Cons(OptBlock(l, instrs, succs, optPredsFor(l, all)), optCfgPreds(r, all))
+                  end
+  end
+
+fn optBuildCfg(f : Function) : List(OptBlock) =
+  match optFnBody(f) with
+  | Nil => Cons(OptBlock("__entry__", Nil, Nil, Nil), Nil)
+  | _   => let wired = optCfgSuccs(optCfgScan(optFnBody(f), Nothing, 0, Nil)) in
+           optCfgPreds(wired, wired)
+  end
+
+
+(* ══ Liveness (port of liveness.py analyse — backward dataflow) ═════════════ *)
+(* Round-robin to a fixpoint (monotone ⇒ same least fixpoint as the worklist).
+   Represent live_in / live_out as assoc label → name-set. *)
+
+(* gen/kill for one block: gen = upward-exposed uses, kill = defined names. *)
+(* Name-sets are StrSet (balanced tree) — see the note above.  gen/kill and
+   live_in / live_out carry StrSet; the label→set maps stay assoc lists (block
+   count is small; the quadratic was in the name-sets, not the label lookup). *)
+fn optBlkGenKillGo(instrs : List(Instr), gen : StrSet, kill : StrSet)
+   : (StrSet, StrSet) =
+  match instrs with
+  | Nil        => (gen, kill)
+  | Cons(i, r) =>
+      let gen1  = ssUnion(gen, ssDiff(ssFromList(optUses(i), SsLeaf), kill)) in
+      let kill1 = ssUnion(kill, ssFromList(optDefs(i), SsLeaf)) in
+      optBlkGenKillGo(r, gen1, kill1)
+  end
+
+fn optBlkGenKill(b : OptBlock) : (StrSet, StrSet) =
+  optBlkGenKillGo(optBlkInstrs(b), SsLeaf, SsLeaf)
+
+(* Precompute (label → (gen,kill)). *)
+fn optGenKillMap(blocks : List(OptBlock)) : List((String, (StrSet, StrSet))) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) => Cons((optBlkLabel(b), optBlkGenKill(b)), optGenKillMap(r))
+  end
+
+(* liveness's own label→StrSet lookup (licm keeps its own List(String)-valued
+   lookup inline in optDomOf). *)
+fn optLiveGet(m : List((String, StrSet)), lbl : String) : StrSet =
+  match m with
+  | Nil             => SsLeaf
+  | Cons((k, v), r) => if optStrEq(k, lbl) then v else optLiveGet(r, lbl)
+  end
+
+fn optGkOf(m : List((String, (StrSet, StrSet))), lbl : String)
+   : (StrSet, StrSet) =
+  match m with
+  | Nil             => (SsLeaf, SsLeaf)
+  | Cons((k, v), r) => if optStrEq(k, lbl) then v else optGkOf(r, lbl)
+  end
+
+(* Union of live_in over a block's successors. *)
+fn optUnionSuccIn(succs : List(String), liveIn : List((String, StrSet))) : StrSet =
+  match succs with
+  | Nil        => SsLeaf
+  | Cons(s, r) => ssUnion(optLiveGet(liveIn, s), optUnionSuccIn(r, liveIn))
+  end
+
+(* One Jacobi sweep: recompute live_in for every block from the previous live_in. *)
+fn optLiveSweep(blocks : List(OptBlock),
+                gk : List((String, (StrSet, StrSet))),
+                liveIn : List((String, StrSet))) : List((String, StrSet)) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) =>
+      let lo = optUnionSuccIn(optBlkSuccs(b), liveIn) in
+      match optGkOf(gk, optBlkLabel(b)) with
+      | (gen, kill) =>
+          let li = ssUnion(gen, ssDiff(lo, kill)) in
+          Cons((optBlkLabel(b), li), optLiveSweep(r, gk, liveIn))
+      end
+  end
+
+fn optLiveInEq(a : List((String, StrSet)), b : List((String, StrSet))) : Bool =
+  match a with
+  | Nil             => true
+  | Cons((k, v), r) => ssEq(v, optLiveGet(b, k)) and optLiveInEq(r, b)
+  end
+
+fn optLiveFix(blocks : List(OptBlock),
+              gk : List((String, (StrSet, StrSet))),
+              liveIn : List((String, StrSet)), fuel : Int) : List((String, StrSet)) =
+  if fuel <= 0 then liveIn
+  else
+    let next = optLiveSweep(blocks, gk, liveIn) in
+    if optLiveInEq(next, liveIn) then next
+    else optLiveFix(blocks, gk, next, fuel - 1)
+
+(* live_out map from the fixpoint live_in map. *)
+fn optLiveOutMap(blocks : List(OptBlock), liveIn : List((String, StrSet)))
+   : List((String, StrSet)) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) => Cons((optBlkLabel(b), optUnionSuccIn(optBlkSuccs(b), liveIn)), optLiveOutMap(r, liveIn))
+  end
+
+(* analyse: returns label → live_out. *)
+fn optLiveness(blocks : List(OptBlock)) : List((String, StrSet)) =
+  let gk = optGenKillMap(blocks) in
+  let fixIn = optLiveFix(blocks, gk, Nil, 10000) in
+  optLiveOutMap(blocks, fixIn)
+
+
+(* ══ Pass: dce  (opt.py dce — global liveness, iterated to a fixpoint) ══════ *)
+
+(* Process one block's instrs backward: returns (kept-instrs-in-order,
+   live-into-block, changed).  `liveOut` is the block's live-out set. *)
+fn optDceBlock(instrs : List(Instr), liveOut : StrSet, globals : List(String))
+   : (List(Instr), StrSet, Bool) =
+  match instrs with
+  | Nil        => (Nil, liveOut, false)
+  | Cons(i, r) =>
+      match optDceBlock(r, liveOut, globals) with
+      | (keptRest, liveAfter, chRest) =>
+          let drop = match optPureDefName(i) with
+                     | Just(n) => (not ssMember(n, liveAfter)) and (not optMember(n, globals))
+                     | Nothing => false
+                     end in
+          if drop then (keptRest, liveAfter, true)
+          else
+            let liveBefore = ssUnion(ssDiff(liveAfter, ssFromList(optDefs(i), SsLeaf)), ssFromList(optUses(i), SsLeaf)) in
+            (Cons(i, keptRest), liveBefore, chRest)
+      end
+  end
+
+(* One dce pass over all blocks: concat kept instrs, track any change. *)
+fn optDceBlocks(blocks : List(OptBlock), liveOut : List((String, StrSet)),
+                globals : List(String)) : (List(Instr), Bool) =
+  match blocks with
+  | Nil        => (Nil, false)
+  | Cons(b, r) =>
+      match optDceBlock(optBlkInstrs(b), optLiveGet(liveOut, optBlkLabel(b)), globals) with
+      | (kept, _, ch) =>
+          match optDceBlocks(r, liveOut, globals) with
+          | (restKept, chRest) => (optAppendInstr(kept, restKept), ch or chRest)
+          end
+      end
+  end
+
+(* Iterate build_cfg + liveness + one dce pass on ONE function to a fixpoint. *)
+fn optDceFn(f : Function, globals : List(String), fuel : Int) : Function =
+  if fuel <= 0 then f
+  else
+    let blocks  = optBuildCfg(f) in
+    let liveOut = optLiveness(blocks) in
+    match optDceBlocks(blocks, liveOut, globals) with
+    | (newBody, changed) =>
+        let f2 = optWithBody(f, newBody) in
+        if changed then optDceFn(f2, globals, fuel - 1) else f2
+    end
+
+fn optDceFns(fns : List(Function), globals : List(String)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optDceFn(f, globals, 10000), optDceFns(r, globals))
+  end
+
+fn optDce(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optDceFns(fns, g), g), site) end
+
+
+(* ══ Pass: devirt  (opt.py devirt / _extract_dispatch) ═════════════════════ *)
+
+(* Substring test: does `s` contain a '$' (36)?  (stub names carry `m$Type`.) *)
+fn optHasDollarGo(s : String, i : Int, n : Int) : Bool =
+  if i >= n then false
+  else if string_index(s, i) == 36 then true
+  else optHasDollarGo(s, i + 1, n)
+fn optHasDollar(s : String) : Bool = optHasDollarGo(s, 0, string_length(s))
+
+(* The dst-name of the first IGetTag on Tmp `p`, or Nothing. *)
+fn optFindTagTmp(body : List(Instr), p : String) : Maybe(String) =
+  match body with
+  | Nil        => Nothing
+  | Cons(i, r) => match i with
+                  | IGetTag(d, OTmp(s)) => if optStrEq(optTmpName(s), p) then Just(optTmpName(d))
+                                           else optFindTagTmp(r, p)
+                  | _                   => optFindTagTmp(r, p)
+                  end
+  end
+
+(* One (tagValue, trueLabel) if (i0,i1) is a `tag == "Con"` / ICondJump pair. *)
+fn optTagArm(i0 : Instr, i1 : Instr, tagTmp : String) : Maybe((String, String)) =
+  match i0 with
+  | IBinOp(d0, op, OTmp(lt), OConst(CStr(tagv))) =>
+      if optStrEq(op, "==") and optStrEq(optTmpName(lt), tagTmp) then
+        (match i1 with
+         | ICondJump(OTmp(ct), tl, _) => if optStrEq(optTmpName(ct), optTmpName(d0)) then Just((tagv, tl)) else Nothing
+         | _                          => Nothing
+         end)
+      else Nothing
+  | _ => Nothing
+  end
+
+fn optTagArms(body : List(Instr), tagTmp : String) : List((String, String)) =
+  match body with
+  | Cons(i0, Cons(i1, rest)) =>
+      let here = optTagArm(i0, i1, tagTmp) in
+      let more = optTagArms(Cons(i1, rest), tagTmp) in
+      (match here with | Just(pr) => Cons(pr, more) | Nothing => more end)
+  | _ => Nil
+  end
+
+(* Following the instrs after a label (skipping further labels), is the first real
+   instr `m$Type(p)` for the given stub name?  Returns Just(target fn). *)
+fn optFirstArmCall(after : List(Instr), fnName : String, p : String) : Maybe(String) =
+  match after with
+  | Nil        => Nothing
+  | Cons(c, r) => match c with
+                  | ILabel(_) => optFirstArmCall(r, fnName, p)
+                  | ICall(_, cf, args) =>
+                      if optStartsWith(cf, fnName + "$") and optLenOperand(args) == 1 then
+                        (match args with
+                         | Cons(OTmp(a0), Nil) => if optStrEq(optTmpName(a0), p) then Just(cf) else Nothing
+                         | _                   => Nothing
+                         end)
+                      else Nothing
+                  | _ => Nothing
+                  end
+  end
+
+fn optArmTargets(body : List(Instr), fnName : String, p : String) : List((String, String)) =
+  match body with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      let here = match i with
+                 | ILabel(nm) => match optFirstArmCall(r, fnName, p) with
+                                 | Just(t) => Just((nm, t)) | Nothing => Nothing end
+                 | _          => Nothing
+                 end in
+      let more = optArmTargets(r, fnName, p) in
+      (match here with | Just(pr) => Cons(pr, more) | Nothing => more end)
+  end
+
+(* Combine: tag → target, keeping only tags whose arm has a known target. *)
+fn optDispatchMap(tagArms : List((String, String)), armTargets : List((String, String)))
+   : List((String, String)) =
+  match tagArms with
+  | Nil             => Nil
+  | Cons((tg, arm), r) =>
+      match optAssocStr(armTargets, arm) with
+      | Just(t) => Cons((tg, t), optDispatchMap(r, armTargets))
+      | Nothing => optDispatchMap(r, armTargets)
+      end
+  end
+
+(* opt.py _extract_dispatch: Nothing unless `fn` is a trait-dispatch stub. *)
+fn optExtractDispatch(f : Function) : Maybe(List((String, String))) =
+  if optHasDollar(optFnName(f)) then Nothing
+  else match optFnParams(f) with
+       | Nil          => Nothing
+       | Cons(p, _)   =>
+           match optFindTagTmp(optFnBody(f), p) with
+           | Nothing       => Nothing
+           | Just(tagTmp)  =>
+               let mp = optDispatchMap(optTagArms(optFnBody(f), tagTmp),
+                                       optArmTargets(optFnBody(f), optFnName(f), p)) in
+               match mp with | Nil => Nothing | _ => Just(mp) end
+           end
+       end
+
+(* stubs: fn-name → (tag → target). *)
+fn optCollectStubs(fns : List(Function)) : List((String, List((String, String)))) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => match optExtractDispatch(f) with
+                  | Just(mp) => Cons((optFnName(f), mp), optCollectStubs(r))
+                  | Nothing  => optCollectStubs(r)
+                  end
+  end
+
+fn optAssocStubs(xs : List((String, List((String, String)))), k : String)
+   : Maybe(List((String, String))) =
+  match xs with
+  | Nil             => Nothing
+  | Cons((n, v), r) => if optStrEq(n, k) then Just(v) else optAssocStubs(r, k)
+  end
+
+(* Rewrite one call if its argument's constructor tag is statically known. *)
+fn optDevirtCall(i : Instr, allocTag : List((String, String)),
+                 stubs : List((String, List((String, String))))) : Instr =
+  match i with
+  | ICall(dst, cf, args) =>
+      (match optAssocStubs(stubs, cf) with
+       | Nothing => i
+       | Just(mp) =>
+           (match args with
+            | Cons(OTmp(a0), Nil) =>
+                (match optAssocStr(allocTag, optTmpName(a0)) with
+                 | Just(tg) => match optAssocStr(mp, tg) with
+                               | Just(target) => ICall(dst, target, args) | Nothing => i end
+                 | Nothing  => i
+                 end)
+            | _ => i
+            end)
+       end)
+  | _ => i
+  end
+
+(* Assoc set/remove for the block-local tag map. *)
+fn optTagPut(m : List((String, String)), k : String, v : String) : List((String, String)) =
+  Cons((k, v), optTagDrop(m, k))
+fn optTagDrop(m : List((String, String)), k : String) : List((String, String)) =
+  match m with
+  | Nil             => Nil
+  | Cons((n, v), r) => if optStrEq(n, k) then optTagDrop(r, k) else Cons((n, v), optTagDrop(r, k))
+  end
+
+(* Update tag tracking AFTER the rewrite (a def kills the old fact). *)
+fn optDevirtTrack(i : Instr, allocTag : List((String, String))) : List((String, String)) =
+  match i with
+  | IAlloc(d, tag, _)   => optTagPut(allocTag, optTmpName(d), tag)
+  | IAssign(d, OTmp(s)) =>
+      let dropped = optTagDrop(allocTag, optTmpName(d)) in
+      (match optAssocStr(allocTag, optTmpName(s)) with
+       | Just(srcTag) => optTagPut(dropped, optTmpName(d), srcTag)
+       | Nothing      => dropped
+       end)
+  | _ => match optDefs(i) with
+         | Cons(d, _) => optTagDrop(allocTag, d)
+         | Nil        => allocTag
+         end
+  end
+
+fn optDevirtBody(instrs : List(Instr), allocTag : List((String, String)),
+                 stubs : List((String, List((String, String))))) : List(Instr) =
+  match instrs with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      (* entering a new block on a label: forget everything *)
+      let at0 = if optIsLabel(i) then Nil else allocTag in
+      let i2  = optDevirtCall(i, at0, stubs) in
+      let at1 = optDevirtTrack(i2, at0) in
+      (* leaving the block along an edge: forget everything *)
+      let atN = if optIsTerm(i2) then Nil else at1 in
+      Cons(i2, optDevirtBody(r, atN, stubs))
+  end
+
+fn optDevirtFns(fns : List(Function), stubs : List((String, List((String, String))))) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optWithBody(f, optDevirtBody(optFnBody(f), Nil, stubs)), optDevirtFns(r, stubs))
+  end
+
+fn optDevirt(t : TAC, site : Int) : (TAC, Int) =
+  match t with
+  | TAC(fns, g) =>
+      let stubs = optCollectStubs(fns) in
+      match stubs with
+      | Nil => (t, site)
+      | _   => (TAC(optDevirtFns(fns, stubs), g), site)
+      end
+  end
+
+
+(* ══ Renaming for inline / closure_elim  (pure fn of site + prefix) ═════════ *)
+(* opt.py's mv/md/mlab memoise via dicts, but the mapping is deterministic:
+   a callee temp `x` (not a param, not a global) → `_{pfx}{site}_{x}`, a label
+   `l` → `.{pfx}{site}_{stripDots(l)}`.  psub maps params → argument operands. *)
+
+fn optRenVal(v : Operand, psub : List((String, Operand)), globals : List(String),
+             pfx : String, site : Int) : Operand =
+  match v with
+  | OConst(_) => v
+  | OTmp(t)   =>
+      let n = optTmpName(t) in
+      (match optAssocOp(psub, n) with
+       | Just(rep) => rep
+       | Nothing   => if optMember(n, globals) then v
+                      else OTmp(Tmp("_" + pfx + int_to_string(site) + "_" + n))
+       end)
+  end
+
+fn optRenDst(d : Tmp, globals : List(String), pfx : String, site : Int) : Tmp =
+  let n = optTmpName(d) in
+  if optMember(n, globals) then d else Tmp("_" + pfx + int_to_string(site) + "_" + n)
+
+fn optRenLab(l : String, pfx : String, site : Int) : String =
+  "." + pfx + int_to_string(site) + "_" + optStripDots(l)
+
+fn optRenOps(xs : List(Operand), psub : List((String, Operand)), globals : List(String),
+             pfx : String, site : Int) : List(Operand) =
+  match xs with
+  | Nil        => Nil
+  | Cons(v, r) => Cons(optRenVal(v, psub, globals, pfx, site), optRenOps(r, psub, globals, pfx, site))
+  end
+
+fn optRenMaybeDst(md : Maybe(Tmp), globals : List(String), pfx : String, site : Int) : Maybe(Tmp) =
+  match md with | Just(d) => Just(optRenDst(d, globals, pfx, site)) | Nothing => Nothing end
+
+(* opt.py _rewrite_inlined: rename uses/defs/labels; leave fn names + IReturn. *)
+fn optRewriteInlined(i : Instr, psub : List((String, Operand)), globals : List(String),
+                     pfx : String, site : Int) : Instr =
+  match i with
+  | IAssign(d, s)          => IAssign(optRenDst(d, globals, pfx, site), optRenVal(s, psub, globals, pfx, site))
+  | IBinOp(d, op, l, r)    => IBinOp(optRenDst(d, globals, pfx, site), op,
+                                     optRenVal(l, psub, globals, pfx, site), optRenVal(r, psub, globals, pfx, site))
+  | IUnary(d, op, s)       => IUnary(optRenDst(d, globals, pfx, site), op, optRenVal(s, psub, globals, pfx, site))
+  | ICall(md, fnm, args)   => ICall(optRenMaybeDst(md, globals, pfx, site), fnm, optRenOps(args, psub, globals, pfx, site))
+  | IClosureCall(d, fv, a) => IClosureCall(optRenDst(d, globals, pfx, site),
+                                           optRenVal(fv, psub, globals, pfx, site), optRenVal(a, psub, globals, pfx, site))
+  | ILabel(n)              => ILabel(optRenLab(n, pfx, site))
+  | IJump(l)               => IJump(optRenLab(l, pfx, site))
+  | ICondJump(c, t, f)     => ICondJump(optRenVal(c, psub, globals, pfx, site), optRenLab(t, pfx, site), optRenLab(f, pfx, site))
+  | IAlloc(d, tag, fs)     => IAlloc(optRenDst(d, globals, pfx, site), tag, optRenOps(fs, psub, globals, pfx, site))
+  | IGetTag(d, s)          => IGetTag(optRenDst(d, globals, pfx, site), optRenVal(s, psub, globals, pfx, site))
+  | IGetField(d, s, idx)   => IGetField(optRenDst(d, globals, pfx, site), optRenVal(s, psub, globals, pfx, site), idx)
+  | IAllocClosure(d, fnm, cs) => IAllocClosure(optRenDst(d, globals, pfx, site), fnm, optRenOps(cs, psub, globals, pfx, site))
+  | _                      => i          (* IReturn — handled by the caller loop *)
+  end
+
+(* zip params with argument operands. *)
+fn optZip(ks : List(String), vs : List(Operand)) : List((String, Operand)) =
+  match ks with
+  | Nil        => Nil
+  | Cons(k, kr) => match vs with
+                   | Cons(v, vr) => Cons((k, v), optZip(kr, vr))
+                   | Nil         => Nil
+                   end
+  end
+
+
+(* ══ Pass: inline  (opt.py inline / _inline_call / _prune_unreachable) ══════ *)
+
+let optInlineMax : Int = 12
+
+(* eligible: small, non-recursive user fn whose body never redefines a param. *)
+fn optDefsHitParams(body : List(Instr), pset : List(String)) : Bool =
+  match body with
+  | Nil        => false
+  | Cons(i, r) =>
+      let selfRec = match i with | ICall(_, cf, _) => false | _ => false end in
+      let hit = optDefsAny(optDefs(i), pset) in
+      if hit then true else optDefsHitParams(r, pset)
+  end
+
+fn optDefsAny(ds : List(String), pset : List(String)) : Bool =
+  match ds with
+  | Nil        => false
+  | Cons(d, r) => if optMember(d, pset) then true else optDefsAny(r, pset)
+  end
+
+fn optBodyHasSelfCall(body : List(Instr), nm : String) : Bool =
+  match body with
+  | Nil        => false
+  | Cons(i, r) => match i with
+                  | ICall(_, cf, _) => if optStrEq(cf, nm) then true else optBodyHasSelfCall(r, nm)
+                  | _               => optBodyHasSelfCall(r, nm)
+                  end
+  end
+
+fn optInlineEligible(name : String, fns : List(Function)) : Bool =
+  if optStrEq(name, "main") or optStrEq(name, "__global_init__") then false
+  else match optFnLookup(fns, name) with
+       | Nothing => false
+       | Just(f) =>
+           if optLenInstr(optFnBody(f)) > optInlineMax then false
+           else if optBodyHasSelfCall(optFnBody(f), name) then false
+           else if optDefsHitParams(optFnBody(f), optFnParams(f)) then false
+           else true
+       end
+
+(* Expand one eligible static call (opt.py _inline_call). *)
+fn optInlineCall(callee : Function, dst : Maybe(Tmp), args : List(Operand),
+                 globals : List(String), site : Int) : List(Instr) =
+  let psub = optZip(optFnParams(callee), args) in
+  let retLabel = "." + "i" + int_to_string(site) + "_ret" in
+  optAppendInstr(optInlineCallBody(optFnBody(callee), dst, psub, globals, site, retLabel),
+                 Cons(ILabel(retLabel), Nil))
+
+fn optInlineCallBody(body : List(Instr), dst : Maybe(Tmp), psub : List((String, Operand)),
+                     globals : List(String), site : Int, retLabel : String) : List(Instr) =
+  match body with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      let out = match i with
+                | IReturn(mv) =>
+                    (match dst with
+                     | Just(dd) => match mv with
+                                   | Just(v) => Cons(IAssign(dd, optRenVal(v, psub, globals, "i", site)), Cons(IJump(retLabel), Nil))
+                                   | Nothing => Cons(IJump(retLabel), Nil)
+                                   end
+                     | Nothing  => Cons(IJump(retLabel), Nil)
+                     end)
+                | _ => Cons(optRewriteInlined(i, psub, globals, "i", site), Nil)
+                end in
+      optAppendInstr(out, optInlineCallBody(r, dst, psub, globals, site, retLabel))
+  end
+
+(* Walk one function body, expanding eligible calls, threading the site counter. *)
+fn optInlineBody(instrs : List(Instr), fns : List(Function), globals : List(String), site : Int)
+   : (List(Instr), Int) =
+  match instrs with
+  | Nil        => (Nil, site)
+  | Cons(i, r) =>
+      match i with
+      | ICall(Just(dst), cf, args) =>
+          if optInlineEligible(cf, fns) and
+             (match optFnLookup(fns, cf) with | Just(f) => optLenOperand(args) == optLenStr(optFnParams(f)) | Nothing => false end)
+          then
+            (match optFnLookup(fns, cf) with
+             | Just(callee) =>
+                 let expanded = optInlineCall(callee, Just(dst), args, globals, site) in
+                 match optInlineBody(r, fns, globals, site + 1) with
+                 | (rest, site2) => (optAppendInstr(expanded, rest), site2)
+                 end
+             | Nothing => match optInlineBody(r, fns, globals, site) with
+                          | (rest, site2) => (Cons(i, rest), site2) end
+             end)
+          else match optInlineBody(r, fns, globals, site) with
+               | (rest, site2) => (Cons(i, rest), site2) end
+      | _ => match optInlineBody(r, fns, globals, site) with
+             | (rest, site2) => (Cons(i, rest), site2) end
+      end
+  end
+
+(* opt.py's `fnmap` holds LIVE references to the Function objects and mutates
+   `fn.body` in place as the pass proceeds — so a function that GROWS from inlining
+   becomes ineligible (body > INLINE_MAX) for call sites processed LATER in the same
+   pass, and if it is inlined later its GROWN body is what gets spliced.  We
+   reproduce that exactly by threading the fnmap: process functions by index, and
+   after each function's body is rewritten, REPLACE it in the map the remaining
+   functions look up against (both for eligibility length and for the inlined body).
+   17_mutual_rec is the witness: is_even inlines is_odd and grows past 12 instrs,
+   which then blocks is_odd's inline-of-is_even and main's is_even calls, leaving
+   is_odd unreachable (pruned) — a frozen snapshot would inline everything. *)
+fn optNthFn(fns : List(Function), i : Int) : Maybe(Function) =
+  match fns with
+  | Nil        => Nothing
+  | Cons(f, r) => if i == 0 then Just(f) else optNthFn(r, i - 1)
+  end
+
+fn optReplaceFn(fns : List(Function), i : Int, nf : Function) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => if i == 0 then Cons(nf, r) else Cons(f, optReplaceFn(r, i - 1, nf))
+  end
+
+fn optInlineWalk(idx : Int, fnmap : List(Function), globals : List(String), site : Int)
+   : (List(Function), Int) =
+  match optNthFn(fnmap, idx) with
+  | Nothing => (Nil, site)
+  | Just(f) =>
+      match optInlineBody(optFnBody(f), fnmap, globals, site) with
+      | (nb, site1) =>
+          let f2 = optWithBody(f, nb) in
+          let fnmap2 = optReplaceFn(fnmap, idx, f2) in
+          match optInlineWalk(idx + 1, fnmap2, globals, site1) with
+          | (rest, site2) => (Cons(f2, rest), site2)
+          end
+      end
+  end
+
+(* Reachability from {main, __global_init__} — named references only. *)
+fn optCalledNames(i : Instr) : List(String) =
+  match i with
+  | ICall(_, cf, _)          => Cons(cf, Nil)
+  | IAllocClosure(_, fnm, _)  => Cons(fnm, Nil)
+  | _                        => Nil
+  end
+
+fn optCalledInBody(body : List(Instr)) : List(String) =
+  match body with
+  | Nil        => Nil
+  | Cons(i, r) => optAppendStr(optCalledNames(i), optCalledInBody(r))
+  end
+
+fn optReachDfs(stack : List(String), seen : List(String), fns : List(Function)) : List(String) =
+  match stack with
+  | Nil        => seen
+  | Cons(n, r) =>
+      if optMember(n, seen) then optReachDfs(r, seen, fns)
+      else
+        let seen1 = Cons(n, seen) in
+        let callees = match optFnLookup(fns, n) with
+                      | Just(f) => optCalledInBody(optFnBody(f)) | Nothing => Nil end in
+        optReachDfs(optAppendStr(callees, r), seen1, fns)
+  end
+
+fn optFilterReachable(fns : List(Function), seen : List(String)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => if optMember(optFnName(f), seen) then Cons(f, optFilterReachable(r, seen))
+                  else optFilterReachable(r, seen)
+  end
+
+fn optRootsPresent(fns : List(Function)) : List(String) =
+  let r0 = match optFnLookup(fns, "main") with | Just(_) => Cons("main", Nil) | Nothing => Nil end in
+  match optFnLookup(fns, "__global_init__") with
+  | Just(_) => optAppendStr(r0, Cons("__global_init__", Nil))
+  | Nothing => r0
+  end
+
+fn optPruneUnreachable(t : TAC) : TAC =
+  match t with
+  | TAC(fns, g) =>
+      match optFnLookup(fns, "main") with
+      | Nothing => t                        (* no entry to anchor from *)
+      | Just(_) =>
+          let seen = optReachDfs(optRootsPresent(fns), Nil, fns) in
+          TAC(optFilterReachable(fns, seen), g)
+      end
+  end
+
+fn optInline(t : TAC, site : Int) : (TAC, Int) =
+  match t with
+  | TAC(fns, g) =>
+      match optInlineWalk(0, fns, g, site) with
+      | (fns1, site1) => (optPruneUnreachable(TAC(fns1, g)), site1)
+      end
+  end
+
+
+(* ══ Pass: licm  (opt.py licm — loop-invariant code motion) ═════════════════ *)
+(* lower.py's intra-function CFGs are ACYCLIC (only forward branches), so this
+   pass finds no back-edges and is a no-op on the corpus.  It is ported through
+   back-edge detection (build_cfg + dominators): with no back-edge every function
+   is returned unchanged, matching opt.py.  The hoist itself never fires on the
+   corpus and is intentionally not reconstructed here (a faithful no-op — if a
+   loop-forming construct is ever added, the differential will flag the gap). *)
+
+(* Iterative dominators (opt.py _dominators). dom[entry]={entry};
+   dom[l] = {l} ∪ (⋂ dom[p] for preds p). *)
+fn optAllLabels(blocks : List(OptBlock)) : List(String) =
+  match blocks with | Nil => Nil | Cons(b, r) => Cons(optBlkLabel(b), optAllLabels(r)) end
+
+fn optDomOf(m : List((String, List(String))), lbl : String) : List(String) =
+  match m with
+  | Nil             => Nil
+  | Cons((k, v), r) => if optStrEq(k, lbl) then v else optDomOf(r, lbl)
+  end
+
+fn optIntersect(xs : List(String), ys : List(String)) : List(String) =
+  match xs with
+  | Nil        => Nil
+  | Cons(x, r) => if optMember(x, ys) then Cons(x, optIntersect(r, ys)) else optIntersect(r, ys)
+  end
+
+fn optPredsOf(blocks : List(OptBlock), lbl : String) : List(String) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) => if optStrEq(optBlkLabel(b), lbl) then match b with | OptBlock(_, _, _, pr) => pr end
+                  else optPredsOf(r, lbl)
+  end
+
+(* Intersection of dom over a block's preds (Nil preds ⇒ full set handled by caller). *)
+fn optDomIntersectPreds(preds : List(String), dom : List((String, List(String))), allLbls : List(String)) : List(String) =
+  match preds with
+  | Nil        => allLbls
+  | Cons(p, r) => match r with
+                  | Nil => optDomOf(dom, p)
+                  | _   => optIntersect(optDomOf(dom, p), optDomIntersectPreds(r, dom, allLbls))
+                  end
+  end
+
+fn optDomSweep(blocks : List(OptBlock), entry : String, allLbls : List(String),
+               dom : List((String, List(String)))) : List((String, List(String))) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b, r) =>
+      let l = optBlkLabel(b) in
+      let newDom = if optStrEq(l, entry) then Cons(entry, Nil)
+                   else optInsert(l, optDomIntersectPreds(optPredsOf(blocks, l), dom, allLbls)) in
+      Cons((l, newDom), optDomSweep(r, entry, allLbls, dom))
+  end
+
+fn optDomInit(allLbls : List(String), full : List(String)) : List((String, List(String))) =
+  match allLbls with
+  | Nil        => Nil
+  | Cons(l, r) => Cons((l, full), optDomInit(r, full))
+  end
+
+fn optDomEq(a : List((String, List(String))), b : List((String, List(String)))) : Bool =
+  match a with
+  | Nil             => true
+  | Cons((k, v), r) => optSetEq(v, optDomOf(b, k)) and optDomEq(r, b)
+  end
+
+fn optDomFix(blocks : List(OptBlock), entry : String, allLbls : List(String),
+             dom : List((String, List(String))), fuel : Int) : List((String, List(String))) =
+  if fuel <= 0 then dom
+  else
+    let next = optDomSweep(blocks, entry, allLbls, dom) in
+    if optDomEq(next, dom) then next else optDomFix(blocks, entry, allLbls, next, fuel - 1)
+
+fn optDominators(blocks : List(OptBlock)) : List((String, List(String))) =
+  match blocks with
+  | Nil        => Nil
+  | Cons(b0, _) =>
+      let allLbls = optAllLabels(blocks) in
+      let entry   = optBlkLabel(b0) in
+      let dom0    = optDomSweep(blocks, entry, allLbls, optDomInit(allLbls, allLbls)) in
+      optDomFix(blocks, entry, allLbls, dom0, 10000)
+  end
+
+(* A back-edge is an edge blk→s where s dominates blk. *)
+fn optHasBackEdgeIn(succs : List(String), self : String, dom : List((String, List(String)))) : Bool =
+  match succs with
+  | Nil        => false
+  | Cons(s, r) => if optMember(s, optDomOf(dom, self)) then true else optHasBackEdgeIn(r, self, dom)
+  end
+
+fn optHasBackEdge(blocks : List(OptBlock), dom : List((String, List(String)))) : Bool =
+  match blocks with
+  | Nil        => false
+  | Cons(b, r) => if optHasBackEdgeIn(optBlkSuccs(b), optBlkLabel(b), dom) then true
+                  else optHasBackEdge(r, dom)
+  end
+
+(* opt.py's licm acts only on natural loops (back-edges). Lark's functional
+   lowering compiles recursion to calls, never intra-function back-edges, so
+   every Lark-lowered CFG is a DAG and licm is a global no-op. Computing the
+   dominator relation here (O(B^2) alloc via optDomInit) was therefore dead
+   work that blew the arena on large functions; return f directly. *)
+fn optLicmFn(f : Function) : Function = f
+
+fn optLicmFns(fns : List(Function)) : List(Function) =
+  match fns with
+  | Nil        => Nil
+  | Cons(f, r) => Cons(optLicmFn(f), optLicmFns(r))
+  end
+
+fn optLicm(t : TAC, site : Int) : (TAC, Int) =
+  match t with | TAC(fns, g) => (TAC(optLicmFns(fns), g), site) end
+
+
+(* ══ Pass: closure_elim  (opt.py closure_elim — scalar-replace closures) ════ *)
+
+let optClosureInlineMax : Int = 24
+
+(* def-count over a body (name → number of defs). *)
+fn optDefCount(body : List(Instr), acc : List((String, Int))) : List((String, Int)) =
+  match body with
+  | Nil        => acc
+  | Cons(i, r) => optDefCount(r, optBumpDefs(optDefs(i), acc))
+  end
+
+fn optBumpDefs(ds : List(String), acc : List((String, Int))) : List((String, Int)) =
+  match ds with
+  | Nil        => acc
+  | Cons(d, r) => optBumpDefs(r, optCountBump(acc, d))
+  end
+
+(* closure_roots: root name → itself for single-def IAllocClosure; alias copies
+   follow single-assignment.  info: root → (lifted fn, captures). *)
+fn optClosureSeed(body : List(Instr), defcount : List((String, Int)),
+                  root : List((String, String)),
+                  info : List((String, (String, List(Operand)))))
+   : (List((String, String)), List((String, (String, List(Operand))))) =
+  match body with
+  | Nil        => (root, info)
+  | Cons(i, r) =>
+      match i with
+      | IAllocClosure(d, fnm, caps) =>
+          if optCountOf(defcount, optTmpName(d)) == 1 then
+            optClosureSeed(r, defcount, Cons((optTmpName(d), optTmpName(d)), root),
+                           Cons((optTmpName(d), (fnm, caps)), info))
+          else optClosureSeed(r, defcount, root, info)
+      | _ => optClosureSeed(r, defcount, root, info)
+      end
+  end
+
+(* One alias-propagation sweep; returns (root, changed). *)
+fn optAliasSweep(body : List(Instr), defcount : List((String, Int)),
+                 root : List((String, String))) : (List((String, String)), Bool) =
+  match body with
+  | Nil        => (root, false)
+  | Cons(i, r) =>
+      match i with
+      | IAssign(d, OTmp(s)) =>
+          let dn = optTmpName(d) in
+          let sn = optTmpName(s) in
+          (match optAssocStr(root, sn) with
+           | Just(rt) =>
+               if (match optAssocStr(root, dn) with | Just(_) => false | Nothing => true end)
+                  and optCountOf(defcount, dn) == 1
+               then match optAliasSweep(r, defcount, Cons((dn, rt), root)) with
+                    | (root2, _) => (root2, true)
+                    end
+               else optAliasSweep(r, defcount, root)
+           | Nothing => optAliasSweep(r, defcount, root)
+           end)
+      | _ => optAliasSweep(r, defcount, root)
+      end
+  end
+
+fn optAliasFix(body : List(Instr), defcount : List((String, Int)),
+               root : List((String, String)), fuel : Int) : List((String, String)) =
+  if fuel <= 0 then root
+  else match optAliasSweep(body, defcount, root) with
+       | (root1, changed) => if changed then optAliasFix(body, defcount, root1, fuel - 1) else root1
+       end
+
+fn optClosureRoots(body : List(Instr), defcount : List((String, Int)))
+   : (List((String, String)), List((String, (String, List(Operand))))) =
+  match optClosureSeed(body, defcount, Nil, Nil) with
+  | (root0, info) => (optAliasFix(body, defcount, root0, 10000), info)
+  end
+
+(* escaped roots: a root-alias used anywhere but the fn-position of an
+   IClosureCall or the source of a followed same-root copy. *)
+fn optEscUse(i : Instr, name : String, r : String, root : List((String, String))) : Bool =
+  (* returns true if this USE of `name` (an alias of root r) is OK (non-escaping) *)
+  match i with
+  | IClosureCall(_, OTmp(fv), a) =>
+      if optStrEq(optTmpName(fv), name) then
+        (match a with
+         | OTmp(at) => not optStrEq(optTmpName(at), name)   (* ok unless also the arg *)
+         | _        => true
+         end)
+      else optEscCopyOk(i, name, r, root)
+  | _ => optEscCopyOk(i, name, r, root)
+  end
+
+fn optEscCopyOk(i : Instr, name : String, r : String, root : List((String, String))) : Bool =
+  match i with
+  | IAssign(d, OTmp(s)) =>
+      if optStrEq(optTmpName(s), name) then
+        (match optAssocStr(root, optTmpName(d)) with | Just(rd) => optStrEq(rd, r) | Nothing => false end)
+      else false
+  | _ => false
+  end
+
+fn optEscInInstr(i : Instr, uses : List(String), root : List((String, String)), acc : List(String)) : List(String) =
+  match uses with
+  | Nil        => acc
+  | Cons(nm, r) =>
+      let acc1 = match optAssocStr(root, nm) with
+                 | Nothing => acc
+                 | Just(rt) => if optEscUse(i, nm, rt, root) then acc else optInsert(rt, acc)
+                 end in
+      optEscInInstr(i, r, root, acc1)
+  end
+
+fn optClosureEscapes(body : List(Instr), root : List((String, String)), acc : List(String)) : List(String) =
+  match body with
+  | Nil        => acc
+  | Cons(i, r) => optClosureEscapes(r, root, optEscInInstr(i, optUses(i), root, acc))
+  end
+
+(* lifted-body scalar-replaceable: 2 params, small, non-recursive, env used ONLY
+   via IGetField. *)
+fn optEnvOnlyGetField(body : List(Instr), env : String, lname : String) : Bool =
+  match body with
+  | Nil        => true
+  | Cons(i, r) =>
+      match i with
+      | ICall(_, cf, _) => if optStrEq(cf, lname) then false else optEnvUsesOk(i, env) and optEnvOnlyGetField(r, env, lname)
+      | _               => optEnvUsesOk(i, env) and optEnvOnlyGetField(r, env, lname)
+      end
+  end
+
+fn optEnvUsesOk(i : Instr, env : String) : Bool =
+  (* every use of env must be as the src of an IGetField *)
+  if optMember(env, optUses(i)) then
+    (match i with
+     | IGetField(_, OTmp(s), _) => optStrEq(optTmpName(s), env)
+     | _                        => false
+     end)
+  else true
+
+fn optLiftedScalarOk(lf : Function) : Bool =
+  match optFnParams(lf) with
+  | Cons(env, Cons(_, Nil)) =>
+      if optLenInstr(optFnBody(lf)) > optClosureInlineMax then false
+      else optEnvOnlyGetField(optFnBody(lf), env, optFnName(lf))
+  | _ => false
+  end
+
+fn optCapAvailable(c : Operand, params : List(String), defcount : List((String, Int))) : Bool =
+  match c with
+  | OConst(_) => true
+  | OTmp(t)   => let n = optTmpName(t) in optMember(n, params) or optCountOf(defcount, n) == 1
+  end
+
+fn optAllCapsAvailable(caps : List(Operand), params : List(String), defcount : List((String, Int))) : Bool =
+  match caps with
+  | Nil        => true
+  | Cons(c, r) => optCapAvailable(c, params, defcount) and optAllCapsAvailable(r, params, defcount)
+  end
+
+(* Which roots to eliminate. *)
+fn optElimSet(info : List((String, (String, List(Operand)))), escaped : List(String),
+              fns : List(Function), params : List(String), defcount : List((String, Int))) : List(String) =
+  match info with
+  | Nil                    => Nil
+  | Cons((r, (fnm, caps)), rest) =>
+      let rest2 = optElimSet(rest, escaped, fns, params, defcount) in
+      if (not optMember(r, escaped)) then
+        (match optFnLookup(fns, fnm) with
+         | Just(lf) => if optLiftedScalarOk(lf) and optAllCapsAvailable(caps, params, defcount)
+                       then Cons(r, rest2) else rest2
+         | Nothing  => rest2
+         end)
+      else rest2
+  end
+
+(* Inline a lifted body at a closure-call site (opt.py _inline_closure). *)
+fn optInlineClosureBody(body : List(Instr), env : String, dst : Tmp, psub : List((String, Operand)),
+                        caps : List(Operand), globals : List(String), site : Int, retLabel : String) : List(Instr) =
+  match body with
+  | Nil        => Nil
+  | Cons(i, r) =>
+      let out = match i with
+                | IGetField(d, OTmp(s), idx) =>
+                    if optStrEq(optTmpName(s), env)
+                    then Cons(IAssign(optRenDst(d, globals, "c", site), optNthOperand(caps, idx)), Nil)
+                    else Cons(optRewriteInlined(i, psub, globals, "c", site), Nil)
+                | IReturn(mv) =>
+                    (match mv with
+                     | Just(v) => Cons(IAssign(dst, optRenVal(v, psub, globals, "c", site)), Cons(IJump(retLabel), Nil))
+                     | Nothing => Cons(IJump(retLabel), Nil)
+                     end)
+                | _ => Cons(optRewriteInlined(i, psub, globals, "c", site), Nil)
+                end in
+      optAppendInstr(out, optInlineClosureBody(r, env, dst, psub, caps, globals, site, retLabel))
+  end
+
+fn optInlineClosure(lf : Function, dst : Tmp, arg : Operand, caps : List(Operand),
+                    globals : List(String), site : Int) : List(Instr) =
+  match optFnParams(lf) with
+  | Cons(env, Cons(actual, _)) =>
+      let psub = Cons((actual, arg), Nil) in
+      let retLabel = "." + "c" + int_to_string(site) + "_ret" in
+      optAppendInstr(optInlineClosureBody(optFnBody(lf), env, dst, psub, caps, globals, site, retLabel),
+                     Cons(ILabel(retLabel), Nil))
+  | _ => Nil
+  end
+
+(* Rewrite one fn body, eliminating closures in `elim` and threading site. *)
+fn optClosureRewrite(body : List(Instr), elim : List(String), root : List((String, String)),
+                     info : List((String, (String, List(Operand)))), fns : List(Function),
+                     globals : List(String), site : Int) : (List(Instr), Int) =
+  match body with
+  | Nil        => (Nil, site)
+  | Cons(i, r) =>
+      (match i with
+       | IAllocClosure(d, _, _) =>
+           if optMember(optTmpName(d), elim)
+           then optClosureRewrite(r, elim, root, info, fns, globals, site)     (* dead alloc *)
+           else optClosureKeep(i, r, elim, root, info, fns, globals, site)
+       | IAssign(d, OTmp(s)) =>
+           let killd = match optAssocStr(root, optTmpName(s)) with | Just(rt) => optMember(rt, elim) | Nothing => false end in
+           let sameRoot = match optAssocStr(root, optTmpName(d)) with
+                          | Just(rd) => match optAssocStr(root, optTmpName(s)) with | Just(rs) => optStrEq(rd, rs) | Nothing => false end
+                          | Nothing  => false end in
+           if killd and sameRoot
+           then optClosureRewrite(r, elim, root, info, fns, globals, site)     (* dead alias copy *)
+           else optClosureKeep(i, r, elim, root, info, fns, globals, site)
+       | IClosureCall(dst, OTmp(fv), arg) =>
+           (match optAssocStr(root, optTmpName(fv)) with
+            | Just(rt) =>
+                if optMember(rt, elim) then
+                  (match optAssocInfo(info, rt) with
+                   | Just((fnm, caps)) =>
+                       (match optFnLookup(fns, fnm) with
+                        | Just(lf) =>
+                            let expanded = optInlineClosure(lf, dst, arg, caps, globals, site) in
+                            match optClosureRewrite(r, elim, root, info, fns, globals, site + 1) with
+                            | (rest, site2) => (optAppendInstr(expanded, rest), site2)
+                            end
+                        | Nothing => optClosureKeep(i, r, elim, root, info, fns, globals, site)
+                        end)
+                   | Nothing => optClosureKeep(i, r, elim, root, info, fns, globals, site)
+                   end)
+                else optClosureKeep(i, r, elim, root, info, fns, globals, site)
+            | Nothing => optClosureKeep(i, r, elim, root, info, fns, globals, site)
+            end)
+       | _ => optClosureKeep(i, r, elim, root, info, fns, globals, site)
+       end)
+  end
+
+fn optClosureKeep(i : Instr, r : List(Instr), elim : List(String), root : List((String, String)),
+                  info : List((String, (String, List(Operand)))), fns : List(Function),
+                  globals : List(String), site : Int) : (List(Instr), Int) =
+  match optClosureRewrite(r, elim, root, info, fns, globals, site) with
+  | (rest, site2) => (Cons(i, rest), site2)
+  end
+
+fn optClosureElimFn(f : Function, fns : List(Function), globals : List(String), site : Int)
+   : (Function, Int) =
+  let body = optFnBody(f) in
+  let defcount = optDefCount(body, Nil) in
+  match optClosureRoots(body, defcount) with
+  | (root, info) =>
+      match info with
+      | Nil => (f, site)          (* no closures here *)
+      | _   =>
+          let escaped = optClosureEscapes(body, root, Nil) in
+          let elim = optElimSet(info, escaped, fns, optFnParams(f), defcount) in
+          match elim with
+          | Nil => (f, site)
+          | _   =>
+              match optClosureRewrite(body, elim, root, info, fns, globals, site) with
+              | (nb, site1) => (optWithBody(f, nb), site1)
+              end
+          end
+      end
+  end
+
+(* Same live-fnmap threading as inline (opt.py mutates fn.body + reads a live
+   fnmap for _lifted_scalar_ok / _inline_closure). *)
+fn optClosureElimWalk(idx : Int, fnmap : List(Function), globals : List(String), site : Int)
+   : (List(Function), Int) =
+  match optNthFn(fnmap, idx) with
+  | Nothing => (Nil, site)
+  | Just(f) =>
+      match optClosureElimFn(f, fnmap, globals, site) with
+      | (f2, site1) =>
+          let fnmap2 = optReplaceFn(fnmap, idx, f2) in
+          match optClosureElimWalk(idx + 1, fnmap2, globals, site1) with
+          | (rest, site2) => (Cons(f2, rest), site2)
+          end
+      end
+  end
+
+fn optClosureElim(t : TAC, site : Int) : (TAC, Int) =
+  match t with
+  | TAC(fns, g) =>
+      match optClosureElimWalk(0, fns, g, site) with
+      | (fns1, site1) => (optPruneUnreachable(TAC(fns1, g)), site1)
+      end
+  end
+
+
+(* ══ Pass dispatch + level bundles + fixpoint driver (opt.py optimize) ══════ *)
+
+(* Apply one named pass. *)
+fn optApplyPass(name : String, t : TAC, site : Int) : (TAC, Int) =
+  if optStrEq(name, "devirt") then optDevirt(t, site)
+  else if optStrEq(name, "inline") then optInline(t, site)
+  else if optStrEq(name, "closure_elim") then optClosureElim(t, site)
+  else if optStrEq(name, "const_fold") then optConstFold(t, site)
+  else if optStrEq(name, "copy_prop") then optCopyProp(t, site)
+  else if optStrEq(name, "algebraic") then optAlgebraic(t, site)
+  else if optStrEq(name, "cse") then optCse(t, site)
+  else if optStrEq(name, "dce") then optDce(t, site)
+  else if optStrEq(name, "licm") then optLicm(t, site)
+  else (t, site)
+
+(* enabled passes for a level, in PASSES order (opt.py LEVELS ∩ PASSES). *)
+fn optPassesForLevel(level : Int) : List(String) =
+  if level <= 0 then Nil
+  else if level == 1 then
+    Cons("const_fold", Cons("copy_prop", Cons("algebraic", Cons("cse", Cons("dce", Nil)))))
+  else if level == 2 then
+    Cons("devirt", Cons("inline",
+      Cons("const_fold", Cons("copy_prop", Cons("algebraic", Cons("cse", Cons("dce", Cons("licm", Nil))))))))
+  else
+    Cons("devirt", Cons("inline", Cons("closure_elim",
+      Cons("const_fold", Cons("copy_prop", Cons("algebraic", Cons("cse", Cons("dce", Cons("licm", Nil)))))))))
+
+fn optRunPasses(t : TAC, passes : List(String), site : Int) : (TAC, Int) =
+  match passes with
+  | Nil        => (t, site)
+  | Cons(p, r) => match optApplyPass(p, t, site) with
+                  | (t1, site1) => optRunPasses(t1, r, site1)
+                  end
+  end
+
+(* ── Structural fixpoint fingerprint (opt.py _fingerprint equality) ──────────
+   opt.py compares `tuple((f.name, tuple(f.body)) for f in tac.functions)`:
+   function NAME + BODY only, ignoring params, the fresh counter, and globals.
+   This is an O(n)-time / O(1)-alloc structural check.  It replaces the old
+   `optStrEq(tacPretty(t1), before)`, whose tacPretty built an O(n^2)-join
+   string over the WHOLE 1.8 MB program each sweep (the arena wall) — it blew
+   12 GB before the first pass even ran on the self-source. *)
+fn optBoolEq(a : Bool, b : Bool) : Bool =
+  if a then b else if b then false else true
+
+fn optTmpEq(a : Tmp, b : Tmp) : Bool = optStrEq(optTmpName(a), optTmpName(b))
+
+fn optConstEq(a : ConstVal, b : ConstVal) : Bool =
+  match a with
+  | CInt(x)   => match b with | CInt(y)   => optStrEq(x, y) | _ => false end
+  | CFloat(x) => match b with | CFloat(y) => optStrEq(x, y) | _ => false end
+  | CStr(x)   => match b with | CStr(y)   => optStrEq(x, y) | _ => false end
+  | CBool(x)  => match b with | CBool(y)  => optBoolEq(x, y) | _ => false end
+  | CUnit     => match b with | CUnit     => true           | _ => false end
+  end
+
+fn optOperandEq(a : Operand, b : Operand) : Bool =
+  match a with
+  | OTmp(x)   => match b with | OTmp(y)   => optTmpEq(x, y)   | _ => false end
+  | OConst(x) => match b with | OConst(y) => optConstEq(x, y) | _ => false end
+  end
+
+fn optOperandsEq(xs : List(Operand), ys : List(Operand)) : Bool =
+  match xs with
+  | Nil        => match ys with | Nil => true | _ => false end
+  | Cons(x, r) => match ys with
+                  | Nil        => false
+                  | Cons(y, s) => if optOperandEq(x, y) then optOperandsEq(r, s) else false
+                  end
+  end
+
+fn optMaybeTmpEq(a : Maybe(Tmp), b : Maybe(Tmp)) : Bool =
+  match a with
+  | Nothing => match b with | Nothing => true | _ => false end
+  | Just(x) => match b with | Just(y) => optTmpEq(x, y) | _ => false end
+  end
+
+fn optMaybeOpEq(a : Maybe(Operand), b : Maybe(Operand)) : Bool =
+  match a with
+  | Nothing => match b with | Nothing => true | _ => false end
+  | Just(x) => match b with | Just(y) => optOperandEq(x, y) | _ => false end
+  end
+
+fn optInstrEq(a : Instr, b : Instr) : Bool =
+  match a with
+  | IAssign(d, s) =>
+      match b with | IAssign(d2, s2) => if optTmpEq(d, d2) then optOperandEq(s, s2) else false | _ => false end
+  | IBinOp(d, op, l, r) =>
+      match b with
+      | IBinOp(d2, op2, l2, r2) =>
+          if optTmpEq(d, d2) then
+            if optStrEq(op, op2) then
+              if optOperandEq(l, l2) then optOperandEq(r, r2) else false
+            else false
+          else false
+      | _ => false end
+  | IUnary(d, op, s) =>
+      match b with
+      | IUnary(d2, op2, s2) =>
+          if optTmpEq(d, d2) then
+            if optStrEq(op, op2) then optOperandEq(s, s2) else false
+          else false
+      | _ => false end
+  | ICall(md, f, args) =>
+      match b with
+      | ICall(md2, f2, args2) =>
+          if optMaybeTmpEq(md, md2) then
+            if optStrEq(f, f2) then optOperandsEq(args, args2) else false
+          else false
+      | _ => false end
+  | IClosureCall(d, fv, ar) =>
+      match b with
+      | IClosureCall(d2, fv2, ar2) =>
+          if optTmpEq(d, d2) then
+            if optOperandEq(fv, fv2) then optOperandEq(ar, ar2) else false
+          else false
+      | _ => false end
+  | IReturn(mv) =>
+      match b with | IReturn(mv2) => optMaybeOpEq(mv, mv2) | _ => false end
+  | ILabel(n) =>
+      match b with | ILabel(n2) => optStrEq(n, n2) | _ => false end
+  | IJump(l) =>
+      match b with | IJump(l2) => optStrEq(l, l2) | _ => false end
+  | ICondJump(c, t, f) =>
+      match b with
+      | ICondJump(c2, t2, f2) =>
+          if optOperandEq(c, c2) then
+            if optStrEq(t, t2) then optStrEq(f, f2) else false
+          else false
+      | _ => false end
+  | IAlloc(d, tag, fs) =>
+      match b with
+      | IAlloc(d2, tag2, fs2) =>
+          if optTmpEq(d, d2) then
+            if optStrEq(tag, tag2) then optOperandsEq(fs, fs2) else false
+          else false
+      | _ => false end
+  | IGetTag(d, s) =>
+      match b with | IGetTag(d2, s2) => if optTmpEq(d, d2) then optOperandEq(s, s2) else false | _ => false end
+  | IGetField(d, s, idx) =>
+      match b with
+      | IGetField(d2, s2, idx2) =>
+          if optTmpEq(d, d2) then
+            if optOperandEq(s, s2) then idx == idx2 else false
+          else false
+      | _ => false end
+  | IAllocClosure(d, f, caps) =>
+      match b with
+      | IAllocClosure(d2, f2, caps2) =>
+          if optTmpEq(d, d2) then
+            if optStrEq(f, f2) then optOperandsEq(caps, caps2) else false
+          else false
+      | _ => false end
+  end
+
+fn optInstrsEq(xs : List(Instr), ys : List(Instr)) : Bool =
+  match xs with
+  | Nil        => match ys with | Nil => true | _ => false end
+  | Cons(x, r) => match ys with
+                  | Nil        => false
+                  | Cons(y, s) => if optInstrEq(x, y) then optInstrsEq(r, s) else false
+                  end
+  end
+
+fn optFnsEq(xs : List(Function), ys : List(Function)) : Bool =
+  match xs with
+  | Nil        => match ys with | Nil => true | _ => false end
+  | Cons(x, r) => match ys with
+                  | Nil        => false
+                  | Cons(y, s) => if optStrEq(optFnName(x), optFnName(y))
+                                  then if optInstrsEq(optFnBody(x), optFnBody(y)) then optFnsEq(r, s) else false
+                                  else false
+                  end
+  end
+
+fn optTacEq(a : TAC, b : TAC) : Bool =
+  match a with | TAC(fa, _) => match b with | TAC(fb, _) => optFnsEq(fa, fb) end end
+
+(* Iterate the whole enabled sweep to a fixpoint (opt.py _MAX_SWEEPS = 8).
+   Fingerprint = optTacEq (injective on name+body; passes touch neither ctr nor
+   globals, so pretty-equality ⟺ opt.py's structural _fingerprint). *)
+fn optSweeps(t : TAC, passes : List(String), site : Int, fuel : Int) : TAC =
+  if fuel <= 0 then t
+  else
+    match optRunPasses(t, passes, site) with
+    | (t1, site1) => if optTacEq(t1, t) then t1
+                     else optSweeps(t1, passes, site1, fuel - 1)
+    end
+
+fn optimizeProg(t : TAC, level : Int) : TAC =
+  let passes = optPassesForLevel(level) in
+  match passes with
+  | Nil => t
+  | _   => optSweeps(t, passes, 0, 8)
+  end
+
+
+(* ══ Smoke driver (concatenated with lex + parse + tac — see opt_smoke)  ═════ *)
+(* The real check is the corpus-wide differential (opt_difftest.py).  This tiny
+   main just exercises const_fold + dce on a hand-built TAC so the smoke main runs end-to-end.  The differential harness strips everything from
+   the `fn main` marker below. *)
+
+fn main(io : IO) : IO =
+  let g0 = Function("main", Nil,
+             Cons(IBinOp(Tmp("t0"), "+", OConst(CInt("2")), OConst(CInt("3"))),
+             Cons(IReturn(Just(OTmp(Tmp("t0")))), Nil)), 1) in
+  let prog = TAC(Cons(g0, Nil), Nil) in
+  print(io, tacPretty(optimizeProg(prog, 1)))

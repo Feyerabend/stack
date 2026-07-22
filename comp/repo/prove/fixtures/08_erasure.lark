@@ -1,0 +1,29 @@
+(* Refinements erase.  This program is checked by refine.py — every obligation
+   in it is discharged — and then it RUNS, on the same CEK machine as any other
+   Lark program, because syntype_to_mono drops the predicate before the runtime
+   ever sees a type.  Nothing here is checked twice and nothing is checked at
+   run time.
+
+   Expected output:
+     7
+     3
+     97 *)
+
+module Erasure
+
+fn abs_val(x: Int) : {v: Int | v >= 0} =
+  if x >= 0 then x else 0 - x
+
+fn safe_div(n: Int, d: {v: Int | v != 0}) : Int =
+  n / d
+
+fn char_at(s: String, i: {v: Int | v >= 0 and v < string_length(s)}) : Int =
+  string_index(s, i)
+
+fn first_char(s: String) : Int =
+  if string_length(s) > 0 then char_at(s, 0) else 0
+
+fn main(io : IO) : IO =
+  let io = print(io, show(abs_val(0 - 7))) in
+  let io = print(io, show(safe_div(9, 3))) in
+  print(io, show(first_char("abc")))

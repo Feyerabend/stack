@@ -1,0 +1,65 @@
+module BstDestructUnsafe
+
+(* The mutant of 36_bstdestruct_safe.lark, and its lie is in the DESTRUCTING direction —
+   the direction 35 could not even attempt.
+
+   `swap` takes an opaque `bst(t)` and claims to return a `bst`, but rebuilds the node
+   with its children exchanged: `Node(l, x, r)` becomes `Node(r, x, l)`.  From the
+   incoming `bst(t)` the single-match `bst` yields `lt(l, x)`, `gt(r, x)`, `bst(l)`,
+   `bst(r)` — every value left of x is below it, every value right of x above it.  The
+   return type owes `bst(Node(r, x, l))`, which unfolds to
+
+       lt(r, x) and gt(l, x) and bst(r) and bst(l).
+
+   `bst(r)` and `bst(l)` are in hand, but `lt(r, x)` asks that every value of the RIGHT
+   child fall below x — the exact negation of the `gt(r, x)` we were handed — and
+   likewise `gt(l, x)` contradicts `lt(l, x)`.  The order facts point the wrong way, so
+   the obligation is unprovable: 1 of 1 unproved.
+
+   That the swap is caught is the whole rung.  In 35 `bst` matched both children, so it
+   said nothing about an opaque tree and there was no destructing claim to refute; here
+   the single-match `bst` hands its order facts out, and they are precisely what convict
+   the swap.  Nothing detonates at run time — order is not a divisor — so this file is
+   checked, not run.
+
+   Expected: 1 of 1 obligation unproved. *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure lt(t : Tree, b : Int) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => x < b and lt(l, b) and lt(r, b)
+  end
+
+measure gt(t : Tree, b : Int) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => x > b and gt(l, b) and gt(r, b)
+  end
+
+measure bst(t : Tree) : Bool =
+  match t with
+  | Leaf            => true
+  | Node(l, x, r)   => lt(l, x) and gt(r, x) and bst(l) and bst(r)
+  end
+
+(* The false destructing claim: swapping the children of a bst is not a bst. *)
+fn swap(t : {q : Tree | bst(q)}) : {r : Tree | bst(r)} =
+  match t with
+  | Leaf          => Leaf
+  | Node(l, x, r) => Node(r, x, l)
+  end
+
+fn main(io : IO) : IO =
+  let t =
+    Node(Node(Leaf, 1, Node(Leaf, 2, Leaf)),
+         3,
+         Node(Node(Leaf, 4, Leaf), 5, Node(Leaf, 6, Leaf))) in
+  print(io, show(build(swap(t))))
+
+fn build(t : {q : Tree | bst(q)}) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, x, r) => x
+  end

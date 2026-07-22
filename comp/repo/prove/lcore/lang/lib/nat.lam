@@ -1,0 +1,27 @@
+-- nat.lam  —  arithmetic on Nat
+-- Load with:  :load "lib/nat.lam"
+
+-- natrec motive base step scrut  (4 arguments, no leading type)
+-- The motive (: Nat -> Type) and step (: Pi(k:Nat). motive k -> motive (succ k))
+-- carry explicit annotations: the checker infers the eliminator from its motive
+-- and cannot synthesise a bare lambda. (See def_define_checked in core/defs.c.)
+
+-- plus m n = m + n   (recurse on m)
+let plus : Nat -> Nat -> Nat = \
+  \m. \n. natrec ((\k. Nat) : Nat -> Type) n \
+                 ((\k. \ih. succ ih) : Pi(k : Nat). Nat -> Nat) m
+
+-- mult m n = m * n   (recurse on m)
+let mult : Nat -> Nat -> Nat = \
+  \m. \n. natrec ((\k. Nat) : Nat -> Type) zero \
+                 ((\k. \ih. plus n ih) : Pi(k : Nat). Nat -> Nat) m
+
+-- pred (succ n) = n,  pred zero = zero
+let pred : Nat -> Nat = \
+  \n. natrec ((\k. Nat) : Nat -> Type) zero \
+             ((\k. \ih. k) : Pi(k : Nat). Nat -> Nat) n
+
+-- iszero n : Bool
+let iszero : Nat -> Bool = \
+  \n. natrec ((\k. Bool) : Nat -> Type) true \
+             ((\k. \ih. false) : Pi(k : Nat). Bool -> Bool) n

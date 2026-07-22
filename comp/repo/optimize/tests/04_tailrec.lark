@@ -1,0 +1,14 @@
+(* Test 04 — Tail-recursive accumulator
+   Covers: tail calls (must not stack-overflow at 1,000,000 iterations),
+           accumulator pattern, local recursive let
+   Expected output:
+     500000500000 *)
+
+module TailRec
+
+fn sum_to(n : Int, acc : Int) : Int =
+  if n == 0 then acc
+  else sum_to(n - 1, acc + n)
+
+fn main(io : IO) : IO =
+  print(io, show(sum_to(1000000, 0)))

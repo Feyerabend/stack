@@ -1,0 +1,24 @@
+module IfPredDrop
+
+(* The soundness sentinel for a later version — the analog of 25_minimum_redef.lark.
+
+   A guarded predicate is admitted ONLY when all three of c, p, q translate.  Here
+   the else branch is `v == x * x * x`, and `x * x * x` is NON-LINEAR — the ordinary
+   way out of the fragment.  So `q` is untranslatable, the whole `if`-predicate is
+   None, and the STRICT `formula()` at the declaration site rejects the contract.
+
+   This file must stay REJECTED even AFTER step 2 lands.  If the new `IfExpr` case
+   ever `or Top()`-ed an untranslatable branch — the shape of false proofs #2 and
+   #7 — this contract would be silently admitted with a `true` where the source said
+   `v == x * x * x`, and `f` could then claim anything on its negative inputs.  The
+   rule is the one the first version installed for the solver and `_branch` installed for a
+   program-position `if`: where the checker cannot translate, it says NOTHING.
+
+   Expected: rejected at the declaration ("not a predicate in the decidable
+   fragment: if ..."), never proved. *)
+
+fn f(x : Int) : {v : Int | if x >= 0 then v == x else v == x * x * x} =
+  x
+
+fn main(io : IO) : IO =
+  print(io, show(f(3)))

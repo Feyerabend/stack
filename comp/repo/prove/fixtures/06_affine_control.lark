@@ -1,0 +1,14 @@
+module AffineControl
+
+(* The control for 06_affine_mention: `b` really is affine.  Two ordinary uses of
+   a non-Copy binding are rejected by the affine checker, which is what makes the
+   free mention in the sibling file a claim worth making rather than an artefact
+   of Buf being unrestricted. *)
+
+type Buf = | Buf of Int
+
+fn size(b: Buf) : Int =
+  match b with | Buf(n) => n end
+
+fn twice(b: Buf) : Int =
+  size(b) + size(b)

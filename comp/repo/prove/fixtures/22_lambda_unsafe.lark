@@ -1,0 +1,26 @@
+(* 22 — the mutant.  The division moves inside a lambda, and nothing else changes.
+
+   THIS IS THE WHOLE BUG, IN ONE FILE.  `100 / a` at the top of a function raised an
+   obligation and always had.  The same `100 / a` one line lower, inside `fn (a) => …`,
+   raised NOTHING — because `synth` returned `ROpaque()` for a Lambda without ever
+   looking at its body.
+
+   Old verdict (measured, before the fix):
+
+       ok: 0 obligation(s) proved          exit 0
+
+   ...and then, at run time, ZeroDivisionError.  Zero obligations is not "there was
+   nothing to prove".  It is "I did not look", printed in the words of "there is nothing
+   wrong" — the exact failure a later version named and this checker committed again, one hat along.
+
+   Now: one obligation, unproved.  `h` may be called with anything (the checker does not
+   track its call sites), so `a /= 0` must hold for EVERY argument, and it does not. *)
+
+module LambdaUnsafe
+
+fn risky(n : Int) : Int =
+  let h = fn (a : Int) => 100 / a in
+  h(n - n)                          (* h(0).  The divisor is zero, and always was. *)
+
+fn main(io : IO) : IO =
+  print(io, int_to_string(risky(7)))

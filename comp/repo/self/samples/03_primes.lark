@@ -1,0 +1,49 @@
+(* Sample 03 — Primes by trial division
+   Test each candidate n from 2 up to limit; for each, trial-divide by
+   every d from 2 to sqrt(n).  Collect primes into a list and print.
+   Expected output:
+     2 3 5 7 11 13 17 19 23 29 31 37 41 43 47
+     15 primes up to 50 *)
+
+module Primes
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Int) = {}
+
+fn divides(d : Int, n : Int) : Bool =
+  n / d * d == n
+
+fn is_prime_from(n : Int, d : Int) : Bool =
+  if d * d > n     then true
+  else if divides(d, n) then false
+  else is_prime_from(n, d + 1)
+
+fn is_prime(n : Int) : Bool =
+  if n < 2 then false
+  else is_prime_from(n, 2)
+
+fn primes_upto(limit : Int, k : Int) : List(Int) =
+  if k > limit then Nil
+  else if is_prime(k) then Cons(k, primes_upto(limit, k + 1))
+  else primes_upto(limit, k + 1)
+
+fn length(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + length(rest)
+  end
+
+fn join(sep : String, xs : List(Int)) : String =
+  match xs with
+  | Nil            => ""
+  | Cons(x, Nil)   => show(x)
+  | Cons(x, rest)  => show(x) + sep + join(sep, rest)
+  end
+
+fn main(io : IO) : IO =
+  let ps = primes_upto(50, 2) in
+  let io = print(io, join(" ", ps)) in
+  print(io, show(length(ps)) + " primes up to 50")

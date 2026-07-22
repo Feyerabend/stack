@@ -1,0 +1,23 @@
+module MeasurePartial
+
+(* A measure with no arm for `Cons`.
+
+   A partial measure is not a measure that returns nothing — there is no runtime
+   here to return anything.  It is a symbol whose value at `Cons(x, rest)` no
+   equation constrains: the logic may take it to be anything at all, and a
+   different anything each time it is asked.  Nothing is unsound about that, and
+   nothing is USEFUL about it either; what is bad is that it looks like a
+   definition.  A measure must be TOTAL, and the check is exhaustiveness over the
+   declared constructors.
+
+   Rejected: `len` has no arm for Cons. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil => 0
+  end
+
+fn zero(xs : List(Int)) : {v : Int | v == 0} =
+  0

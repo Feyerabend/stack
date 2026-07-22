@@ -1,0 +1,728 @@
+(* cek.lark — Lark's CEK evaluator, written in Lark.
+   (first light toward the meta-circular interpreter.)
+
+   Port of oracle/cek.py: a small-step CEK machine over the (untyped) AST that
+   parse.lark produces.  The evaluator never inspects type annotations, so it
+   runs directly on parse.lark's `Expr` — infer.lark is NOT on the evaluator's
+   critical path.  `lex → parse → cek`, all in Lark, is a working interpreter.
+
+   Design notes
+   ────────────
+   • This is a COMPONENT.  It does not redefine the AST (Expr/Val/Pat/Arm/Param/
+     Prog/Decl/TyBody/Variant/Maybe) — those come from parse.lark, and the tokens
+     (Tok/Token/P) + tokenize come from lex.lark.  As with the parser and type checker, the differential
+     harness assembles the pipeline by CONCATENATION (lex + parse + cek + a
+     generated main), so all three share one module and one top-level typecheck.
+     Consequence: cek.lark does NOT type-check standalone (Expr etc. are absent).
+     Its only run path is `python3 tests/cek_difftest.py`.
+   • Runtime values are R-PREFIXED (RInt/RClosure/…), NOT parse.lark's `Val`
+     constructors (VInt/VStr/…).  Same namespace-collision dodge as types.lark's
+     M-prefix: under concatenation parse.lark's `Val` (VInt of *String* lexeme)
+     and the machine's runtime values coexist and must not clash.
+   • OUTPUT is accumulated, not side-effected.  A pure Lark function cannot print
+     mid-evaluation, so the object program's `print(io, s)` appends s+"\n" to an
+     output String threaded in the machine State; the real driver `main` prints
+     the whole thing once (the "build the output, print once" idiom, here made
+     to carry the *object* program's IO).
+   • ENVIRONMENT is two-level: a local assoc list `List((String, RVal))` plus the
+     globals `g` threaded through every step.  `Var` looks up local then g.  This
+     resolves mutual recursion with NO backpatch (cek.py mutates closure envs;
+     we simply keep g in scope), so top-level closures capture an EMPTY local env.
+   • Dynamic string equality is `strEq` (char-by-char), not `==` (unimplemented in
+     the CEK binop — a known wart of the language).  Constructor-name + keyword compares use it.
+   • Every function is fully annotated so infer's Pass 1.5 pre-registers the big
+     mutually-recursive step/apply/run group.
+
+   SLICE-1 SCOPE (this file).  Covers the integer/bool/string/list/tuple/ADT/
+   recursion + FLOAT arithmetic fragment.  KNOWN GAPS, all deferred (a known wart of the language):
+     - Float support: literals convert to real `Float` via the `string_to_float`
+       prim (added alongside this slice); +,-,*,/, comparisons and unary `-` go
+       through the host on real Floats (so `_f32` truncation matches the oracle),
+       show via `float_to_string`.  The non-arith float builtins are wired too:
+       int_to_float / float_to_int / float_abs / float_sqrt / float_floor /
+       float_ceil all call the host prim on a real Float, so `_f32` truncation
+       matches byte-for-byte (needed once `import Stdlib` resolves — 16_stdlib).
+     - `import` IS resolved by the differential harness (it inlines each imported
+       module's decls into the object source before evaluation — see
+       cek_difftest.py), so multi-module programs (16_stdlib, 09_modules) run.
+       runProgram itself still ignores the AST's import list (the harness has
+       already flattened them away).
+     - `read` (stdin) IS supported: the IO token `RIO` carries the pending
+       stdin string, threaded by the program's own `io` sequencing; `read`
+       splits off the next line (dropping the '\n') exactly like the oracle's
+       `sys.stdin.readline().rstrip("\n")`, returning "" at EOF.  runProgram
+       takes the program's `input` (the harness supplies it as a String literal,
+       and feeds the SAME bytes to the oracle's stdin — see cek_difftest.py's
+       read parity check).  Empty for the whole corpus, since no test reads.
+
+   Run:  python3 tests/cek_difftest.py     (concatenates lex + parse + cek)  *)
+
+module Cek
+
+
+(* ── Runtime values (port of cek.py's Value; R-prefixed, see header) ───────── *)
+
+type RVal =
+  | RInt     of Int
+  | RFloat   of Float                               (* real float (via string_to_float) *)
+  | RBool    of Bool
+  | RStr     of String
+  | RUnit
+  | RTuple   of List(RVal)
+  | RCon     of String, List(RVal)                  (* fully-applied constructor  *)
+  | RPartCon of String, Int, List(RVal)             (* tag, arity, args-so-far    *)
+  | RClosure of String, Expr, List((String, RVal))  (* param, body, captured env  *)
+  | RBuiltin  of String, List(RVal)                 (* name, args-so-far          *)
+  | RDispatch of String                             (* trait method: dispatch by arg type *)
+  | RPrintIO  of RVal                               (* print applied to its io    *)
+  | RIO       of String                             (* the IO token; carries pending stdin *)
+
+(* ── Continuation frames (port of cek.py's Frame) ─────────────────────────── *)
+
+type Frame =
+  | ApplyFnF  of List(Expr), List((String, RVal))
+  | ApplyArgF of RVal, List(Expr), List((String, RVal))
+  | LetF      of String, Expr, List((String, RVal))
+  | IfF       of Expr, Expr, List((String, RVal))
+  | MatchF    of List(Arm), List((String, RVal))
+  | BinOpLF   of String, Expr, List((String, RVal))
+  | BinOpRF   of String, RVal
+  | UnaryF    of String
+  | TupleF    of List(Expr), List(RVal), List((String, RVal))
+
+(* ── Machine state.  The trailing String is the accumulated program output. ── *)
+
+type State =
+  | SEval of Expr, List((String, RVal)), List(Frame), String
+  | SRet  of RVal, List(Frame), String
+
+(* Small result carriers (Lark has no exceptions / built-in Option). *)
+type ROpt  = | RNone | RSome of RVal
+type MRes  = | NoMatch | Yes of List((String, RVal))
+type VOut  = | VOut of RVal, String                 (* value + accumulated output *)
+type RLine = | RLine of String, String              (* a read line + the rest of stdin *)
+
+impl Copy for RVal  = {}
+impl Copy for Frame = {}
+impl Copy for State = {}
+impl Copy for ROpt  = {}
+impl Copy for MRes  = {}
+impl Copy for VOut  = {}
+impl Copy for RLine = {}
+
+
+(* ── Generic list helpers ─────────────────────────────────────────────────── *)
+
+fn ckLen(xs : List(a)) : Int =
+  match xs with
+  | Nil          => 0
+  | Cons(_, rest) => 1 + ckLen(rest)
+  end
+
+(* Monomorphic on RVal: the frozen infer.py loops on a *generic* function that
+   builds a `List(a)` from a polymorphic element `a` (occurs-check gap in
+   compose — a known wart of the language).  ckSnoc is only ever used on List(RVal), so we
+   specialise it and sidestep the gap.  ckLen stays generic (List(a)->Int is
+   fine — it never constructs an `a`). *)
+fn ckSnoc(xs : List(RVal), x : RVal) : List(RVal) =
+  match xs with
+  | Nil          => Cons(x, Nil)
+  | Cons(h, rest) => Cons(h, ckSnoc(rest, x))
+  end
+
+
+(* ── Dynamic string equality (see header note) ───────────────────────────── *)
+
+fn strEqFrom(a : String, b : String, i : Int, n : Int) : Bool =
+  if i >= n then true
+  else if string_index(a, i) == string_index(b, i) then strEqFrom(a, b, i + 1, n)
+  else false
+
+fn strEq(a : String, b : String) : Bool =
+  let la = string_length(a) in
+  let lb = string_length(b) in
+  if la == lb then strEqFrom(a, b, 0, la) else false
+
+
+(* ── Line reader for `read` (port of cek.py's readline().rstrip("\n")) ──────────
+   Splits off the next line (up to the first '\n' = codepoint 10) from the
+   pending-stdin string carried in the RIO value; the '\n' itself is dropped.
+   A pending string with no newline yields the whole string (last unterminated
+   line); an EMPTY pending yields "" — matching the oracle at EOF, where
+   sys.stdin.readline() returns "".  See the `read` builtin. *)
+fn firstNL(s : String, i : Int, n : Int) : Int =
+  if i >= n then 0 - 1
+  else if string_index(s, i) == 10 then i
+  else firstNL(s, i + 1, n)
+
+fn readLine(pending : String) : RLine =
+  let n = string_length(pending) in
+  let k = firstNL(pending, 0, n) in
+  if k < 0 then RLine(pending, "")
+  else RLine(string_slice(pending, 0, k), string_slice(pending, k + 1, n))
+
+
+(* ── Environment lookup (assoc list) ──────────────────────────────────────── *)
+
+fn envGet(env : List((String, RVal)), n : String) : ROpt =
+  match env with
+  | Nil                => RNone
+  | Cons((k, v), rest) => if strEq(k, n) then RSome(v) else envGet(rest, n)
+  end
+
+
+(* ── Runtime type name (port of cek.py runtime_type) ──────────────────────────
+   Used only for trait dispatch: given a value, name the type whose impl we look
+   up.  Constructors resolve their owning type via the con→type map, which the
+   loader stashes in the globals `g` under keys "#type#<Tag>" (the '#' can never
+   appear in a Lark identifier, so these entries never collide with real names).*)
+fn runtimeType(v : RVal, g : List((String, RVal))) : String =
+  match v with
+  | RInt(_)      => "Int"
+  | RFloat(_)    => "Float"
+  | RBool(_)     => "Bool"
+  | RStr(_)      => "String"
+  | RUnit        => "()"
+  | RCon(tag, _) => match envGet(g, "#type#" + tag) with
+                    | RSome(RStr(tn)) => tn
+                    | _               => tag
+                    end
+  | _            => "?"
+  end
+
+
+(* ── Literals: parse.lark's `Val` (VInt carries lexeme) → runtime `RVal` ───── *)
+
+fn litVal(v : Val) : RVal =
+  match v with
+  | VInt(t)   => match string_to_int(t) with
+                 | Ok(n)  => RInt(n)
+                 | Err(_) => RInt(0)
+                 end
+  | VFloat(t) => match string_to_float(t) with
+                 | Ok(f)  => RFloat(f)
+                 | Err(_) => RFloat(0.0)
+                 end
+  | VStr(s)   => RStr(s)
+  | VBool(b)  => RBool(b)
+  | VUnit     => RUnit
+  end
+
+
+(* ── Value equality (port of cek.py _val_eq) ──────────────────────────────── *)
+
+fn boolEq(x : Bool, y : Bool) : Bool = if x then y else if y then false else true
+
+fn valEq(a : RVal, b : RVal) : Bool =
+  match (a, b) with
+  | (RInt(x),   RInt(y))   => x == y
+  | (RFloat(x), RFloat(y)) => x == y
+  | (RBool(x),  RBool(y))  => boolEq(x, y)
+  | (RStr(x),   RStr(y))   => strEq(x, y)
+  | (RUnit,     RUnit)     => true
+  | _                      => false
+  end
+
+
+(* ── Show (port of cek.py show) ───────────────────────────────────────────── *)
+
+fn showItems(xs : List(RVal)) : String =
+  match xs with
+  | Nil            => ""
+  | Cons(x, Nil)   => showVal(x)
+  | Cons(x, rest)  => showVal(x) + ", " + showItems(rest)
+  end
+
+fn showVal(v : RVal) : String =
+  match v with
+  | RInt(n)     => int_to_string(n)
+  | RFloat(f)   => float_to_string(f)
+  | RBool(b)    => if b then "true" else "false"
+  | RStr(s)     => s
+  | RUnit       => "()"
+  | RTuple(es)  => "(" + showItems(es) + ")"
+  | RCon(t, p)  => match p with
+                   | Nil => t
+                   | _   => t + "(" + showItems(p) + ")"
+                   end
+  | RPartCon(t, _, _) => "<partial " + t + ">"
+  | RClosure(_, _, _)   => "<closure>"
+  | RBuiltin(nm, _)    => "<" + nm + ">"
+  | RDispatch(nm)        => "<" + nm + ">"
+  | RPrintIO(_)          => "<printio>"
+  | RIO(_)                 => "<IO>"
+  end
+
+
+(* ── Arithmetic / logic (port of cek.py binop/unaryop) ────────────────────── *)
+
+fn intBin(op : String, a : Int, b : Int) : RVal =
+  match op with
+  | "+"  => RInt(a + b)
+  | "-"  => RInt(a - b)
+  | "*"  => RInt(a * b)
+  | "/"  => RInt(a / b)                (* Lark / truncates toward zero, per cek.binop *)
+  | "==" => RBool(a == b)
+  | "!=" => RBool(a != b)
+  | "<"  => RBool(a < b)
+  | "<=" => RBool(a <= b)
+  | ">"  => RBool(a > b)
+  | ">=" => RBool(a >= b)
+  | _    => RUnit
+  end
+
+fn boolBin(op : String, a : Bool, b : Bool) : RVal =
+  match op with
+  | "and" => RBool(if a then b else false)
+  | "or"  => RBool(if a then true else b)
+  | _     => RUnit
+  end
+
+(* Float ops go through the host's `+ - * / < …` on real Floats, so the oracle's
+   _f32 truncation applies identically (byte-parity). *)
+fn floatBin(op : String, a : Float, b : Float) : RVal =
+  match op with
+  | "+"  => RFloat(a + b)
+  | "-"  => RFloat(a - b)
+  | "*"  => RFloat(a * b)
+  | "/"  => RFloat(a / b)
+  | "==" => RBool(a == b)
+  | "!=" => RBool(a != b)
+  | "<"  => RBool(a < b)
+  | "<=" => RBool(a <= b)
+  | ">"  => RBool(a > b)
+  | ">=" => RBool(a >= b)
+  | _    => RUnit
+  end
+
+fn binop(op : String, l : RVal, r : RVal) : RVal =
+  match (l, r) with
+  | (RStr(a),   RStr(b))   => RStr(a + b)         (* only + is defined for strings *)
+  | (RInt(a),   RInt(b))   => intBin(op, a, b)
+  | (RFloat(a), RFloat(b)) => floatBin(op, a, b)
+  | (RBool(a),  RBool(b))  => boolBin(op, a, b)
+  | _                      => RUnit
+  end
+
+fn unaryop(op : String, v : RVal) : RVal =
+  match v with
+  | RInt(n)   => if strEq(op, "-")   then RInt(0 - n) else RUnit
+  | RFloat(f) => if strEq(op, "-")   then RFloat(0.0 - f) else RUnit
+  | RBool(b)  => if strEq(op, "not") then RBool(if b then false else true) else RUnit
+  | _         => RUnit
+  end
+
+
+(* ── Pattern matching (port of cek.py match_pat) ──────────────────────────── *)
+
+fn matchList(subs : List(Pat), vals : List(RVal), env : List((String, RVal))) : MRes =
+  match (subs, vals) with
+  | (Nil, Nil) => Yes(env)
+  | (Cons(sp, sr), Cons(sv, vr)) =>
+      match matchPat(sp, sv, env) with
+      | NoMatch  => NoMatch
+      | Yes(e2)  => matchList(sr, vr, e2)
+      end
+  | _ => NoMatch
+  end
+
+fn matchPat(pat : Pat, val : RVal, env : List((String, RVal))) : MRes =
+  match pat with
+  | PWild   => Yes(env)
+  | PVar(n) => Yes(Cons((n, val), env))
+  | PLit(v) => if valEq(val, litVal(v)) then Yes(env) else NoMatch
+  | PCon(n, subs) =>
+      if strEq(n, "True") then
+        match val with | RBool(b) => if b then Yes(env) else NoMatch | _ => NoMatch end
+      else if strEq(n, "False") then
+        match val with | RBool(b) => if b then NoMatch else Yes(env) | _ => NoMatch end
+      else
+        match val with
+        | RCon(tag, payload) => if strEq(tag, n) then matchList(subs, payload, env) else NoMatch
+        | _                  => NoMatch
+        end
+  | PTuple(subs) =>
+      match val with
+      | RTuple(es) => matchList(subs, es, env)
+      | _          => NoMatch
+      end
+  end
+
+
+(* ── Built-ins (port of cek.py builtin / builtin_multi) ───────────────────── *)
+
+fn builtinArity(name : String) : Int =
+  if strEq(name, "string_index") then 2
+  else if strEq(name, "string_slice") then 3
+  else 1
+
+fn builtin(name : String, arg : RVal, kont : List(Frame), out : String) : State =
+  if strEq(name, "print") then SRet(RPrintIO(arg), kont, out)
+  else if strEq(name, "show") then SRet(RStr(showVal(arg)), kont, out)
+  else if strEq(name, "int_to_string") then SRet(RStr(showVal(arg)), kont, out)
+  else if strEq(name, "float_to_string") then SRet(RStr(showVal(arg)), kont, out)
+  else if strEq(name, "string_length") then
+    match arg with | RStr(s) => SRet(RInt(string_length(s)), kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "char_to_string") then
+    match arg with | RInt(n) => SRet(RStr(char_to_string(n)), kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "int_abs") then
+    match arg with | RInt(n) => SRet(RInt(if n < 0 then 0 - n else n), kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "string_to_int") then
+    match arg with
+    | RStr(s) => match string_to_int(s) with
+                 | Ok(n)  => SRet(RCon("Ok",  Cons(RInt(n), Nil)), kont, out)
+                 | Err(e) => SRet(RCon("Err", Cons(RStr(e), Nil)), kont, out)
+                 end
+    | _ => SRet(RUnit, kont, out)
+    end
+  else if strEq(name, "string_to_float") then
+    match arg with
+    | RStr(s) => match string_to_float(s) with
+                 | Ok(f)  => SRet(RCon("Ok",  Cons(RFloat(f), Nil)), kont, out)
+                 | Err(e) => SRet(RCon("Err", Cons(RStr(e),   Nil)), kont, out)
+                 end
+    | _ => SRet(RUnit, kont, out)
+    end
+  else if strEq(name, "int_to_float") then
+    match arg with | RInt(n)   => SRet(RFloat(int_to_float(n)), kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_to_int") then
+    match arg with | RFloat(f) => SRet(RInt(float_to_int(f)),   kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_to_bits") then
+    match arg with | RFloat(f) => SRet(RInt(float_to_bits(f)),  kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_abs") then
+    match arg with | RFloat(f) => SRet(RFloat(float_abs(f)),    kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_sqrt") then
+    match arg with | RFloat(f) => SRet(RFloat(float_sqrt(f)),   kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_floor") then
+    match arg with | RFloat(f) => SRet(RFloat(float_floor(f)),  kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "float_ceil") then
+    match arg with | RFloat(f) => SRet(RFloat(float_ceil(f)),   kont, out) | _ => SRet(RUnit, kont, out) end
+  else if strEq(name, "read") then
+    match arg with
+    | RIO(pending) =>
+        match readLine(pending) with
+        | RLine(line, rest) => SRet(RTuple(Cons(RIO(rest), Cons(RStr(line), Nil))), kont, out)
+        end
+    | _ => SRet(RTuple(Cons(arg, Cons(RStr(""), Nil))), kont, out)
+    end
+  else if strEq(name, "read_all") then
+    (* whole-stdin slurp: return all pending input verbatim, leaving none behind. *)
+    match arg with
+    | RIO(pending) => SRet(RTuple(Cons(RIO(""), Cons(RStr(pending), Nil))), kont, out)
+    | _            => SRet(RTuple(Cons(arg, Cons(RStr(""), Nil))), kont, out)
+    end
+  else SRet(RUnit, kont, out)                                    (* unknown builtin *)
+
+fn builtinMulti(name : String, args : List(RVal), kont : List(Frame), out : String) : State =
+  if strEq(name, "string_index") then
+    match args with
+    | Cons(RStr(s), Cons(RInt(i), Nil)) => SRet(RInt(string_index(s, i)), kont, out)
+    | _ => SRet(RUnit, kont, out)
+    end
+  else if strEq(name, "string_slice") then
+    match args with
+    | Cons(RStr(s), Cons(RInt(lo), Cons(RInt(hi), Nil))) => SRet(RStr(string_slice(s, lo, hi)), kont, out)
+    | _ => SRet(RUnit, kont, out)
+    end
+  else SRet(RUnit, kont, out)
+
+
+(* ── Application (port of cek.py apply) ───────────────────────────────────── *)
+
+fn apply(fv : RVal, arg : RVal, kont : List(Frame),
+         g : List((String, RVal)), out : String) : State =
+  match fv with
+  | RClosure(p, body, cenv) => SEval(body, Cons((p, arg), cenv), kont, out)
+  | RPartCon(tag, arity, args) =>
+      let na = ckSnoc(args, arg) in
+      if ckLen(na) == arity then SRet(RCon(tag, na), kont, out)
+      else SRet(RPartCon(tag, arity, na), kont, out)
+  | RBuiltin(name, collected) =>
+      let na = ckSnoc(collected, arg) in
+      let ar = builtinArity(name) in
+      if ckLen(na) < ar then SRet(RBuiltin(name, na), kont, out)
+      else if ar == 1 then builtin(name, arg, kont, out)
+      else builtinMulti(name, na, kont, out)
+  | RDispatch(meth) =>                                (* trait method: pick impl by arg type *)
+      let tn = runtimeType(arg, g) in
+      match envGet(g, meth + "#" + tn) with
+      | RSome(fnv2) => apply(fnv2, arg, kont, g, out)
+      | RNone       => SRet(RUnit, kont, out)          (* no impl for this type *)
+      end
+  | RPrintIO(io) =>
+      match arg with
+      | RStr(s) => SRet(io, kont, out + s + "\n")   (* the object program's output *)
+      | _       => SRet(io, kont, out)
+      end
+  | _ => SRet(RUnit, kont, out)
+  end
+
+
+(* ── CEK steps (port of cek.py step_eval / step_ret) ──────────────────────── *)
+
+fn stepEval(expr : Expr, env : List((String, RVal)), kont : List(Frame),
+            g : List((String, RVal)), out : String) : State =
+  match expr with
+  | Lit(v)  => SRet(litVal(v), kont, out)
+  | Var(n)  => match envGet(env, n) with
+               | RSome(v) => SRet(v, kont, out)
+               | RNone    => match envGet(g, n) with
+                             | RSome(v) => SRet(v, kont, out)
+                             | RNone    => SRet(RUnit, kont, out)
+                             end
+               end
+  | Con(n)  => match envGet(env, n) with
+               | RSome(v) => SRet(v, kont, out)
+               | RNone    => match envGet(g, n) with
+                             | RSome(v) => SRet(v, kont, out)
+                             | RNone    => SRet(RUnit, kont, out)
+                             end
+               end
+  | TupleExpr(elems) =>
+      match elems with
+      | Nil            => SRet(RUnit, kont, out)
+      | Cons(e0, rest) => SEval(e0, env, Cons(TupleF(rest, Nil, env), kont), out)
+      end
+  | Apply(fe, args)   => SEval(fe, env, Cons(ApplyFnF(args, env), kont), out)
+  | BinOp(op, l, r)   => SEval(l, env, Cons(BinOpLF(op, r, env), kont), out)
+  | UnaryOp(op, e)    => SEval(e, env, Cons(UnaryF(op), kont), out)
+  | LetExpr(n, _, v, body) => SEval(v, env, Cons(LetF(n, body, env), kont), out)
+  | IfExpr(c, t, e)   => SEval(c, env, Cons(IfF(t, e, env), kont), out)
+  | MatchExpr(s, arms) => SEval(s, env, Cons(MatchF(arms, env), kont), out)
+  | Lambda(params, body) =>
+      match params with
+      | Cons(Param(p0, _), rest) =>
+          match rest with
+          | Nil => SRet(RClosure(p0, body, env), kont, out)
+          | _   => SRet(RClosure(p0, Lambda(rest, body), env), kont, out)
+          end
+      | Nil => SRet(RUnit, kont, out)
+      end
+  end
+
+fn tryArms(arms : List(Arm), val : RVal, env : List((String, RVal)),
+           rest : List(Frame), out : String) : State =
+  match arms with
+  | Nil => SRet(RUnit, rest, out)                    (* non-exhaustive: shouldn't happen *)
+  | Cons(Arm(pat, body), more) =>
+      match matchPat(pat, val, env) with
+      | Yes(e2) => SEval(body, e2, rest, out)
+      | NoMatch => tryArms(more, val, env, rest, out)
+      end
+  end
+
+fn stepRet(val : RVal, frame : Frame, rest : List(Frame),
+           g : List((String, RVal)), out : String) : State =
+  match frame with
+  | TupleF(remaining, done, env) =>
+      match remaining with
+      | Nil            => SRet(RTuple(ckSnoc(done, val)), rest, out)
+      | Cons(nxt, rem) => SEval(nxt, env, Cons(TupleF(rem, ckSnoc(done, val), env), rest), out)
+      end
+  | ApplyFnF(args, env) =>
+      match args with
+      | Nil          => SRet(RUnit, rest, out)
+      | Cons(a, rem) => SEval(a, env, Cons(ApplyArgF(val, rem, env), rest), out)
+      end
+  | ApplyArgF(fnv, remaining, env) =>
+      match remaining with
+      | Nil => apply(fnv, val, rest, g, out)
+      | Cons(nxt, rem) =>
+          match runToVal(apply(fnv, val, Nil, g, out), g) with
+          | VOut(partial, out2) => SEval(nxt, env, Cons(ApplyArgF(partial, rem, env), rest), out2)
+          end
+      end
+  | LetF(n, body, env) => SEval(body, Cons((n, val), env), rest, out)
+  | IfF(t, e, env) =>
+      match val with
+      | RBool(b) => SEval(if b then t else e, env, rest, out)
+      | _        => SRet(RUnit, rest, out)
+      end
+  | MatchF(arms, env)   => tryArms(arms, val, env, rest, out)
+  | BinOpLF(op, r, env) => SEval(r, env, Cons(BinOpRF(op, val), rest), out)
+  | BinOpRF(op, lv)     => SRet(binop(op, lv, val), rest, out)
+  | UnaryF(op)          => SRet(unaryop(op, val), rest, out)
+  end
+
+fn step(state : State, g : List((String, RVal))) : State =
+  match state with
+  | SEval(e, env, kont, out) => stepEval(e, env, kont, g, out)
+  | SRet(v, Nil, out)        => SRet(v, Nil, out)          (* terminal; run stops here *)
+  | SRet(v, Cons(f, r), out) => stepRet(v, f, r, g, out)
+  end
+
+
+(* ── Drivers (port of cek.py run) ─────────────────────────────────────────── *)
+
+fn run(st : State, g : List((String, RVal))) : String =
+  match st with
+  | SRet(_, Nil, out) => out
+  | _                  => run(step(st, g), g)
+  end
+
+fn runToVal(st : State, g : List((String, RVal))) : VOut =
+  match st with
+  | SRet(v, Nil, out) => VOut(v, out)
+  | _                 => runToVal(step(st, g), g)
+  end
+
+
+(* ── Program evaluation (port of cek.py eval_program) ─────────────────────── *)
+
+(* The initial environment: built-in functions + built-in constructors.
+   (dummy param because Lark functions take at least one argument.) *)
+fn initialEnv(dummy : Int) : List((String, RVal)) =
+  Cons(("print",           RBuiltin("print", Nil)),
+  Cons(("read",            RBuiltin("read", Nil)),
+  Cons(("read_all",        RBuiltin("read_all", Nil)),
+  Cons(("show",            RBuiltin("show", Nil)),
+  Cons(("int_to_string",   RBuiltin("int_to_string", Nil)),
+  Cons(("float_to_string", RBuiltin("float_to_string", Nil)),
+  Cons(("string_length",   RBuiltin("string_length", Nil)),
+  Cons(("string_index",    RBuiltin("string_index", Nil)),
+  Cons(("string_slice",    RBuiltin("string_slice", Nil)),
+  Cons(("char_to_string",  RBuiltin("char_to_string", Nil)),
+  Cons(("string_to_int",   RBuiltin("string_to_int", Nil)),
+  Cons(("string_to_float", RBuiltin("string_to_float", Nil)),
+  Cons(("int_abs",         RBuiltin("int_abs", Nil)),
+  Cons(("int_to_float",    RBuiltin("int_to_float", Nil)),
+  Cons(("float_to_int",    RBuiltin("float_to_int", Nil)),
+  Cons(("float_to_bits",   RBuiltin("float_to_bits", Nil)),
+  Cons(("float_abs",       RBuiltin("float_abs", Nil)),
+  Cons(("float_sqrt",      RBuiltin("float_sqrt", Nil)),
+  Cons(("float_floor",     RBuiltin("float_floor", Nil)),
+  Cons(("float_ceil",      RBuiltin("float_ceil", Nil)),
+  Cons(("Nil",  RCon("Nil", Nil)),
+  Cons(("Cons", RPartCon("Cons", 2, Nil)),
+  Cons(("Ok",   RPartCon("Ok", 1, Nil)),
+  Cons(("Err",  RPartCon("Err", 1, Nil)),
+  Cons(("True",  RBool(true)),
+  Cons(("False", RBool(false)),
+  (* con→type map for the built-in ADTs (cek.py seeds List/Result). *)
+  Cons(("#type#Nil",  RStr("List")),
+  Cons(("#type#Cons", RStr("List")),
+  Cons(("#type#Ok",   RStr("Result")),
+  Cons(("#type#Err",  RStr("Result")),
+  Nil))))))))))))))))))))))))))))))
+
+(* Register the constructors of one ADT declaration, plus each constructor's
+   con→type entry ("#type#<Tag>") used by runtimeType for trait dispatch. *)
+fn addVariants(tyname : String, vs : List(Variant), env : List((String, RVal))) : List((String, RVal)) =
+  match vs with
+  | Nil => env
+  | Cons(Variant(nm, payload), rest) =>
+      let ar = ckLen(payload) in
+      let cval = if ar == 0 then RCon(nm, Nil) else RPartCon(nm, ar, Nil) in
+      let env2 = Cons(("#type#" + nm, RStr(tyname)), Cons((nm, cval), env)) in
+      addVariants(tyname, rest, env2)
+  end
+
+(* Name of the type an `impl` is FOR (parse.lark's Ty → its head name). *)
+fn tyName(t : Ty) : String =
+  match t with
+  | TName(n)     => n
+  | TApply(n, _) => n
+  | TUnit        => "()"
+  | _            => "?"
+  end
+
+(* First impl of a method that shadows a builtin (e.g. show): seed the primitive
+   types so calls on Int/Float/… keep routing to the original builtin. *)
+fn seedPrim(nm : String, bname : String, env : List((String, RVal))) : List((String, RVal)) =
+  Cons((nm + "#Int",    RBuiltin(bname, Nil)),
+  Cons((nm + "#Float",  RBuiltin(bname, Nil)),
+  Cons((nm + "#Bool",   RBuiltin(bname, Nil)),
+  Cons((nm + "#String", RBuiltin(bname, Nil)),
+  Cons((nm + "#()",     RBuiltin(bname, Nil)),
+  env)))))
+
+(* Register each impl method: dispatch entry "<meth>#<type>", plus rebind the
+   method name to RDispatch (port of cek.py eval_program's TImplDecl case). *)
+fn addImplMethods(methods : List(IMethod), tyname : String,
+                  env : List((String, RVal))) : List((String, RVal)) =
+  match methods with
+  | Nil => env
+  | Cons(IMethod(nm, params, body), rest) =>
+      let clos = mkClosure(params, body, Nil) in
+      let e1   = Cons((nm + "#" + tyname, clos), env) in
+      let e2   = match envGet(env, nm) with
+                 | RSome(RBuiltin(bname, _)) => seedPrim(nm, bname, e1)
+                 | _                         => e1
+                 end in
+      addImplMethods(rest, tyname, Cons((nm, RDispatch(nm)), e2))
+  end
+
+(* Build a (curried) closure from a function's params + body.  Top-level
+   closures capture an empty local env — mutual recursion resolves via g. *)
+fn mkClosure(params : List(Param), body : Expr, env : List((String, RVal))) : RVal =
+  match params with
+  | Cons(Param(p0, _), rest) =>
+      match rest with
+      | Nil => RClosure(p0, body, env)
+      | _   => RClosure(p0, Lambda(rest, body), env)
+      end
+  | Nil => RClosure("_", body, env)
+  end
+
+(* Pass 1: install every top-level function closure + every ADT constructor. *)
+fn addDecls(decls : List(Decl), env : List((String, RVal))) : List((String, RVal)) =
+  match decls with
+  | Nil => env
+  | Cons(d, rest) =>
+      match d with
+      | FnDecl(_, nm, _, params, _, body) =>
+          addDecls(rest, Cons((nm, mkClosure(params, body, Nil)), env))
+      | TypeDecl(_, tyname, _, tbody) =>
+          match tbody with
+          | Variants(vs) => addDecls(rest, addVariants(tyname, vs, env))
+          | Alias(_)    => addDecls(rest, env)
+          end
+      | ImplDecl(_, _, forty, methods) =>
+          addDecls(rest, addImplMethods(methods, tyName(forty), env))
+      | _ => addDecls(rest, env)
+      end
+  end
+
+(* Pass 2: evaluate top-level `let` declarations against the full globals g. *)
+fn addLets(decls : List(Decl), g : List((String, RVal))) : List((String, RVal)) =
+  match decls with
+  | Nil => g
+  | Cons(d, rest) =>
+      match d with
+      | LetDecl(_, nm, _, valExpr) =>
+          match runToVal(SEval(valExpr, Nil, Nil, ""), g) with
+          | VOut(v, _) => addLets(rest, Cons((nm, v), g))
+          end
+      | _ => addLets(rest, g)
+      end
+  end
+
+fn applyMain(g : List((String, RVal)), input : String) : State =
+  match envGet(g, "main") with
+  | RSome(mainv) => apply(mainv, RIO(input), Nil, g, "")   (* IO token carries stdin *)
+  | RNone        => SRet(RStr("(no main)"), Nil, "")
+  end
+
+(* Drop one trailing newline: our accumulator ends every printed line with "\n",
+   and the driver's real `print` re-adds one, so we'd otherwise double it. *)
+fn stripTrailingNL(s : String) : String =
+  let n = string_length(s) in
+  if n == 0 then s
+  else if string_index(s, n - 1) == 10 then string_slice(s, 0, n - 1)
+  else s
+
+(* `input` is the program's stdin, threaded into main's IO token so `read`
+   can consume it line by line (empty for the whole corpus — no test reads). *)
+fn runProgram(prog : Prog, input : String) : String =
+  match prog with
+  | Prog(_, _, decls) =>
+      let g0 = addDecls(decls, initialEnv(0)) in
+      let g  = addLets(decls, g0) in
+      stripTrailingNL(run(applyMain(g, input), g))
+  end
+
+
+(* ── Component marker main (stripped by the differential harness) ─────────── *)
+
+fn main(io : IO) : IO =
+  print(io, "cek.lark is a component — run via tests/cek_difftest.py")

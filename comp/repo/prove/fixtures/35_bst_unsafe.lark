@@ -1,0 +1,67 @@
+module BstUnsafe
+
+(* The mutant of 35_bst_safe.lark, and the bug is one value: the left subtree's inner
+   node is `9`, not `2`.  The left subtree is still internally ordered (1 < 9), so the
+   lie is exactly at the ROOT: `maxv(left)` is now 9, and `bst`'s deepest arm asks
+   `maxv(l) < v` — `9 < 3` — which is false.  The whole tree's `bst` resolves through
+   the nested equivalences to `false`, so the call `use(disordered)` owes a `bst` it
+   cannot have: 1 of 1 obligation unproved.
+
+   Nothing detonates at run time — a `bst` is a fact about ORDER, not a divisor — so
+   this fixture is checked but not run.  The teeth are that the BUILDING direction
+   refuses to certify an out-of-order tree as a search tree.
+
+   Expected: 1 of 1 obligation unproved. *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure maxv(t : Tree) : Int =
+  match t with
+  | Leaf => 0
+  | Node(l, v, r) =>
+      match r with
+      | Leaf             => v
+      | Node(rl, rv, rr) => maxv(r)
+      end
+  end
+
+measure minv(t : Tree) : Int =
+  match t with
+  | Leaf => 0
+  | Node(l, v, r) =>
+      match l with
+      | Leaf             => v
+      | Node(ll, lv, lr) => minv(l)
+      end
+  end
+
+measure bst(t : Tree) : Bool =
+  match t with
+  | Leaf => true
+  | Node(l, v, r) =>
+      match l with
+      | Leaf =>
+          match r with
+          | Leaf             => true
+          | Node(rl, rv, rr) => v < minv(r) and bst(r)
+          end
+      | Node(ll, lv, lr) =>
+          match r with
+          | Leaf             => maxv(l) < v and bst(l)
+          | Node(rl, rv, rr) => maxv(l) < v and v < minv(r) and bst(l) and bst(r)
+          end
+      end
+  end
+
+fn use(t : {v : Tree | bst(v)}) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, v, r) => v
+  end
+
+fn main(io : IO) : IO =
+  let disordered =
+    Node(Node(Leaf, 1, Node(Leaf, 9, Leaf)),
+         3,
+         Node(Node(Leaf, 4, Leaf), 5, Node(Leaf, 6, Leaf))) in
+  print(io, show(use(disordered)))

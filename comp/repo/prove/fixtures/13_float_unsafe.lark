@@ -1,0 +1,38 @@
+module FloatUnsafe
+
+(* THE FIRST FALSE PROOF THIS CHECKER EVER PRODUCED, and the fixture that stops it
+   coming back.  Before the fix, `refine.py` reported
+
+     ok: 2 obligation(s) proved
+
+   and then the program divided by zero.
+
+   The lie is `x == x`.  In the logic that is VALID — equality is an equivalence
+   relation and congruence closure makes it reflexive, as it must be.  In IEEE-754 it
+   is FALSE when x is NaN, and Lark makes NaN the ordinary way: `0.0 / 0.0` gives one,
+   and so does `float_sqrt` of a negative.  So the checker assumed `not (x == x)` in
+   the else branch, found it contradictory, and proved the branch VACUOUSLY — while
+   the machine cheerfully ran it.
+
+   The other half of the same lie needs no NaN at all: `0.0 == -0.0` is TRUE at run
+   time and they are DIFFERENT VALUES, so congruence would conclude `f(0.0) == f(-0.0)`
+   for an `f` that can tell them apart (`1.0 / x` is +inf for one and -inf for the
+   other).  Reflexivity fails in one direction and substitutivity in the other — and
+   those two are the whole of what a sort of OTHER hands out.
+
+   So a Float now has a sort of its own (`refine.FLOAT`) at which NO TERM IS EVER
+   BUILT.  It is not opaque; it is unspeakable.  `x == x` is then not a hypothesis the
+   checker believes, it is a condition the checker cannot read — and an unreadable
+   condition constrains NOTHING (see 14_guard_unsafe.lark, which is the general form of
+   that second mistake).
+
+   Expected: 1 of 2 unproved.  The obligation on `d` cannot be discharged, and that is
+   the truth: `d` really can be zero. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn f(x : Float, d : Int) : Int =
+  if x == x then 0 else div(100, d)
+
+fn main(io : IO) : IO =
+  print(io, show(f(float_sqrt(0.0 - 1.0), 0)))

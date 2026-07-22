@@ -1,0 +1,57 @@
+(* 20 — A CONDITION IS AN EXPRESSION.  (found by `08/tests/adversary.py`, seed 4242)
+
+   The deepest of the holes, and the one nobody would have written a test for, because
+   nothing in a Bool position LOOKS partial:
+
+     if (x / y) < x then ... else ...          with y = 0
+
+   Old verdict (measured, at 570f095): `ok: 0 obligation(s) proved`, exit 0.  Zero.  The
+   checker did not fail to prove the division — it never SAW it.
+
+   The cause is one distinction the code had stopped making:
+
+     `formula_opt` and `term_opt` TRANSLATE.  `synth` WALKS.
+     Only the walk raises obligations.  Translation is pure: it asks for nothing.
+
+   And four places translated a sub-expression INSTEAD of walking it — an `if`'s condition,
+   a comparison, a `not`, a unary minus.  Every division inside any of them vanished.  The
+   unary minus is the one that stings: it walked its operand only when `term_opt` FAILED,
+   so the better the checker understood the expression, the less of it it checked.
+
+   The rule is the impl hole's rule, one level down:
+
+     EVERY SUB-EXPRESSION IS WALKED EXACTLY ONCE, whether or not it is also translated.
+     What the checker declines to UNDERSTAND it must still LOOK AT.
+
+   And this was not a corner.  It was in 07's own sample corpus, in the primes sieve —
+   `fn divides(d, n) = n / d * d == n`, a function whose entire body is a comparison —
+   which for the whole life of this fork reported ZERO obligations.  A trial-division
+   sieve, and the checker had never once looked at the division.  (It looks now, and says
+   `unproved`, which is the truth: `d : Int` does not promise `d /= 0`.  See
+   `08/tests/robust_sweep.py`, where that verdict is pinned to the moved value.)
+
+   What this file shows is the same program, said honestly: a division in a condition owes
+   the same obligation as a division anywhere else, and it is discharged the same way — by
+   a fact the caller can read in the SIGNATURE. *)
+
+module ConditionSafe
+
+(* The primes sieve's `divides`, with the contract its body always needed.  The division
+   lives inside a comparison; the obligation is raised there and discharged from `d`'s own
+   refinement. *)
+fn divides(d : {v : Int | v != 0}, n : Int) : Bool =
+  n / d * d == n
+
+(* A division in an `if` condition, in a `not`, and under a unary minus:
+   the three positions that used to swallow it.  All three are proved, from one guard. *)
+fn classify(x : Int, y : Int) : Int =
+  if y == 0 then 0
+  else if (x / y) < x then 1
+  else if not ((x / y) > 100) then 2
+  else if -(x / y) < 0 then 3
+  else 4
+
+fn main(io : IO) : IO =
+  let io = print(io, show(divides(3, 9))) in
+  let io = print(io, show(classify(50, 0))) in
+  print(io, show(classify(50, 2)))

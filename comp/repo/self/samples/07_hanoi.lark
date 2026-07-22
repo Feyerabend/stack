@@ -1,0 +1,34 @@
+(* Sample 07 — Towers of Hanoi
+   Move N disks from peg A to C using B as auxiliary.
+   The moves are built as a pure String (no recursive IO), then printed once.
+   2^N - 1 total moves.
+
+   Expected output for N=4 (15 moves followed by "15 moves total"):
+     move disk 1: A -> C
+     move disk 2: A -> B
+     ...
+     15 moves total *)
+
+module Hanoi
+
+fn join2(a : String, b : String) : String =
+  if string_length(a) == 0 then b
+  else if string_length(b) == 0 then a
+  else a + "\n" + b
+
+fn hanoi_str(n : Int, src : String, aux : String, dst : String) : String =
+  if n == 0 then ""
+  else
+    let before = hanoi_str(n - 1, src, dst, aux) in
+    let move   = "move disk " + show(n) + ": " + src + " -> " + dst in
+    let after  = hanoi_str(n - 1, aux, src, dst) in
+    join2(join2(before, move), after)
+
+fn count_moves(n : Int) : Int =
+  if n == 0 then 0
+  else 2 * count_moves(n - 1) + 1
+
+fn main(io : IO) : IO =
+  let n   = 4 in
+  let io  = print(io, hanoi_str(n, "A", "B", "C")) in
+  print(io, show(count_moves(n)) + " moves total")

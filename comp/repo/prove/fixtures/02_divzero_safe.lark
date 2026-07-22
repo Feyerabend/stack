@@ -1,0 +1,17 @@
+module DivZeroSafe
+
+(* Division carries an obligation whether or not anyone wrote a contract: every
+   `/` in the program generates `d /= 0`.  A refinement on the parameter is how
+   the callee states the demand; the caller has to meet it. *)
+
+fn safe_div(n: Int, d: {v: Int | v != 0}) : Int =
+  n / d
+
+fn halve(n: Int) : Int =
+  safe_div(n, 2)
+
+fn ratio(n: Int, d: Int) : Int =
+  if d != 0 then safe_div(n, d) else 0
+
+fn scale(n: Int, k: {v: Int | v > 0}) : Int =
+  n / k

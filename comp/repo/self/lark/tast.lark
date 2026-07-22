@@ -1,0 +1,153 @@
+(* tast.lark — Lark's TYPED abstract syntax tree, written in Lark.
+   (the port of oracle/typed_tree.py.)
+
+   The type checker (infer.lark, slice 3) turns a syntactic Prog (parse.lark)
+   into a typed TProgram: every expression node carries its inferred monotype,
+   and every top-level decl carries its generalised Scheme.  The tree is
+   otherwise isomorphic to the syntactic one — node names match their untyped
+   twins with a `T` prefix, exactly as typed_tree.py mirrors tree.py.
+
+   Design notes
+   ────────────
+   • This slice is pure data + a signature printer; it has no standalone smoke
+     of its own module boundary, because it depends on the other type-checker modules and the
+     whole pipeline is assembled by CONCATENATION (a known wart of the language):
+        parse.lark  gives  Val, Maybe          (literals, optional variants)
+        types.lark  gives  Mono, Scheme, pretty (the type vocabulary)
+     So `make tastsmoke` concatenates parse + types + tast + a driver.
+   • ONE renamed constructor: typed_tree.py's `TApply` becomes `TApp` here.
+     parse.lark's *syntactic* type ADT already owns `TApply` (`TApply of String,
+     List(Ty)`), and under concatenation the two vocabularies share a namespace —
+     same reason types.lark M-prefixes its monotypes.  `TApp` also matches
+     ty.py's own abbreviation for the applied monotype.  Every other typed node
+     keeps its typed_tree.py name (TVar/TCon/TBinOp/… do NOT collide — the only
+     other T-names in scope are types.lark's *comments*, never declarations).
+   • Copy impls on every typed type: infer.lark reuses subtrees across match
+     arms / branches, which the affine checker (a known wart of the language) would otherwise
+     reject; Copy impls are name-only (no field check), so this is free — the
+     same move parse.lark makes for its AST.
+
+   Run (smoke):  see harness/tast_smoke.py  (make tastsmoke)  *)
+
+module Tast
+
+
+(* ── Typed expressions (port of typed_tree.py TExpr) ──────────────────────── *)
+(* Each node's LAST field is its inferred monotype `Mono`, mirroring the Python
+   dataclass `typ` field.  `Val` (from parse.lark) is the literal payload. *)
+
+type TExpr =
+  | TLit       of Val, Mono                          (* value + type            *)
+  | TVar       of String, Mono                       (* typed variable ref      *)
+  | TCon       of String, Mono                       (* typed constructor ref   *)
+  | TTupleExpr of List(TExpr), Mono
+  | TApp       of TExpr, List(TExpr), Mono           (* was TApply (see header)  *)
+  | TBinOp     of String, TExpr, TExpr, Mono
+  | TUnaryOp   of String, TExpr, Mono
+  | TLetExpr   of String, TExpr, TExpr, Mono         (* name, value, body, typ   *)
+  | TIfExpr    of TExpr, TExpr, TExpr, Mono
+  | TMatchExpr of TExpr, List((TPat, TExpr)), Mono   (* scrutinee, arms, typ     *)
+  | TLambda    of List((String, Mono)), TExpr, Mono  (* (name,typ) params, body, overall TFn *)
+
+
+(* ── Typed patterns (port of typed_tree.py TPat) ──────────────────────────── *)
+
+type TPat =
+  | TPWild  of Mono
+  | TPVar   of String, Mono
+  | TPLit   of Val, Mono
+  | TPCon   of String, List(TPat), Mono
+  | TPTuple of List(TPat), Mono
+
+
+(* ── Typed declarations (port of typed_tree.py TDecl) ─────────────────────── *)
+
+(* A checked variant: constructor name + field monotypes (empty = nullary). *)
+type TVariant = | TVariant of String, List(Mono)
+
+type TDecl =
+  (* name, (name,typ) params, body, generalised scheme, exported *)
+  | TFnDecl   of String, List((String, Mono)), TExpr, Scheme, Bool
+  (* name, value, scheme, exported *)
+  | TLetDecl  of String, TExpr, Scheme, Bool
+  (* name, type params, variants (Nothing = type alias), exported *)
+  | TTypeDecl of String, List(String), Maybe(List(TVariant)), Bool
+  (* trait name, concrete for-type, methods (each a TFnDecl) *)
+  | TImplDecl of String, String, List(TDecl)
+
+
+(* ── Typed program (port of typed_tree.py TProgram) ───────────────────────── *)
+
+type TProgram = | TProgram of String, List(TDecl)
+
+
+(* ── Copy impls (reuse across match arms / branches — see header) ─────────── *)
+
+impl Copy for TExpr    = {}
+impl Copy for TPat     = {}
+impl Copy for TVariant = {}
+impl Copy for TDecl    = {}
+impl Copy for TProgram = {}
+
+
+(* ── Top-level signature printer ──────────────────────────────────────────── *)
+(* This is the shape the type-checker differential compares against infer.py: one line per
+   top-level decl giving its name and inferred type.  The exact scheme rendering
+   (quantifier prefix, Copy bounds) is finalised in slice 3 against infer.py's
+   output; for now the smoke prints the generalised body via types.lark `pretty`. *)
+
+fn prettyScheme(s : Scheme) : String =
+  match s with
+  | Scheme(qs, body, _) =>
+      match qs with
+      | Nil => pretty(body)
+      | _   => "forall. " + pretty(body)     (* quantifier list finalised in slice 3 *)
+      end
+  end
+
+fn tDeclSig(d : TDecl) : String =
+  match d with
+  | TFnDecl(name, _, _, sc, _)   => name + " : " + prettyScheme(sc)
+  | TLetDecl(name, _, sc, _)     => name + " : " + prettyScheme(sc)
+  | TTypeDecl(name, _, _, _)     => "type " + name
+  | TImplDecl(tr, forty, _)      => "impl " + tr + " for " + forty
+  end
+
+fn tSigLines(ds : List(TDecl)) : String =
+  match ds with
+  | Nil           => ""
+  | Cons(d, rest) =>
+      match rest with
+      | Nil => tDeclSig(d)
+      | _   => tDeclSig(d) + "\n" + tSigLines(rest)
+      end
+  end
+
+fn showTProgram(p : TProgram) : String =
+  match p with
+  | TProgram(m, ds) => "(module " + m + ")\n" + tSigLines(ds)
+  end
+
+
+(* ── Smoke driver (concatenated with parse + types — see tast_smoke.py) ───── *)
+(* Builds a tiny typed program by hand and prints its top-level signatures,
+   exercising every typed decl shape plus TExpr/TPat construction. *)
+
+fn main(io : IO) : IO =
+  let a  = MVar(0) in
+  (* id : a -> a  ;  body = \x. x  *)
+  let idBody = TLambda(Cons(("x", a), Nil), TVar("x", a), MFn(a, a)) in
+  let idFn   = TFnDecl("id", Cons(("x", a), Nil), idBody,
+                       Scheme(Cons(0, Nil), MFn(a, a), Nil), true) in
+  (* answer = 42  ;  monomorphic Int let-decl *)
+  let ans    = TLetDecl("answer", TLit(VInt("42"), MCon("Int")),
+                        Scheme(Nil, MCon("Int"), Nil), false) in
+  (* type Color = Red | Green  *)
+  let colorT = TTypeDecl("Color", Nil,
+                 Just(Cons(TVariant("Red", Nil), Cons(TVariant("Green", Nil), Nil))),
+                 true) in
+  (* impl Show for Color = { ... }  (methods elided in this smoke) *)
+  let showImpl = TImplDecl("Show", "Color", Nil) in
+  let prog = TProgram("Demo",
+               Cons(colorT, Cons(idFn, Cons(ans, Cons(showImpl, Nil))))) in
+  print(io, showTProgram(prog))

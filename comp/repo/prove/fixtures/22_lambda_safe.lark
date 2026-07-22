@@ -1,0 +1,45 @@
+(* 22 — a lambda's body is code, and code is walked.
+
+   The eighth false proof, and the first one this project found ON PURPOSE.  Every
+   earlier one turned up because someone wrote a hostile program and got lucky.  This
+   one was found by `08/tests/invariants.py`, which asks a question no test had asked
+   before — *did the checker LOOK at this node?* — of every expression in the whole
+   corpus.  Seven nodes in `07/samples/09_parser.lark` came back never-walked, and three
+   in `07/tests/10_closures.lark`, and they were all the same thing: the body of a lambda
+   bound by a `let`.
+
+   `check` walks a lambda's body, because it has an expected function type to push into
+   it.  `synth` did not — and an unannotated `let h = fn (a) => …` goes through `synth`.
+   So the body was never looked at, and:
+
+       let h = fn (a : Int) => 100 / a in h(0)
+
+   reported `ok: 0 obligation(s) proved`, exit 0, and then raised ZeroDivisionError.  It
+   is a later version(7) exactly — a piece of the program the checker never walked — wearing a hat
+   nobody had thought to check under.
+
+   Here the divisions inside the lambdas are safe, and the checker must now SEE them and
+   prove them: `d` is declared non-zero, and 2 is a literal.  A lambda's parameter carries
+   whatever its annotation says and nothing else — the checker does not know where this
+   function will be called, so it must prove the body for EVERY argument. *)
+
+module LambdaSafe
+
+fn apply(f : Int -> Int, x : Int) : Int = f(x)
+
+fn quotient(n : Int, d : {v : Int | v != 0}) : Int =
+  (* the divisor's non-zeroness comes from the ANNOTATION, and it has to survive the
+     trip into the lambda's body — the parameter is bound with its refinement, exactly
+     as a function's parameter is. *)
+  let go = fn (k : {v : Int | v != 0}) => n / k in
+  go(d)
+
+fn halves(n : Int) : Int =
+  (* an unannotated parameter is opaque: the checker knows nothing about `x`, which is
+     the truth.  The division is by the literal 2, so it proves anyway. *)
+  let half = fn (x) => x / 2 in
+  apply(half, n)
+
+fn main(io : IO) : IO =
+  let io = print(io, int_to_string(quotient(100, 4))) in
+  print(io, int_to_string(halves(50)))

@@ -1,0 +1,67 @@
+module NestedMeasureSafe
+
+(* a NESTED MATCH in a measure.
+
+   Every measure before this took its argument apart exactly once: `match xs with
+   | Nil | Cons(_, rest)`.  A BST needs more.  `maxv`/`minv` — a tree's rightmost /
+   leftmost value — are defined by looking at a CHILD's shape: the max of a node is
+   its own value when the right child is a Leaf, and the right subtree's max
+   otherwise.  You cannot write that without a second match, on a FIELD of the first.
+
+   `rdepth` here, the length of the right spine, needs the same move for the same
+   reason: at a Node it must ask whether the right child is a Leaf (the spine ends,
+   depth 2) or a Node (descend).  The nested match FLATTENS into one equation per
+   (outer constructor x inner constructor) path —
+
+       rdepth(Leaf)                          == 1
+       rdepth(Node(l, v, Leaf))              == 2
+       rdepth(Node(l, v, Node(rl, rv, rr)))  == 1 + rdepth(Node(rl, rv, rr))
+
+   — and those equations FIRE AT CONCRETE SUBFIELDS: the middle one only where the
+   right child is literally a `Leaf`, the last only where it is literally a `Node`.
+   A `rdepth(t)` for an opaque `t` fires nothing at all, which is the sound silence a
+   flat measure already keeps at an opaque argument.
+
+   TWO things earn their keep here, one per direction of the rung:
+
+   THE DECLARED RESULT, PROVED BY NESTED INDUCTION.  `{v : Int | v >= 1}` is proved
+   one arm at a time, and the nested arm is where the induction has to reach a
+   CONCRETE-subfield target: `rdepth(Node(l, v, Node(rl, rv, rr))) >= 1` from the
+   equation `== 1 + rdepth(Node(rl, rv, rr))` and the induction hypothesis
+   `rdepth(Node(rl, rv, rr)) >= 1`.  This is what lets `use` divide by `d` over an
+   OPAQUE tree: `d == rdepth(t)` and a right-spine depth is at least 1, so `d != 0` —
+   a fact about a tree the checker never took apart, exactly as `21_result`'s `avg`
+   divides by `len(xs) + 1` for an opaque list.
+
+   THE EQUATIONS, FIRING AT THE BUILT TREES.  Each call in `main` supplies the depth
+   its concrete tree has, and the call's obligation — `2 == rdepth(Node(Leaf, 5,
+   Leaf))`, `3 == rdepth(Node(Leaf, 1, Node(Leaf, 2, Leaf)))` — is discharged only
+   because the nested equations fire at those literal shapes and chain by arithmetic.
+
+   And it RUNS: a measure is ghost, so `rdepth` is a name the CEK machine never sees;
+   `d` is an ordinary Int the caller passes.
+
+   Expected output:
+     50
+     33 *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure rdepth(t : Tree) : {v : Int | v >= 1} =
+  match t with
+  | Leaf => 1
+  | Node(l, v, r) =>
+      match r with
+      | Leaf             => 2
+      | Node(rl, rv, rr) => 1 + rdepth(r)
+      end
+  end
+
+(* The division is safe over an OPAQUE tree: `d` is tied to its right-spine depth,
+   and a depth is at least 1 — the declared result, proved by the nested induction. *)
+fn use(t : Tree, d : {v : Int | v == rdepth(t)}) : Int =
+  100 / d
+
+fn main(io : IO) : IO =
+  let io = print(io, show(use(Node(Leaf, 5, Leaf), 2))) in
+  print(io, show(use(Node(Leaf, 1, Node(Leaf, 2, Leaf)), 3)))

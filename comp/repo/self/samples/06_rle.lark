@@ -1,0 +1,80 @@
+(* Sample 06 — Run-length encoding
+   Compress a list into (count, value) runs; decode back to the original.
+   Expected output:
+     1 1 1 2 3 3 4 4 4 4
+     3x1 1x2 2x3 4x4
+     1 1 1 2 3 3 4 4 4 4 *)
+
+module RLE
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+type Run =
+  | Run of Int, Int
+
+impl Copy for List(Int) = {}
+impl Copy for Run = {}
+impl Copy for List(Run) = {}
+
+fn encode_acc(x : Int, n : Int, xs : List(Int)) : List(Run) =
+  match xs with
+  | Nil           => Cons(Run(n, x), Nil)
+  | Cons(h, rest) =>
+    if h == x then encode_acc(x, n + 1, rest)
+    else Cons(Run(n, x), encode_acc(h, 1, rest))
+  end
+
+fn encode(xs : List(Int)) : List(Run) =
+  match xs with
+  | Nil           => Nil
+  | Cons(h, rest) => encode_acc(h, 1, rest)
+  end
+
+fn repeat_val(x : Int, n : Int) : List(Int) =
+  if n <= 0 then Nil
+  else Cons(x, repeat_val(x, n - 1))
+
+fn append(xs : List(Int), ys : List(Int)) : List(Int) =
+  match xs with
+  | Nil           => ys
+  | Cons(h, rest) => Cons(h, append(rest, ys))
+  end
+
+fn decode(rs : List(Run)) : List(Int) =
+  match rs with
+  | Nil           => Nil
+  | Cons(r, rest) =>
+    match r with
+    | Run(n, x) => append(repeat_val(x, n), decode(rest))
+    end
+  end
+
+fn join_int(sep : String, xs : List(Int)) : String =
+  match xs with
+  | Nil            => ""
+  | Cons(x, Nil)   => show(x)
+  | Cons(x, rest)  => show(x) + sep + join_int(sep, rest)
+  end
+
+fn show_run(r : Run) : String =
+  match r with
+  | Run(n, x) => show(n) + "x" + show(x)
+  end
+
+fn join_run(sep : String, rs : List(Run)) : String =
+  match rs with
+  | Nil            => ""
+  | Cons(r, Nil)   => show_run(r)
+  | Cons(r, rest)  => show_run(r) + sep + join_run(sep, rest)
+  end
+
+fn main(io : IO) : IO =
+  let xs = Cons(1, Cons(1, Cons(1, Cons(2, Cons(3, Cons(3,
+           Cons(4, Cons(4, Cons(4, Cons(4, Nil)))))))))) in
+  let runs = encode(xs) in
+  let back = decode(runs) in
+  let io = print(io, join_int(" ", xs)) in
+  let io = print(io, join_run(" ", runs)) in
+  print(io, join_int(" ", back))

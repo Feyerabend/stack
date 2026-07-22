@@ -1,0 +1,10 @@
+(* Error test 02 — Copy violation: non-Copy type used twice
+   Expected: type error — Handle is not Copy, cannot be duplicated. *)
+
+module NoCopyError
+
+type Handle = | Handle of Int
+(* no impl Copy for Handle — it is affine *)
+
+fn duplicate(h : Handle) : (Handle, Handle) =
+  (h, h)

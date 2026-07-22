@@ -1,0 +1,28 @@
+module MeasureOverlap
+
+(* Two arms for one constructor.
+
+   In a program this is harmless and even ordinary: the arms are tried in order,
+   the first one wins, the second is dead code.  In a measure it is two equations
+   about the same term —
+
+       len(Nil) == 0     and     len(Nil) == 1
+
+   — and an axiom set that can disagree with itself is an axiom set that proves
+   anything.  "First match wins" is an evaluation rule, and there is no evaluation
+   here.  The arms of a measure are unordered by the time the solver sees them, so
+   they must not need an order.
+
+   Rejected: constructor 'Nil' has two arms. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure len(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => 1 + len(rest)
+  | Nil           => 1
+  end
+
+fn zero(xs : List(Int)) : {v : Int | v == 0} =
+  0

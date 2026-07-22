@@ -1,0 +1,31 @@
+module NestedMeasureUnsafe
+
+(* the mutant, with teeth.
+
+   Identical to `34_nestedmeasure_safe` but for the second call in `main`: it claims
+   the concrete tree `Node(Leaf, 5, Leaf)` has right-spine depth 0.  The nested
+   equation fires at that literal shape and says otherwise — `rdepth(Node(Leaf, 5,
+   Leaf)) == 2` — so the obligation `0 == rdepth(Node(Leaf, 5, Leaf))` is `0 == 2`,
+   which does not hold: 1 of 6 obligations unproved.
+
+   Were it admitted, `use` would run `100 / 0`.  This fixture is checked but NOT run —
+   the point is that the checker stops it before the CEK machine can detonate. *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure rdepth(t : Tree) : {v : Int | v >= 1} =
+  match t with
+  | Leaf => 1
+  | Node(l, v, r) =>
+      match r with
+      | Leaf             => 2
+      | Node(rl, rv, rr) => 1 + rdepth(r)
+      end
+  end
+
+fn use(t : Tree, d : {v : Int | v == rdepth(t)}) : Int =
+  100 / d
+
+fn main(io : IO) : IO =
+  let io = print(io, show(use(Node(Leaf, 5, Leaf), 2))) in
+  print(io, show(use(Node(Leaf, 5, Leaf), 0)))

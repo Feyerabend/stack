@@ -1,0 +1,6 @@
+(* Error test 07 — Trait bound violation: unconstrained type variable passed to show
+   Expected: TraitBoundError — 'show' requires Show, but the type variable has no instance *)
+
+module TraitBound
+
+fn bad_show(x) = show(x)

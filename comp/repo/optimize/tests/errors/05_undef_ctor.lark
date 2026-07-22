@@ -1,0 +1,15 @@
+(* Error test 05 — Reference to undefined constructor
+   Expected: TypeError / unbound variable at type-check time *)
+
+module UndefCtor
+
+type Shape = | Circle of Float | Rect of Float, Float
+
+fn area(s : Shape) : Float =
+  match s with
+  | Circle(r)  => r * r
+  | Rect(w, h) => w * h
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(area(Triangle(3.0, 4.0))))

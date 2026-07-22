@@ -1,0 +1,335 @@
+(* lex.lark — the Lark lexer, written in Lark.  ()
+
+   A faithful port of oracle/lexer.py: a single-pass, hand-written lexer that
+   turns source text into a flat token list.  It walks an Int cursor over the
+   (Copy) source String, classifying each codepoint by range comparison and
+   slicing whole lexemes — exactly the bet, proved out by lex_smoke.lark.
+
+   Design notes
+   ────────────
+   • State is a single Copy value `Pos(pos, line, col)` threaded through `let`
+     (Lark's `let` binds one name and cannot destructure a tuple, so multi-value
+     returns are carried as one ADT value and read back with accessors).  Int is
+     Copy, so position/line/col reuse across branches is free — no affine wart.
+   • The lexer is pure: it builds the whole token list, and `main` prints a dump
+     once.  (The affine checker sums a variable's uses across branches, so `io`
+     may not be threaded through control flow — a known wart of the language.)
+   • Validation is differential against lexer.py — see harness/lex_difftest.py.
+     The `main` here is only a smoke driver; the harness replaces it per file.
+
+   Run (smoke):  python3 oracle/cek.py lark/lex.lark  *)
+
+module Lex
+
+
+(* ── Token kinds (names mirror lexer.py's TK enum exactly) ────────────────── *)
+
+type Kind =
+  | KInt | KFloat | KString | KTrue | KFalse | KUnit
+  | KName | KUpper
+  | KAnd | KElse | KEnd | KExport | KExposing | KFn | KFor | KIf | KImpl
+  | KImport | KIn | KLet | KMatch | KModule | KNot | KOf | KOr | KThen
+  | KTrait | KType | KWith
+  | KPlus | KMinus | KStar | KSlash
+  | KEqEq | KNeq | KLt | KLe | KGt | KGe
+  | KArrow | KFatArrow | KAssign | KPipe | KColon | KComma
+  | KLParen | KRParen | KLBracket | KRBracket | KLBrace | KRBrace
+  | KWildcard | KEof | KErr
+
+impl Copy for Kind = {}
+
+
+(* A token: kind, raw lexeme text, and 1-based line/col of its first char. *)
+type Token = | Tok of Kind, String, Int, Int
+impl Copy for Token = {}
+
+
+(* Cursor state: byte offset, line, column (all 1-based except pos, 0-based). *)
+type Pos = | P of Int, Int, Int
+impl Copy for Pos = {}
+
+fn pos_of(st : Pos)  : Int = match st with | P(p, l, c) => p end
+fn line_of(st : Pos) : Int = match st with | P(p, l, c) => l end
+fn col_of(st : Pos)  : Int = match st with | P(p, l, c) => c end
+
+
+(* A read token plus the cursor state after it. *)
+type Lexed = | Lexed of Token, Pos
+impl Copy for Lexed = {}
+
+
+type List a =
+  | Nil
+  | Cons of a, List(a)
+
+impl Copy for List(Token) = {}
+
+
+(* ── Character classes: codepoint range comparison, no new prims. ─────────── *)
+
+fn is_digit(c : Int) : Bool = c >= 48 and c <= 57
+fn is_lower(c : Int) : Bool = c >= 97 and c <= 122
+fn is_upper(c : Int) : Bool = c >= 65 and c <= 90
+fn is_alpha(c : Int) : Bool = is_lower(c) or is_upper(c)
+fn is_alnum(c : Int) : Bool = is_alpha(c) or is_digit(c)
+fn is_name_cont(c : Int) : Bool = is_alnum(c) or c == 95   (* alnum or '_' *)
+fn is_ws(c : Int) : Bool = c == 32 or c == 9 or c == 13 or c == 10
+
+
+(* ── Cursor advance: consume one char, tracking line/col like lexer._advance. *)
+
+fn adv(src : String, st : Pos) : Pos =
+  let p = pos_of(st) in
+  if string_index(src, p) == 10 then P(p + 1, line_of(st) + 1, 1)
+  else P(p + 1, line_of(st), col_of(st) + 1)
+
+
+(* Scan forward from i while pred holds; return the first index where it fails.
+   Used only for single-line runs (digits, name chars) — no newline tracking. *)
+fn scan_while(src : String, n : Int, i : Int, pred : Int -> Bool) : Int =
+  if i >= n then i
+  else if pred(string_index(src, i)) then scan_while(src, n, i + 1, pred)
+  else i
+
+
+(* ── Skip whitespace and nested block comments  ───────────────────────────── *)
+
+fn scan_comment(src : String, n : Int, st : Pos, depth : Int) : Pos =
+  if depth == 0 then st
+  else
+    let p = pos_of(st) in
+    if p >= n then st                              (* unterminated; clean corpus won't hit *)
+    else
+      let c  = string_index(src, p) in
+      let c2 = string_index(src, p + 1) in
+      if c == 40 and c2 == 42 then                 (* nested opener *)
+        scan_comment(src, n, adv(src, adv(src, st)), depth + 1)
+      else if c == 42 and c2 == 41 then            (* closing delimiter *)
+        scan_comment(src, n, adv(src, adv(src, st)), depth - 1)
+      else scan_comment(src, n, adv(src, st), depth)
+
+fn skip_comment(src : String, n : Int, st : Pos) : Pos =
+  scan_comment(src, n, adv(src, adv(src, st)), 1)   (* consume opener, depth 1 *)
+
+fn skip(src : String, n : Int, st : Pos) : Pos =
+  let p = pos_of(st) in
+  if p >= n then st
+  else
+    let c = string_index(src, p) in
+    if is_ws(c) then skip(src, n, adv(src, st))
+    else if c == 40 and string_index(src, p + 1) == 42 then
+      skip(src, n, skip_comment(src, n, st))
+    else st
+
+
+(* ── Readers: each returns Lexed(token, state-after-token). ───────────────── *)
+
+(* number ::= digit+ ('.' digit+)?  — float only when '.' is followed by a digit *)
+fn read_number(src : String, n : Int, st : Pos) : Lexed =
+  let sp   = pos_of(st) in
+  let line = line_of(st) in
+  let col  = col_of(st) in
+  let d1   = scan_while(src, n, sp, is_digit) in
+  if string_index(src, d1) == 46 and is_digit(string_index(src, d1 + 1)) then
+    let d2 = scan_while(src, n, d1 + 1, is_digit) in
+    Lexed(Tok(KFloat, string_slice(src, sp, d2), line, col),
+          P(d2, line, col + (d2 - sp)))
+  else
+    Lexed(Tok(KInt, string_slice(src, sp, d1), line, col),
+          P(d1, line, col + (d1 - sp)))
+
+(* string ::= '"' ( '\' any | ~'"' )* '"'  — text keeps quotes and raw escapes *)
+fn scan_string(src : String, n : Int, st : Pos) : Pos =
+  let p = pos_of(st) in
+  if p >= n then st                                (* unterminated *)
+  else
+    let c = string_index(src, p) in
+    if c == 34 then adv(src, st)                   (* closing quote consumed *)
+    else if c == 92 then                           (* backslash: skip it + next char *)
+      let st2 = adv(src, st) in
+      if pos_of(st2) >= n then st2
+      else scan_string(src, n, adv(src, st2))
+    else scan_string(src, n, adv(src, st))
+
+fn read_string(src : String, n : Int, st : Pos) : Lexed =
+  let start = pos_of(st) in
+  let line  = line_of(st) in
+  let col   = col_of(st) in
+  let endst = scan_string(src, n, adv(src, st)) in  (* adv past opening quote *)
+  Lexed(Tok(KString, string_slice(src, start, pos_of(endst)), line, col), endst)
+
+fn read_name(src : String, n : Int, st : Pos) : Lexed =
+  let sp   = pos_of(st) in
+  let line = line_of(st) in
+  let col  = col_of(st) in
+  let e    = scan_while(src, n, sp, is_name_cont) in
+  let text = string_slice(src, sp, e) in
+  Lexed(Tok(keyword_kind(text), text, line, col), P(e, line, col + (e - sp)))
+
+fn read_upper(src : String, n : Int, st : Pos) : Lexed =
+  let sp   = pos_of(st) in
+  let line = line_of(st) in
+  let col  = col_of(st) in
+  let e    = scan_while(src, n, sp, is_name_cont) in
+  Lexed(Tok(KUpper, string_slice(src, sp, e), line, col), P(e, line, col + (e - sp)))
+
+fn read_wildcard(src : String, n : Int, st : Pos) : Lexed =
+  let sp   = pos_of(st) in
+  let line = line_of(st) in
+  let col  = col_of(st) in
+  if is_name_cont(string_index(src, sp + 1)) then  (* names may not start with '_' *)
+    Lexed(Tok(KErr, "_", line, col), P(sp + 1, line, col + 1))
+  else
+    Lexed(Tok(KWildcard, "_", line, col), P(sp + 1, line, col + 1))
+
+
+(* ── Symbols and operators ────────────────────────────────────────────────── *)
+
+fn one(k : Kind, text : String, st : Pos) : Lexed =
+  Lexed(Tok(k, text, line_of(st), col_of(st)),
+        P(pos_of(st) + 1, line_of(st), col_of(st) + 1))
+
+fn two(k : Kind, text : String, st : Pos) : Lexed =
+  Lexed(Tok(k, text, line_of(st), col_of(st)),
+        P(pos_of(st) + 2, line_of(st), col_of(st) + 2))
+
+fn read_symbol(src : String, n : Int, st : Pos) : Lexed =
+  let p  = pos_of(st) in
+  let c  = string_index(src, p) in
+  let c2 = string_index(src, p + 1) in
+  if c == 40 then (if c2 == 41 then two(KUnit, "()", st) else one(KLParen, "(", st))
+  else if c == 45 then (if c2 == 62 then two(KArrow, "->", st) else one(KMinus, "-", st))
+  else if c == 61 then
+    (if c2 == 61 then two(KEqEq, "==", st)
+     else if c2 == 62 then two(KFatArrow, "=>", st)
+     else one(KAssign, "=", st))
+  else if c == 33 then (if c2 == 61 then two(KNeq, "!=", st) else one(KErr, "!", st))
+  else if c == 60 then (if c2 == 61 then two(KLe, "<=", st) else one(KLt, "<", st))
+  else if c == 62 then (if c2 == 61 then two(KGe, ">=", st) else one(KGt, ">", st))
+  else if c == 43 then one(KPlus, "+", st)
+  else if c == 42 then one(KStar, "*", st)
+  else if c == 47 then one(KSlash, "/", st)
+  else if c == 124 then one(KPipe, "|", st)
+  else if c == 58 then one(KColon, ":", st)
+  else if c == 44 then one(KComma, ",", st)
+  else if c == 91 then one(KLBracket, "[", st)
+  else if c == 93 then one(KRBracket, "]", st)
+  else if c == 123 then one(KLBrace, "{", st)
+  else if c == 125 then one(KRBrace, "}", st)
+  else if c == 41 then one(KRParen, ")", st)
+  else one(KErr, char_to_string(c), st)
+
+
+(* ── Main dispatch and the token loop ─────────────────────────────────────── *)
+
+fn lex_step(src : String, n : Int, st : Pos) : Lexed =
+  let c = string_index(src, pos_of(st)) in
+  if is_digit(c) then read_number(src, n, st)
+  else if c == 34 then read_string(src, n, st)
+  else if is_lower(c) then read_name(src, n, st)
+  else if is_upper(c) then read_upper(src, n, st)
+  else if c == 95 then read_wildcard(src, n, st)
+  else read_symbol(src, n, st)
+
+fn tokenize(src : String, n : Int, st : Pos) : List(Token) =
+  let st2 = skip(src, n, st) in
+  if pos_of(st2) >= n then
+    Cons(Tok(KEof, "", line_of(st2), col_of(st2)), Nil)
+  else
+    match lex_step(src, n, st2) with
+    | Lexed(tok, st3) => Cons(tok, tokenize(src, n, st3))
+    end
+
+
+(* ── Keyword table (lowercase text -> kind), else KName. ──────────────────── *)
+
+(* NB: keyword lookup uses `match` on string literals, not the `==` operator.
+   String `==` typechecks (Eq is polymorphic) but is unimplemented in the CEK
+   `binop` — only string `+` is.  Literal patterns route through `_val_eq`,
+   which does compare strings.  (A known wart of the language.) *)
+fn keyword_kind(text : String) : Kind =
+  match text with
+  | "and"      => KAnd
+  | "else"     => KElse
+  | "end"      => KEnd
+  | "export"   => KExport
+  | "exposing" => KExposing
+  | "false"    => KFalse
+  | "fn"       => KFn
+  | "for"      => KFor
+  | "if"       => KIf
+  | "impl"     => KImpl
+  | "import"   => KImport
+  | "in"       => KIn
+  | "let"      => KLet
+  | "match"    => KMatch
+  | "module"   => KModule
+  | "not"      => KNot
+  | "of"       => KOf
+  | "or"       => KOr
+  | "then"     => KThen
+  | "trait"    => KTrait
+  | "true"     => KTrue
+  | "type"     => KType
+  | "with"     => KWith
+  | _          => KName
+  end
+
+
+(* ── Serialization: one canonical line per token (kind line col text). ────── *)
+
+fn kind_name(k : Kind) : String =
+  match k with
+  | KInt => "INT" | KFloat => "FLOAT" | KString => "STRING"
+  | KTrue => "TRUE" | KFalse => "FALSE" | KUnit => "UNIT"
+  | KName => "NAME" | KUpper => "UPPER"
+  | KAnd => "AND" | KElse => "ELSE" | KEnd => "END" | KExport => "EXPORT"
+  | KExposing => "EXPOSING" | KFn => "FN" | KFor => "FOR" | KIf => "IF"
+  | KImpl => "IMPL" | KImport => "IMPORT" | KIn => "IN" | KLet => "LET"
+  | KMatch => "MATCH" | KModule => "MODULE" | KNot => "NOT" | KOf => "OF"
+  | KOr => "OR" | KThen => "THEN" | KTrait => "TRAIT" | KType => "TYPE"
+  | KWith => "WITH"
+  | KPlus => "PLUS" | KMinus => "MINUS" | KStar => "STAR" | KSlash => "SLASH"
+  | KEqEq => "EQEQ" | KNeq => "NEQ" | KLt => "LT" | KLe => "LE"
+  | KGt => "GT" | KGe => "GE"
+  | KArrow => "ARROW" | KFatArrow => "FAT_ARROW" | KAssign => "ASSIGN"
+  | KPipe => "PIPE" | KColon => "COLON" | KComma => "COMMA"
+  | KLParen => "LPAREN" | KRParen => "RPAREN"
+  | KLBracket => "LBRACKET" | KRBracket => "RBRACKET"
+  | KLBrace => "LBRACE" | KRBrace => "RBRACE"
+  | KWildcard => "WILDCARD" | KEof => "EOF" | KErr => "ERR"
+  end
+
+(* Escape a lexeme so each token stays on one line: \ n t r are the only
+   special cases; mirrors the Python side of the differential harness. *)
+fn escape(s : String, i : Int, n : Int) : String =
+  if i >= n then ""
+  else
+    let c    = string_index(s, i) in
+    let rest = escape(s, i + 1, n) in
+    if c == 92 then "\\\\" + rest
+    else if c == 10 then "\\n" + rest
+    else if c == 9 then "\\t" + rest
+    else if c == 13 then "\\r" + rest
+    else char_to_string(c) + rest
+
+fn show_token(t : Token) : String =
+  match t with
+  | Tok(k, text, line, col) =>
+    kind_name(k) + " " + int_to_string(line) + " " + int_to_string(col)
+      + " " + escape(text, 0, string_length(text))
+  end
+
+fn dump(ts : List(Token)) : String =
+  match ts with
+  | Nil          => ""
+  | Cons(t, Nil) => show_token(t)
+  | Cons(t, rest) => show_token(t) + "\n" + dump(rest)
+  end
+
+
+(* ── Smoke driver (the harness replaces this main per input file). ────────── *)
+
+fn main(io : IO) : IO =
+  let src = "fn add(x : Int) : Int = x + 1" in
+  print(io, dump(tokenize(src, string_length(src), P(0, 1, 1))))

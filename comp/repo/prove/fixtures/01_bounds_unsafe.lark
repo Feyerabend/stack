@@ -1,0 +1,19 @@
+module BoundsUnsafe
+
+(* The mutants of 01_bounds_safe, one bug each. *)
+
+fn char_at(s: String, i: {v: Int | v >= 0 and v < string_length(s)}) : Int =
+  string_index(s, i)
+
+(* No guard at all: the empty string indexes at 0. *)
+fn first_char(s: String) : Int =
+  char_at(s, 0)
+
+(* The guard is there but it is the wrong one — `>= 0` is true of every string. *)
+fn second_char(s: String) : Int =
+  if string_length(s) >= 0 then char_at(s, 1) else 0
+
+(* Off by one: n is a legal length, never a legal index. *)
+fn last_char(s: String) : Int =
+  let n = string_length(s) in
+  if n > 0 then char_at(s, n) else 0

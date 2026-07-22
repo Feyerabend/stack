@@ -1,0 +1,41 @@
+module PolyListSafe
+
+(* THE POLYMORPHIC-FIELD THERMOMETER (P2).  The Tree fixture wearing the hat
+   the fix is actually about: a measure over a POLYMORPHIC `List(a)`, destructured
+   at `Cons(x, rest)` where `x` is the polymorphic field `a`.
+
+   This is the same `allpos`/`head`/divide shape as `23_boolmeasure_safe.lark`, and
+   the only difference is monomorphic → polymorphic — which is the whole of P2.  In
+   `head`'s `Cons(x, rest)` arm, `infer_pat` instantiates `Cons : a, List(a) ->
+   List(a)` with a FRESH `a` and never learns the scrutinee is a `List(Int)`, so `x`
+   lands at sort OTHER.  The measure equation `allpos(Cons(x, rest)) <=> x > 0 and
+   allpos(rest)` then puts an OTHER-sorted `x` where the arm declared `Int`, and
+   `_instantiate`'s sort guard DROPS it — so `x > 0` never reaches the solver and
+   `head`'s postcondition `{v : Int | v > 0}` goes UNPROVED.  The gap is the SOUND
+   direction (a dropped fact, never a false one): before the fix this file proves
+   short, after it proves in full, and the count is the reading on the thermometer.
+
+   The fix is the ADT analog of the RTuple fix a later version made: the scrutinee has
+   already been synthesised and now CARRIES its monotype, so `_bind_pattern` unifies
+   the pattern's type against `List(Int)` and `x` is pinned to `Int` — no measure is
+   trusted, no field sort is guessed, the scrutinee's own type says `a := Int`.
+
+   It RUNS: head(Cons(5, Cons(3, Nil))) = 5, and 100 / 5 = 20. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure allpos(xs : List(Int)) : Bool =
+  match xs with
+  | Nil           => true
+  | Cons(x, rest) => x > 0 and allpos(rest)
+  end
+
+fn head(xs : {v : List(Int) | allpos(v)}) : {v : Int | v > 0} =
+  match xs with
+  | Nil           => 1
+  | Cons(x, rest) => x
+  end
+
+fn main(io : IO) : IO =
+  let x = head(Cons(5, Cons(3, Nil))) in
+  print(io, show(100 / x))

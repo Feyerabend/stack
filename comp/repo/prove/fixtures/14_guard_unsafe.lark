@@ -1,0 +1,36 @@
+module GuardUnsafe
+
+(* THE DEEPER BUG, AND THERE IS NOT A FLOAT IN SIGHT.
+
+   Found while fixing 13_float_unsafe.lark — and it is the more serious of the two,
+   because it needs nothing exotic.  Both `if` sites in `refine.py` used to read
+
+     cf = formula_opt(c, env) or Top()
+
+   and that `or Top()` is a false proof with a fuse on it.  `formula_opt` returns None
+   for "I cannot express this condition."  The code turned that into `true`, and then
+   the else branch assumed `not true` — i.e. **FALSE** — and from false, every
+   obligation in that branch follows.
+
+   The condition below is not strange.  It is `x * y > 0`: merely NON-LINEAR, which is
+   the ordinary, everyday way out of a linear-arithmetic fragment.  The checker read it
+   as `true`, negated it to `false`, and proved a division by zero.  Any unreadable
+   guard would have done: a Float compare, a String compare, a call through a local
+   binding.
+
+   THE RULE, and it is the first version's rule one level up from the solver: *"I could not translate
+   this"* IS NOT *"this is true."*  A condition the logic cannot express constrains
+   NOTHING, so NEITHER branch may learn anything from it — not the positive, and above
+   all not the negation.  The cost is proofs; the alternative was a lie.  the first version made every
+   exhausted budget in the solver resolve toward "cannot prove"; this makes every
+   untranslatable guard in the checker do the same.
+
+   Expected: 1 of 2 unproved.  `d` really can be zero, and now the checker says so. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn g(x : Int, y : Int, d : Int) : Int =
+  if x * y > 0 then 0 else div(100, d)
+
+fn main(io : IO) : IO =
+  print(io, show(g(1, 0, 0)))

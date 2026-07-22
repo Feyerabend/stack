@@ -1,0 +1,29 @@
+module MinimumRedef
+
+(* THE SOUNDNESS GUARD OF THE min/max RUNG — `16_axiom`'s rule, re-run for `min`.
+
+   An axiom is about a FUNCTION, not about a NAME.  `min`'s three facts are true of
+   the BUILTIN, because the builtin returns the smaller argument.  A program is free to
+   declare a function it also calls `min`, and then the symbol `min` in a VC is THAT
+   one — so asserting the builtin's axiom about it is a false proof, and it would be a
+   bad one: this `min` is the SUM, and `min(1, 1)` is `2`, which is not `<= 1`.
+
+   `Refiner.__init__` intersects `PRIMITIVE_AXIOMS` with the names the program leaves
+   alone, so a declared `min` DROPS the axiom.  `min` is then uninterpreted — the
+   program's own function, with no contract to read off — and `bad`'s return obligation
+   `min(a, b) <= a` is unprovable, which is the true answer.  Were the axiom asserted
+   anyway, the checker would prove `bad` returns something `<= a` when it returns `a + b`.
+
+   This file is the reason the axiom lives in `PRIMITIVE_AXIOMS` (one auditable table,
+   guarded once in `__init__`) rather than being wired in ad hoc at the min/max sites:
+   the guard is a property of every primitive axiom, and there is exactly one of it.
+
+   Expected: 1 of 1 obligations unproved — the axiom is correctly withheld. *)
+
+fn min(a : Int, b : Int) : Int = a + b
+
+fn bad(a : Int, b : Int) : {v : Int | v <= a} =
+  min(a, b)
+
+fn main(io : IO) : IO =
+  print(io, show(bad(1, 1)))

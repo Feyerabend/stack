@@ -1,0 +1,57 @@
+module BoolMeasureSafe
+
+(* a BOOL-VALUED measure, and the one place in the solver it needed.
+
+   `len` returns an Int, and an Int measure hangs on `==`: `len(Cons(x, xs)) == 1 +
+   len(xs)` is a term equated to a term, and congruence closure was already built to
+   decide those.  `pos` returns a Bool, and a Bool measure is not an equation but a
+   PROPOSITION — `pos(t)` is either asserted or denied, there is no `==` to hang it
+   on.  So its arm is spelled as an EQUIVALENCE, two implications (`_instantiate`),
+   and the atom it turns on is `Atom(pos(...))`.
+
+   That atom is the whole rung, and the DESTRUCTING half is where it earns its keep.
+   `root` knows `pos(t)` from its contract and learns `t == Node(l, x, r)` from the
+   pattern; the two are different terms, equal only by CONGRUENCE, and the fact it
+   wants — `x > 0` — arrives only if the atom `pos(t)` can be carried across that
+   equality to `pos(Node(l, x, r))` and there resolved through the equivalence to
+   `true`.  a later version never had to: no Int measure ever produced a `true`/`false`, so the
+   two Bool literals were never in the closure and never asserted DISTINCT.  A Bool
+   measure produces them, and the fix is one line in `Theory.consistent` — the
+   `BoolLit` an atom is bridged to must itself ENTER the closure, or `true` and
+   `false` collapse and the atom decides nothing.
+
+   The Tree is MONOMORPHIC (`Node of Tree, Int, Tree`), so the destructured `x` is
+   Int by construction — this file needs nothing from the polymorphic field-sort gap,
+   which is a separate matter left for later.
+
+   `root` owes two obligations: the 'Leaf' arm returns `1` against `{v | v > 0}`, and
+   the 'Node' arm returns `x` and must prove `x > 0` — provable ONLY from `pos(t)`.
+   `main` divides by the root of a tree it built, and the division `100 / root(...)`
+   is safe BECAUSE the result is positive.
+
+   Its mutant, 23_boolmeasure_unsafe.lark, drops the `pos` precondition and passes a
+   tree with a non-positive root: the obligation goes UNPROVED, and were it admitted,
+   `main` would divide 100 by a number that is not positive.
+
+   And it RUNS: a measure is ghost, so `pos` is a name the CEK machine never sees.
+
+   Expected output:
+     20 *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure pos(t : Tree) : Bool =
+  match t with
+  | Leaf           => true
+  | Node(l, x, r)  => x > 0 and pos(l) and pos(r)
+  end
+
+fn root(t : {v : Tree | pos(v)}) : {v : Int | v > 0} =
+  match t with
+  | Leaf          => 1
+  | Node(l, x, r) => x
+  end
+
+fn main(io : IO) : IO =
+  let x = root(Node(Leaf, 5, Leaf)) in
+  print(io, show(100 / x))

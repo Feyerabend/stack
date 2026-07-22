@@ -1,0 +1,28 @@
+module MeasureFragment
+
+(* An arm body outside the decidable fragment.
+
+   `len(rest) * len(rest)` is a perfectly good Lark expression and a perfectly good
+   integer.  It is not a LINEAR one, and linear integer arithmetic is the theory the
+   solver decides (pred.is_linear is the fragment's boundary; the refinement notes says that
+   when we reach past it we stop rather than improvise).
+
+   The translation of a measure's arm is therefore STRICT, exactly as the
+   translation of a predicate the programmer wrote is strict.  The lenient mode —
+   "not expressible, so no fact" — is for expressions the checker went LOOKING at;
+   it must never be applied to something the user declared, because the result would
+   be a measure silently weakened to nothing, and a checker that says "proved" about
+   a symbol it never modelled.
+
+   Rejected: not expressible in the predicate language. *)
+
+type List a = | Nil | Cons of a, List(a)
+
+measure sq(xs : List(Int)) : Int =
+  match xs with
+  | Nil           => 0
+  | Cons(_, rest) => sq(rest) * sq(rest)
+  end
+
+fn zero(xs : List(Int)) : {v : Int | v == 0} =
+  0

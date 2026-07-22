@@ -1,0 +1,478 @@
+(* emit_c.lark — Lark's C-AST emitter, written in Lark.
+   (the emit half of true self-hosting.)
+
+   Port of oracle/emit_c_ast.py: traverse a program's AST and print a C source
+   file that defines `LkProg lk_program` (plus every static LkExpr/LkPat/LkDecl
+   node it references), compilable together with cek.c/larkrun.c into a binary.
+
+   Design notes
+   ────────────
+   • This is a COMPONENT.  It does not redefine the AST (Expr/Val/Pat/Arm/Param/
+     Prog/Decl/TyBody/Variant/Ty) — those come from parse.lark.  As with the parser and evaluator,
+     the differential harness assembles the pipeline by CONCATENATION (lex +
+     parse + emit_c + a generated main) under one module, so it does NOT
+     type-check standalone.  Run path: `python3 tests/emit_c_difftest.py`.
+   • emit_c IGNORES types.  The oracle emits from infer.py's *typed* AST, but
+     emit_c_ast.py never reads a node's inferred type (only its structure, names
+     and literal values), and the typed AST is a 1:1 structural copy of the
+     syntactic one (verified against infer.py).  So this port emits straight
+     from parse.lark's `Prog` — infer.lark is NOT on the emitter's critical path.  Traits
+     carry no runtime representation, so a `trait` decl emits nothing (matching
+     infer.py, which drops trait decls from the typed program).
+   • PURE, no mutation.  The Python Emitter mutates four counters (_ec/_pc/_dc/
+     _ac) and appends to a line buffer.  Here both live in a threaded `Emit`
+     value: the four counters + the emitted lines, newest-first (O(1) prepend;
+     reversed once at the end).  Every emit* function returns (result, Emit).
+   • COUNTER/LINE ORDER is the whole game — it must match the oracle byte for
+     byte.  Python allocates a node's C name at function ENTRY (pre-order) but
+     appends its line only AFTER its children (post-order).  So each emitExpr/
+     emitPat here allocates `name` first (freshE/freshP), threads the children,
+     then emits its own line last.  The `id()` memo in the oracle never fires on
+     a tree (no shared subtrees), so it is dropped.
+   • MULTI-PARAM desugaring has TWO shapes that number nodes differently, both
+     reproduced faithfully: a function/impl-method with n>1 params desugars via
+     `ecWrap` (nested single-param `Lambda` nodes, each numbered before its body
+     — the _emit_fn_decl path), whereas a SOURCE multi-param lambda numbers its
+     body before the wrapper lambdas (the emit_expr TLambda loop, ecLamInner).
+   • The one runtime touch: `float_to_bits : Float -> Int` (added to cek.py/.c +
+     infer.py alongside this module) yields a FLOAT literal's IEEE-754 f32 bit
+     pattern for `LIT_FLOAT`.  FLOAT literals are non-negative, so the pattern is
+     always < 2^31 (C int32 == Python unsigned), keeping runtime parity. *)
+
+module EmitC
+
+(* ── Emitter state ────────────────────────────────────────────────────────── *)
+
+(* counters: expr, pat, decl, arr ; then the emitted lines, newest-first. *)
+type Emit = | Emit of Int, Int, Int, Int, List(String)
+
+(* Emit is threaded linearly, but the affine checker sums uses across match
+   arms / if-branches (a known wart of the language); mark it Copy so reuse per-arm is legal.
+   Copy is name-only in infer, so this is free — mirrors parse.lark's AST types. *)
+impl Copy for Emit = {}
+
+fn freshE(em : Emit) : (String, Emit) =
+  match em with | Emit(ec, pc, dc, ac, ls) => ("_e" + int_to_string(ec), Emit(ec + 1, pc, dc, ac, ls)) end
+
+fn freshP(em : Emit) : (String, Emit) =
+  match em with | Emit(ec, pc, dc, ac, ls) => ("_p" + int_to_string(pc), Emit(ec, pc + 1, dc, ac, ls)) end
+
+fn freshD(em : Emit) : (String, Emit) =
+  match em with | Emit(ec, pc, dc, ac, ls) => ("_d" + int_to_string(dc), Emit(ec, pc, dc + 1, ac, ls)) end
+
+fn freshA(em : Emit) : (String, Emit) =
+  match em with | Emit(ec, pc, dc, ac, ls) => ("_a" + int_to_string(ac), Emit(ec, pc, dc, ac + 1, ls)) end
+
+fn emitLine(em : Emit, s : String) : Emit =
+  match em with | Emit(ec, pc, dc, ac, ls) => Emit(ec, pc, dc, ac, Cons(s, ls)) end
+
+
+(* ── List helpers (String-monomorphic reverse/append dodge the occurs gap) ─ *)
+
+fn ecLen(xs : List(a)) : Int =
+  match xs with | Nil => 0 | Cons(_, r) => 1 + ecLen(r) end
+
+fn ecRev(xs : List(String), acc : List(String)) : List(String) =
+  match xs with | Nil => acc | Cons(x, r) => ecRev(r, Cons(x, acc)) end
+
+fn ecApp(a : List(String), b : List(String)) : List(String) =
+  match a with | Nil => b | Cons(x, r) => Cons(x, ecApp(r, b)) end
+
+(* Join one round of adjacent pairs with "\n"; an odd trailing element is
+   carried unchanged.  Repeated (ecJoinNL) this halves the list each pass, so
+   the whole join allocates O(S log N) arena bytes for S bytes of output over N
+   lines instead of the O(S N) a right-fold spends re-copying the growing
+   suffix at every step (the no-GC bump arena never frees).  Output-identical:
+   string concatenation is associative, and every "\n" still lands between the
+   same two originally-adjacent lines. *)
+fn ecJoinPairs(ls : List(String)) : List(String) =
+  match ls with
+  | Nil                    => Nil
+  | Cons(a, Nil)           => Cons(a, Nil)
+  | Cons(a, Cons(b, rest)) => Cons(a + "\n" + b, ecJoinPairs(rest))
+  end
+
+fn ecJoinNL(ls : List(String)) : String =
+  match ls with
+  | Nil          => ""
+  | Cons(l, Nil) => l
+  | _            => ecJoinNL(ecJoinPairs(ls))
+  end
+
+(* "&n0, &n1, …" — pointer-array element list *)
+fn ecAmp(ns : List(String)) : String =
+  match ns with
+  | Nil           => ""
+  | Cons(n, Nil)  => "&" + n
+  | Cons(n, rest) => "&" + n + ", " + ecAmp(rest)
+  end
+
+(* "n0, n1, …" — value list (LkArm[] / LkMethod[]) *)
+fn ecComma(ns : List(String)) : String =
+  match ns with
+  | Nil           => ""
+  | Cons(n, Nil)  => n
+  | Cons(n, rest) => n + ", " + ecComma(rest)
+  end
+
+fn emitPtrArray(em : Emit, elemTy : String, names : List(String)) : (String, Emit) =
+  match freshA(em) with
+  | (arr, em1) => (arr, emitLine(em1, "static const " + elemTy + "* " + arr + "[] = { " + ecAmp(names) + " };"))
+  end
+
+
+(* ── Hex + C string escaping (mirror emit_c_ast._c_str / _lit_init) ──────────── *)
+
+fn ecHexDigit(d : Int, upper : Bool) : String =
+  if d < 10 then char_to_string(48 + d)
+  else if upper then char_to_string(55 + d) else char_to_string(87 + d)
+
+(* Lark has no `%` operator, so remainder is n - (n/16)*16 (n >= 0 here). *)
+fn ecHexRaw(n : Int, upper : Bool) : String =
+  if n < 16 then ecHexDigit(n, upper)
+  else ecHexRaw(n / 16, upper) + ecHexDigit(n - (n / 16) * 16, upper)
+
+fn ecPadZero(s : String, width : Int) : String =
+  if string_length(s) >= width then s else ecPadZero("0" + s, width)
+
+fn ecHexW(n : Int, width : Int, upper : Bool) : String = ecPadZero(ecHexRaw(n, upper), width)
+
+fn ecCChar(c : Int) : String =
+  if c == 92 then "\\\\"            (* backslash  → \\   *)
+  else if c == 34 then "\\\""       (* quote      → \"   *)
+  else if c == 10 then "\\n"
+  else if c == 13 then "\\r"
+  else if c == 9  then "\\t"
+  else if c < 32  then "\\x" + ecHexW(c, 2, false)   (* control → \xHH (lower) *)
+  else char_to_string(c)
+
+fn ecCStrGo(s : String, i : Int, n : Int, acc : String) : String =
+  if i >= n then acc
+  else ecCStrGo(s, i + 1, n, acc + ecCChar(string_index(s, i)))
+
+fn ecCStr(s : String) : String = "\"" + ecCStrGo(s, 0, string_length(s), "") + "\""
+
+fn ecFloatBits(txt : String) : Int =
+  match string_to_float(txt) with | Ok(f) => float_to_bits(f) | Err(_) => 0 end
+
+fn ecLitInit(v : Val) : String =
+  match v with
+  | VUnit     => "LIT_UNIT"
+  | VBool(b)  => "LIT_BOOL, .b=" + (if b then "1" else "0")
+  | VInt(t)   => "LIT_INT, .i=" + t                              (* lexeme round-trips str(int) *)
+  | VFloat(t) => "LIT_FLOAT, .f=0x" + ecHexW(ecFloatBits(t), 8, true) + "u"
+  | VStr(s)   => "LIT_STR, .s=" + ecCStr(s)
+  end
+
+
+(* ── Misc AST helpers ─────────────────────────────────────────────────────── *)
+
+fn ecParamName(p : Param) : String = match p with | Param(n, _) => n end
+
+(* Desugar [p1..pn] into nested single-param Lambdas (innermost = pn), the
+   _wrap_lambdas path: Lambda([p1], Lambda([p2], … body)). *)
+fn ecWrap(params : List(Param), body : Expr) : Expr =
+  match params with
+  | Nil          => body
+  | Cons(p, rest) => Lambda(Cons(p, Nil), ecWrap(rest, body))
+  end
+
+fn ecForType(forty : Ty) : String =
+  match forty with | TName(n) => n | TApply(n, _) => n | _ => "?" end
+
+fn ecVariantInit(vv : Variant) : String =
+  match vv with | Variant(n, tys) => "{ " + ecCStr(n) + ", " + int_to_string(ecLen(tys)) + " }" end
+
+fn ecVariantInits(vs : List(Variant)) : String =
+  match vs with
+  | Nil           => ""
+  | Cons(v, Nil)  => ecVariantInit(v)
+  | Cons(v, rest) => ecVariantInit(v) + ", " + ecVariantInits(rest)
+  end
+
+
+(* ── Expressions ──────────────────────────────────────────────────────────── *)
+
+fn emitExprList(em : Emit, es : List(Expr)) : (List(String), Emit) =
+  match es with
+  | Nil          => (Nil, em)
+  | Cons(e, rest) =>
+      match emitExpr(em, e) with
+      | (n, em1) =>
+          match emitExprList(em1, rest) with
+          | (ns, em2) => (Cons(n, ns), em2)
+          end
+      end
+  end
+
+(* Each arm: emit pat, emit body, then an LkArm _a; returns the arm names. *)
+fn emitArms(em : Emit, arms : List(Arm)) : (List(String), Emit) =
+  match arms with
+  | Nil => (Nil, em)
+  | Cons(Arm(pat, body), rest) =>
+      match emitPat(em, pat) with
+      | (pn, em1) =>
+          match emitExpr(em1, body) with
+          | (bn, em2) =>
+              match freshA(em2) with
+              | (an, em3) =>
+                  let em4 = emitLine(em3, "static const LkArm " + an + " = { &" + pn + ", &" + bn + " };") in
+                  match emitArms(em4, rest) with
+                  | (ns, em5) => (Cons(an, ns), em5)
+                  end
+              end
+          end
+      end
+  end
+
+(* Wrap `curr` in one EXPR_LAMBDA per remaining param, LAST param numbered first
+   (reversed(params[1:]) in the oracle). *)
+fn ecLamInner(em : Emit, tail : List(Param), curr : String) : (String, Emit) =
+  match tail with
+  | Nil => (curr, em)
+  | Cons(p, rest) =>
+      match ecLamInner(em, rest, curr) with
+      | (curr2, em1) =>
+          match freshE(em1) with
+          | (inner, em2) =>
+              (inner, emitLine(em2, "static const LkExpr " + inner + " = { .kind=EXPR_LAMBDA, .lam={" + ecCStr(ecParamName(p)) + ", &" + curr2 + "} };"))
+          end
+      end
+  end
+
+fn emitExpr(em : Emit, node : Expr) : (String, Emit) =
+  match freshE(em) with
+  | (name, em0) =>
+      match node with
+      | Lit(v) => (name, emitLine(em0, "static const LkExpr " + name + " = { .kind=EXPR_LIT, .lit={" + ecLitInit(v) + "} };"))
+      | Var(n) => (name, emitLine(em0, "static const LkExpr " + name + " = { .kind=EXPR_VAR, .name=" + ecCStr(n) + " };"))
+      | Con(n) => (name, emitLine(em0, "static const LkExpr " + name + " = { .kind=EXPR_CON, .name=" + ecCStr(n) + " };"))
+      | TupleExpr(es) =>
+          match es with
+          | Nil => (name, emitLine(em0, "static const LkExpr " + name + " = { .kind=EXPR_TUPLE, .tup={NULL, 0} };"))
+          | Cons(_, _) =>
+              match emitExprList(em0, es) with
+              | (ns, em1) =>
+                  match emitPtrArray(em1, "LkExpr", ns) with
+                  | (arr, em2) => (name, emitLine(em2, "static const LkExpr " + name + " = { .kind=EXPR_TUPLE, .tup={" + arr + ", " + int_to_string(ecLen(es)) + "} };"))
+                  end
+              end
+          end
+      | Apply(fe, args) =>
+          match emitExpr(em0, fe) with
+          | (fnn, em1) =>
+              match emitExprList(em1, args) with
+              | (argns, em2) =>
+                  match emitPtrArray(em2, "LkExpr", argns) with
+                  | (arr, em3) => (name, emitLine(em3, "static const LkExpr " + name + " = { .kind=EXPR_APPLY, .app={&" + fnn + ", " + arr + ", " + int_to_string(ecLen(args)) + "} };"))
+                  end
+              end
+          end
+      | BinOp(op, l, r) =>
+          match emitExpr(em0, l) with
+          | (ln, em1) =>
+              match emitExpr(em1, r) with
+              | (rn, em2) => (name, emitLine(em2, "static const LkExpr " + name + " = { .kind=EXPR_BINOP, .binop={" + ecCStr(op) + ", &" + ln + ", &" + rn + "} };"))
+              end
+          end
+      | UnaryOp(op, x) =>
+          match emitExpr(em0, x) with
+          | (xn, em1) => (name, emitLine(em1, "static const LkExpr " + name + " = { .kind=EXPR_UNARY, .unary={" + ecCStr(op) + ", &" + xn + "} };"))
+          end
+      | LetExpr(vn0, _, val, body) =>
+          match emitExpr(em0, val) with
+          | (vn, em1) =>
+              match emitExpr(em1, body) with
+              | (bn, em2) => (name, emitLine(em2, "static const LkExpr " + name + " = { .kind=EXPR_LET, .let={" + ecCStr(vn0) + ", &" + vn + ", &" + bn + "} };"))
+              end
+          end
+      | IfExpr(c, t, e) =>
+          match emitExpr(em0, c) with
+          | (cn, em1) =>
+              match emitExpr(em1, t) with
+              | (tn, em2) =>
+                  match emitExpr(em2, e) with
+                  | (en, em3) => (name, emitLine(em3, "static const LkExpr " + name + " = { .kind=EXPR_IF, .if_={&" + cn + ", &" + tn + ", &" + en + "} };"))
+                  end
+              end
+          end
+      | MatchExpr(scrut, arms) =>
+          match emitExpr(em0, scrut) with
+          | (sn, em1) =>
+              match emitArms(em1, arms) with
+              | (armns, em2) =>
+                  match freshA(em2) with
+                  | (arr, em3) =>
+                      let em4 = emitLine(em3, "static const LkArm " + arr + "[] = { " + ecComma(armns) + " };") in
+                      (name, emitLine(em4, "static const LkExpr " + name + " = { .kind=EXPR_MATCH, .match={&" + sn + ", " + arr + ", " + int_to_string(ecLen(arms)) + "} };"))
+                  end
+              end
+          end
+      | Lambda(ps, b) =>
+          match emitExpr(em0, b) with           (* body numbered FIRST (source-lambda shape) *)
+          | (bn, em1) =>
+              match ps with
+              | Nil => (name, emitLine(em1, "static const LkExpr " + name + " = { .kind=EXPR_LAMBDA, .lam={\"?\", &" + bn + "} };"))
+              | Cons(p0, ptail) =>
+                  match ecLamInner(em1, ptail, bn) with
+                  | (curr, em2) => (name, emitLine(em2, "static const LkExpr " + name + " = { .kind=EXPR_LAMBDA, .lam={" + ecCStr(ecParamName(p0)) + ", &" + curr + "} };"))
+                  end
+              end
+          end
+      end
+  end
+
+
+(* ── Patterns ─────────────────────────────────────────────────────────────── *)
+
+fn emitPatList(em : Emit, ps : List(Pat)) : (List(String), Emit) =
+  match ps with
+  | Nil          => (Nil, em)
+  | Cons(p, rest) =>
+      match emitPat(em, p) with
+      | (n, em1) =>
+          match emitPatList(em1, rest) with
+          | (ns, em2) => (Cons(n, ns), em2)
+          end
+      end
+  end
+
+fn emitPat(em : Emit, node : Pat) : (String, Emit) =
+  match freshP(em) with
+  | (name, em0) =>
+      match node with
+      | PWild   => (name, emitLine(em0, "static const LkPat " + name + " = { .kind=PAT_WILD };"))
+      | PVar(n) => (name, emitLine(em0, "static const LkPat " + name + " = { .kind=PAT_VAR, .var=" + ecCStr(n) + " };"))
+      | PLit(v) => (name, emitLine(em0, "static const LkPat " + name + " = { .kind=PAT_LIT, .lit={" + ecLitInit(v) + "} };"))
+      | PCon(n, args) =>
+          match args with
+          | Nil => (name, emitLine(em0, "static const LkPat " + name + " = { .kind=PAT_CON, .con={" + ecCStr(n) + ", NULL, 0} };"))
+          | Cons(_, _) =>
+              match emitPatList(em0, args) with
+              | (ns, em1) =>
+                  match emitPtrArray(em1, "LkPat", ns) with
+                  | (arr, em2) => (name, emitLine(em2, "static const LkPat " + name + " = { .kind=PAT_CON, .con={" + ecCStr(n) + ", " + arr + ", " + int_to_string(ecLen(args)) + "} };"))
+                  end
+              end
+          end
+      | PTuple(es) =>
+          match emitPatList(em0, es) with
+          | (ns, em1) =>
+              match emitPtrArray(em1, "LkPat", ns) with
+              | (arr, em2) => (name, emitLine(em2, "static const LkPat " + name + " = { .kind=PAT_TUPLE, .tup={" + arr + ", " + int_to_string(ecLen(es)) + "} };"))
+              end
+          end
+      end
+  end
+
+
+(* ── Declarations ─────────────────────────────────────────────────────────── *)
+
+(* Returns the LkMethod initialiser strings (skips a no-param method, like the
+   oracle's `if not params: continue`). *)
+fn emitImplMethods(em : Emit, methods : List(IMethod)) : (List(String), Emit) =
+  match methods with
+  | Nil => (Nil, em)
+  | Cons(IMethod(mname, params, body), rest) =>
+      match params with
+      | Nil => emitImplMethods(em, rest)
+      | Cons(p0, ptail) =>
+          match emitExpr(em, ecWrap(ptail, body)) with
+          | (bn, em1) =>
+              match emitImplMethods(em1, rest) with
+              | (inis, em2) => (Cons("{ " + ecCStr(mname) + ", " + ecCStr(ecParamName(p0)) + ", &" + bn + " }", inis), em2)
+              end
+          end
+      end
+  end
+
+fn emitDecl(em : Emit, d : Decl) : (List(String), Emit) =
+  match d with
+  | FnDecl(_, fnName, _, params, _, body) =>
+      match params with
+      | Nil => (Nil, em)                                  (* the oracle raises; unreachable on valid input *)
+      | Cons(p0, rest) =>
+          match emitExpr(em, ecWrap(rest, body)) with
+          | (bn, em1) =>
+              match freshD(em1) with
+              | (dn, em2) => (Cons(dn, Nil), emitLine(em2, "static const LkDecl " + dn + " = { .kind=DECL_FN, .name=" + ecCStr(fnName) + ", .fn={" + ecCStr(ecParamName(p0)) + ", &" + bn + "} };"))
+              end
+          end
+      end
+  | LetDecl(_, name, _, val) =>
+      match emitExpr(em, val) with
+      | (vn, em1) =>
+          match freshD(em1) with
+          | (dn, em2) => (Cons(dn, Nil), emitLine(em2, "static const LkDecl " + dn + " = { .kind=DECL_LET, .name=" + ecCStr(name) + ", .let_val=&" + vn + " };"))
+          end
+      end
+  | TypeDecl(_, name, _, tbody) =>
+      match tbody with
+      | Alias(_) => (Nil, em)                             (* type alias — no runtime representation *)
+      | Variants(vs) =>
+          match freshA(em) with
+          | (varr, em1) =>
+              let em2 = emitLine(em1, "static const LkVariant " + varr + "[] = { " + ecVariantInits(vs) + " };") in
+              match freshD(em2) with
+              | (dn, em3) => (Cons(dn, Nil), emitLine(em3, "static const LkDecl " + dn + " = { .kind=DECL_TYPE, .name=" + ecCStr(name) + ", .type_={" + varr + ", " + int_to_string(ecLen(vs)) + "} };"))
+              end
+          end
+      end
+  | TraitDecl(_, _, _, _) => (Nil, em)                    (* traits carry no runtime rep (dropped, as in infer.py) *)
+  | ImplDecl(traitName, _, forTy, methods) =>
+      match emitImplMethods(em, methods) with
+      | (inits, em1) =>
+          match inits with
+          | Nil => (Nil, em1)
+          | Cons(_, _) =>
+              match freshA(em1) with
+              | (marr, em2) =>
+                  let em3 = emitLine(em2, "static const LkMethod " + marr + "[] = { " + ecComma(inits) + " };") in
+                  match freshD(em3) with
+                  | (dn, em4) => (Cons(dn, Nil), emitLine(em4, "static const LkDecl " + dn + " = { .kind=DECL_IMPL, .name=" + ecCStr(ecForType(forTy)) + ", .impl={" + ecCStr(traitName) + ", " + marr + ", " + int_to_string(ecLen(inits)) + "} };"))
+                  end
+              end
+          end
+      end
+  end
+
+fn emitDecls(em : Emit, decls : List(Decl)) : (List(String), Emit) =
+  match decls with
+  | Nil => (Nil, em)
+  | Cons(d, rest) =>
+      match emitDecl(em, d) with
+      | (ns, em1) =>
+          match emitDecls(em1, rest) with
+          | (ns2, em2) => (ecApp(ns, ns2), em2)
+          end
+      end
+  end
+
+
+(* ── Top-level render ─────────────────────────────────────────────────────── *)
+
+fn emitProgram(basename : String, prog : Prog) : String =
+  match prog with
+  | Prog(_, _, decls) =>
+      match emitDecls(Emit(0, 0, 0, 0, Nil), decls) with
+      | (declNames, Emit(_, _, _, _, revlines)) =>
+          let hdr =
+            Cons("/* Auto-generated from " + basename + " */",
+            Cons("/* Do not edit — regenerate with emit_c_ast.py */",
+            Cons("",
+            Cons("#include \"cek.h\"",
+            Cons("#include <stddef.h>", Nil))))) in
+          let tail =
+            Cons("",
+            Cons("static const LkDecl* _prog_decls[] = { " + ecAmp(declNames) + " };",
+            Cons("",
+            Cons("LkProg lk_program = { .decls = _prog_decls, .n_decls = " + int_to_string(ecLen(declNames)) + " };", Nil)))) in
+          ecJoinNL(ecApp(hdr, ecApp(ecRev(revlines, Nil), tail)))
+      end
+  end
+
+
+(* ── Smoke driver (stripped at MAIN_MARKER by the differential harness) ─────── *)
+
+fn main(io : IO) : IO =
+  print(io, "emit_c.lark is a component — run tests/emit_c_difftest.py")

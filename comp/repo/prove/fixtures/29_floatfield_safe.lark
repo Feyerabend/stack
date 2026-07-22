@@ -1,0 +1,32 @@
+module FloatFieldSafe
+
+(* THE FOURTH ROAD INTO A FLOAT, and the control for its mutant.  a later version paved three
+   roads into a Float's type — a Float PARAMETER (its type says so), a `float_sqrt`
+   RESULT (its declaration says so), and a Float LITERAL (19_floatlit).  A Float
+   carried in a CONSTRUCTOR FIELD is a fourth, and until this pair nothing in the
+   suite drove it: no type in prove/ had a Float field at all.
+
+   The point this file makes is 13_float_safe's, one road along: silence about a Float
+   costs a program NOTHING it was entitled to.  `Box` carries a Float `f` and an Int
+   `n` side by side.  The division is about `n`, an Int, and it is discharged from an
+   Int guard exactly as if the Float were not there — because to the checker it is not.
+
+   The mutant is one field away (29_floatfield_unsafe): move the guard from the Int
+   field to the Float field, and the guard stops speaking.  That is the whole rung —
+   a Float reaches the logic through a constructor exactly as it reaches it anywhere
+   else, which is to say NOT AT ALL, and the guard's proof stands or falls on which
+   field it reads.
+
+   Expected: proved 2, runs → 25. *)
+
+type Box = | B of Float, Int
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn get(box : Box) : Int =
+  match box with
+  | B(f, n) => if n != 0 then div(100, n) else 0
+  end
+
+fn main(io : IO) : IO =
+  print(io, show(get(B(1.5, 4))))

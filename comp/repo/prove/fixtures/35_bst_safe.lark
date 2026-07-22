@@ -1,0 +1,98 @@
+module BstSafe
+
+(* the BINARY SEARCH TREE invariant, the piece the whole PROVE
+   axis was pointed at.  It is ASSEMBLY: it introduces no new checker mechanism.  It
+   is Part B's nested match (now TWO deep, on both children), a later version's Bool measure, and
+   one thing Part B quietly already allowed — a measure body that MENTIONS ANOTHER
+   measure (`bst` calls `minv`/`maxv` on a child).
+
+   `minv`/`maxv` are a tree's leftmost / rightmost value.  A max looks at the RIGHT
+   child's shape — its own value if the right child is a Leaf, the right subtree's max
+   otherwise — which is exactly why a flat measure could never write it and Part B is
+   the enabling rung.  Their `Leaf` arm is a SENTINEL (`0`); it is never consulted,
+   because `bst` only asks for `maxv(l)`/`minv(r)` inside the arm where that child is
+   already known to be a `Node`.
+
+       maxv(Node(l, v, Leaf))              == v
+       maxv(Node(l, v, Node(rl, rv, rr)))  == maxv(Node(rl, rv, rr))
+       minv(Node(Leaf, v, r))              == v
+       minv(Node(Node(ll, lv, lr), v, r))  == minv(Node(ll, lv, lr))
+
+   `bst` matches BOTH children (a nested match, two deep) and at each leaf combines the
+   ordering facts with the recursive calls:
+
+       bst(Leaf)                              <=> true
+       bst(Node(Leaf,          v, Leaf))      <=> true
+       bst(Node(Leaf,          v, Node r…))   <=> v < minv(r) and bst(r)
+       bst(Node(Node l…,       v, Leaf))      <=> maxv(l) < v and bst(l)
+       bst(Node(Node l…,       v, Node r…))   <=> maxv(l) < v and v < minv(r)
+                                                   and bst(l) and bst(r)
+
+   THE DIRECTION THIS PROVES is BUILDING: that a tree the program CONSTRUCTS satisfies
+   `bst`.  The nested equations fire at the concrete subfields of the built tree, and
+   the cross-measure `maxv(l)`/`minv(r)` fire because `l`/`r` are physical subterms of
+   it — the single-pass closure reaches them for free.  Over an OPAQUE tree the guards
+   decline (Part B's sound silence), so a consumer cannot READ the order back out of an
+   abstract `bst(t)`; that destructing direction needs `minv`/`maxv` to carry declared
+   lower/upper-bound invariants, a separate and larger rung, and is left open on
+   purpose (documented in the refinement notes beside the other boundaries).
+
+   `use` requires a `bst`, and `main` builds one and passes it — the whole obligation
+   is that the built tree really is ordered.  And it RUNS: `bst`/`minv`/`maxv` are
+   ghost, names the CEK machine never sees; `use` returns an ordinary Int.
+
+   Expected output:
+     3 *)
+
+type Tree = | Leaf | Node of Tree, Int, Tree
+
+measure maxv(t : Tree) : Int =
+  match t with
+  | Leaf => 0
+  | Node(l, v, r) =>
+      match r with
+      | Leaf             => v
+      | Node(rl, rv, rr) => maxv(r)
+      end
+  end
+
+measure minv(t : Tree) : Int =
+  match t with
+  | Leaf => 0
+  | Node(l, v, r) =>
+      match l with
+      | Leaf             => v
+      | Node(ll, lv, lr) => minv(l)
+      end
+  end
+
+measure bst(t : Tree) : Bool =
+  match t with
+  | Leaf => true
+  | Node(l, v, r) =>
+      match l with
+      | Leaf =>
+          match r with
+          | Leaf             => true
+          | Node(rl, rv, rr) => v < minv(r) and bst(r)
+          end
+      | Node(ll, lv, lr) =>
+          match r with
+          | Leaf             => maxv(l) < v and bst(l)
+          | Node(rl, rv, rr) => maxv(l) < v and v < minv(r) and bst(l) and bst(r)
+          end
+      end
+  end
+
+fn use(t : {v : Tree | bst(v)}) : Int =
+  match t with
+  | Leaf          => 0
+  | Node(l, v, r) => v
+  end
+
+fn main(io : IO) : IO =
+  let ordered =
+    Node(Node(Leaf, 1, Node(Leaf, 2, Leaf)),
+         3,
+         Node(Node(Leaf, 4, Leaf), 5, Node(Leaf, 6, Leaf))) in
+  print(io, show(use(ordered)))

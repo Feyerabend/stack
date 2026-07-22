@@ -1,0 +1,45 @@
+module EqSeamFun
+
+(* THE SEAM AT ITS SHARPEST — `==` on a FUNCTION.  Everything in 33_eqseam_string holds
+   here, and one thing more: for closures the equality the logic grants is not merely
+   unimplemented, it is UNDECIDABLE.  There is no algorithm that decides whether two
+   functions are equal (extensional equality of functions is not computable; it is not
+   even semidecidable), so the machine's refusal is not a missing feature the way String
+   `==` is — there is nothing to implement.
+
+     HM        `g == g` type-checks: `==` is `forall a. a -> a -> Bool`, and a closure
+               is a perfectly good `a`.
+
+     the logic a closure is OTHER, congruence makes `g == g` reflexively VALID, the
+               `else` is dead, the division is proved: 2 proved.
+
+     the machine cek.py's `binop` has no arrow arm; `g == g` raises
+               `cannot apply '=='` before either branch.
+
+   So the same boundary as the String file, and the reason it deserves its own fixture:
+   it is the case where "the machine does not implement `==`" is not an accident of
+   scope but a fact of computability.  The logic's reflexivity is sound as an axiom about
+   an abstract value; it is simply not a value the machine can compare, and here it never
+   could be.  Making the runtime `==` route through structural comparison — the escape
+   hatch that would let the String file run — cannot save this one: two closures have no
+   structural equality a machine can compute.
+
+   The lesson the two seam files share: the refinement checker's `==` is the LOGIC's
+   equality (reflexive, congruent, total), not the MACHINE's (`==` is a partial operator,
+   defined on Int and Float).  Where a program compares values the machine can compare,
+   the two agree.  Where it compares Strings, they agree in RESULT (both would say two
+   equal strings are equal) but disagree in EXISTENCE (the operator is not wired up).
+   Where it compares functions, they disagree in PRINCIPLE.  A proved program is safe in
+   the checker's stated sense on all three; it is a runnable program only on the first.
+
+   Expected: proved (2).  DELIBERATELY NOT IN RUNS — running it raises
+   `cannot apply '=='`. *)
+
+fn div(a : Int, b : {v : Int | v != 0}) : Int = a / b
+
+fn f(d : Int) : Int =
+  let g = fn (x : Int) => x in
+  if g == g then 0 else div(100, d)
+
+fn main(io : IO) : IO =
+  print(io, show(f(0)))
