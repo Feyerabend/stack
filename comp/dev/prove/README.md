@@ -85,8 +85,8 @@ quantifier, no trigger, no schema: just the terms that are there. Like `08_erasu
 in `Program.decls`, so the CEK machine has never heard the name. Erasure by
 construction.
 
-The seven `11_measure_*` files are the negatives, and they are not hygiene. __A
-measure's arms become axioms__, so each of these is a soundness condition:
+The seven `11_measure_*` files are the negatives, and they are not hygiene.
+__A measure's arms become axioms__, so each of these is a soundness condition:
 
 | file | the condition |
 |------|---------------|
