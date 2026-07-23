@@ -86,4 +86,4 @@ The first part is about a self-hosting Lark: Lark compiling Lark,
 the ultimate self-test, now complete. Next come optimizations.
 They were mentioned only briefly in the book, at a theoretical level;
 here they are worked out in practice. Finally, affine and refinement
-types make their entrance in relation to proofs ..
+types make their entrance in relation to proofs. Everything lives in [comp](./comp).
